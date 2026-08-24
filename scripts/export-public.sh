@@ -94,7 +94,7 @@ while IFS= read -r -d '' entry; do
 done < <(git -C "$SOURCE" ls-tree -r -z --full-tree --format='%(objectmode)%x09%(path)' HEAD)
 
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/ownward-public-export.XXXXXX")
-ARCHIVE=$(mktemp "${TMPDIR:-/tmp}/ownward-public-export.XXXXXX.tar")
+ARCHIVE=$(mktemp "${TMPDIR:-/tmp}/ownward-public-export.XXXXXX")
 PUBLISH_WORKTREE=""
 cleanup() {
   [ -z "$PUBLISH_WORKTREE" ] || git -C "$TARGET" worktree remove --force "$PUBLISH_WORKTREE" >/dev/null 2>&1 || true
@@ -109,7 +109,7 @@ tar -xf "$ARCHIVE" -C "$STAGE"
 # this machine. --no-ignore includes dotfiles and lockfiles as well.
 while IFS= read -r marker || [ -n "$marker" ]; do
   case "$marker" in ""|'#'*) continue ;; esac
-  if rg -q -i -F --hidden --no-ignore "$marker" "$STAGE"; then
+  if rg -q -i -F --hidden --no-ignore -- "$marker" "$STAGE"; then
     echo "Public export blocked by the private denylist." >&2
     exit 66
   fi
@@ -142,14 +142,17 @@ PUBLIC_AUTHOR_NAME=${OWNWARD_PUBLIC_AUTHOR_NAME:-"Ownward contributors"}
 PUBLIC_AUTHOR_EMAIL=${OWNWARD_PUBLIC_AUTHOR_EMAIL:-"ownward@users.noreply.github.com"}
 SOURCE_SHA=$(git -C "$SOURCE" rev-parse HEAD)
 SOURCE_SHA_SHORT=$(git -C "$SOURCE" rev-parse --short HEAD)
+SOURCE_SHA_LOWER=$(printf '%s' "$SOURCE_SHA" | tr '[:upper:]' '[:lower:]')
+SOURCE_SHA_SHORT_LOWER=$(printf '%s' "$SOURCE_SHA_SHORT" | tr '[:upper:]' '[:lower:]')
 for public_text in "$MESSAGE" "$PUBLIC_AUTHOR_NAME" "$PUBLIC_AUTHOR_EMAIL"; do
-  if [[ "$public_text" == *"$SOURCE_SHA"* || "$public_text" == *"$SOURCE_SHA_SHORT"* ]]; then
+  PUBLIC_TEXT_LOWER=$(printf '%s' "$public_text" | tr '[:upper:]' '[:lower:]')
+  if [[ "$PUBLIC_TEXT_LOWER" == *"$SOURCE_SHA_LOWER"* || "$PUBLIC_TEXT_LOWER" == *"$SOURCE_SHA_SHORT_LOWER"* ]]; then
     echo "Public commit metadata must not include a private source SHA." >&2
     exit 66
   fi
   while IFS= read -r marker || [ -n "$marker" ]; do
     case "$marker" in ""|'#'*) continue ;; esac
-    if printf '%s' "$public_text" | rg -q -i -F "$marker"; then
+    if printf '%s' "$public_text" | rg -q -i -F -- "$marker"; then
       echo "Public commit metadata is blocked by the private denylist." >&2
       exit 66
     fi
