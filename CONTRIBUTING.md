@@ -10,6 +10,8 @@ Thanks for helping make AI-assisted work more durable and user-controlled.
   server, vault paths, approvals, or agent session code.
 - Read [the configuration guide](docs/configuration.md) before changing defaults,
   providers, connectors, or deployment behavior.
+- Maintainers releasing a private change to this repository should follow
+  [the public maintenance guide](docs/public-maintenance.md).
 
 ## Development setup
 
