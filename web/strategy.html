@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ownward · 策略</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23111720'/%3E%3Cpath d='M3 12 6 6l3 3 4-6' stroke='%23e4b85b' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: dark;
+  --bg-canvas: #11100e; --bg-subtle: #191715;
+  --surface-1: #1d1b18; --surface-2: #25221f; --surface-3: #2d2925;
+  --surface-hover: #2a2723;
+  --border-subtle: #332f2a; --border-default: #443f37; --border-strong: #5d564c;
+  --text-primary: #f1eee8; --text-secondary: #bdb7ad; --text-tertiary: #8c867d; --text-disabled: #69645d;
+  --text-inverse: #17140f;
+  --accent: #d2a85d; --accent-hover: #e2bc77; --accent-soft: #352b1d;
+  --success: #56c991; --success-soft: #173126;
+  --warning: #e4b85b; --warning-soft: #342b18;
+  --danger: #f0717e; --danger-soft: #351b22;
+  --core: #d2a85d; --satellite: #78a99a; --tactical: #a89ac8; --cash: #59534a;
+  --focus-ring: #e3bd78;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Monaco, monospace;
+  --shadow-popover: 0 24px 72px #00000080, 0 2px 10px #00000050;
+  --shadow-card: 0 1px 0 #ffffff08 inset, 0 12px 30px #0000001f;
+  --radius-control: 6px; --radius-row: 8px; --radius-panel: 12px; --radius-modal: 16px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { min-height: 100%; background: var(--bg-canvas); }
+body { background: radial-gradient(circle at 50% -18%, #342b1f 0, var(--bg-canvas) 39rem); color: var(--text-primary); font: 13px/1.5 var(--font-ui); padding: 28px 28px 64px; max-width: 1080px; margin: 0 auto; min-height: 100vh; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+a { color: var(--text-tertiary); text-decoration: none; }
+a:hover { color: var(--text-primary); }
+button { font-family: inherit; }
+
+.head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-bottom: 18px; border-bottom: 1px solid var(--border-subtle); }
+.brand { display: flex; align-items: center; gap: 10px; margin-right: 4px; }
+.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--border-default); border-radius: var(--radius-row); background: var(--surface-2); color: var(--accent); font-size: 17px; }
+.brand-copy { display: grid; line-height: 1.15; }
+.brand-copy a { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+.head h1 { font-size: 17px; font-weight: 650; letter-spacing: -.02em; }
+.chip { font-size: 10px; padding: 3px 9px; border-radius: 99px; border: 1px solid var(--border-default); background: #ffffff05; color: var(--text-tertiary); white-space: nowrap; }
+.head .spacer { flex: 1; }
+.head-actions { display: flex; gap: 8px; }
+.button { min-height: 32px; padding: 0 13px; border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-2); color: var(--text-secondary); font: 600 12.5px/1 var(--font-ui); cursor: pointer; transition: border-color .15s, background .15s, color .15s, transform .15s; }
+.button:hover { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text-primary); }
+.button:active { transform: translateY(1px); }
+.button.primary { background: var(--accent); border-color: var(--accent); color: var(--text-inverse); }
+.button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--text-inverse); }
+.button:disabled { opacity: .4; cursor: default; }
+.button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.sub { color: var(--text-tertiary); font-size: 11.5px; margin: 10px 0 28px 44px; min-height: 18px; }
+
+section { margin-bottom: 30px; }
+h2 { font-size: 11px; font-weight: 650; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 11px; }
+.card { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-panel); padding: 17px; }
+
+/* 结构导轨 */
+.rail-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.rail-label { width: 34px; font-size: 11px; color: var(--text-tertiary); text-align: right; flex-shrink: 0; }
+.rail { flex: 1; height: 12px; border-radius: 7px; overflow: hidden; display: flex; background: var(--surface-2); box-shadow: 0 1px 2px #0008 inset; }
+.seg { height: 100%; transition: width .4s ease; }
+.legend { display: flex; gap: 14px; margin-top: 10px; font-size: 11px; color: var(--text-secondary); flex-wrap: wrap; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: 1px; }
+.dev { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.dev span { font-size: 11px; padding: 3px 9px; border-radius: 6px; background: var(--warning-soft); color: var(--warning); font-family: var(--font-mono); }
+
+/* 行动卡 */
+.action { display: flex; gap: 12px; align-items: flex-start; background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-row); padding: 14px 15px; margin-bottom: 8px; }
+.action[data-lv="L1"] { border-left: 3px solid var(--danger); }
+.action[data-lv="L2"] { border-left: 3px solid var(--warning); }
+.action[data-lv="L3"] { border-left: 3px solid var(--border-strong); }
+.lv { font-size: 9px; font-family: var(--font-mono); padding: 1px 6px; border-radius: 4px; flex-shrink: 0; margin-top: 3px; color: var(--text-tertiary); background: var(--surface-2); }
+.action[data-lv="L1"] .lv { background: var(--danger-soft); color: var(--danger); }
+.action[data-lv="L2"] .lv { background: var(--warning-soft); color: var(--warning); }
+.action b { font-weight: 650; font-size: 13px; }
+.action p { color: var(--text-secondary); font-size: 11.5px; margin-top: 3px; }
+.action .btns { margin-left: auto; flex-shrink: 0; }
+
+/* 持仓表 */
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { font-size: 10px; color: var(--text-disabled); font-weight: 600; text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border-subtle); text-transform: uppercase; letter-spacing: .06em; }
+td { padding: 11px 10px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--surface-hover); }
+tr:last-child td { border-bottom: none; }
+.sym { font-family: var(--font-mono); font-weight: 600; }
+.layer { font-size: 9px; padding: 1px 5px; border-radius: 3px; margin-left: 6px; vertical-align: 1px; }
+.layer[data-l="satellite"] { background: rgba(228,184,91,.12); color: var(--satellite); }
+.layer[data-l="tactical"] { background: rgba(175,161,255,.12); color: var(--tactical); }
+.layer[data-l="core"] { background: var(--accent-soft); color: var(--accent); }
+.wbar { display: inline-block; height: 5px; border-radius: 3px; background: var(--satellite); vertical-align: 2px; margin-right: 6px; }
+.num { font-family: var(--font-mono); color: var(--text-secondary); }
+.muted { color: var(--text-disabled); font-family: var(--font-mono); font-size: 11px; }
+.thesis { font-size: 10.5px; padding: 2px 7px; border-radius: 99px; white-space: nowrap; }
+.thesis[data-t="missing"] { background: transparent; border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); color: var(--danger); }
+.thesis[data-t="review"] { background: var(--warning-soft); color: var(--warning); }
+.thesis[data-t="active"] { background: var(--success-soft); color: var(--success); }
+.stop { font-family: var(--font-mono); font-size: 11px; color: var(--text-disabled); white-space: nowrap; }
+.stop[data-s="breach"] { color: var(--danger); }
+.stop[data-s="near"] { color: var(--warning); }
+.stop[data-s="set"] { color: var(--text-secondary); }
+.ta { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-disabled); white-space: nowrap; }
+.ta[data-bear="true"] { color: var(--warning); } /* 技术面是行情状态不是规则破坏——红色只留给破线/超限 */
+.legs { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
+
+/* 情报 */
+.intel-row { display: flex; gap: 10px; font-size: 11.5px; color: var(--text-secondary); padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
+.intel-row:last-child { border-bottom: 0; }
+.intel-row .k { color: var(--text-tertiary); width: 110px; flex-shrink: 0; }
+
+/* Modal / toast */
+.overlay { position: fixed; inset: 0; background: #000000a3; backdrop-filter: blur(8px); display: none; align-items: flex-start; justify-content: center; padding: 10vh 18px 30px; z-index: 50; overflow-y: auto; }
+.overlay[data-open="true"] { display: flex; }
+.modal { width: min(600px, 100%); background: var(--surface-2); border: 1px solid var(--border-default); border-radius: var(--radius-modal); box-shadow: var(--shadow-popover); padding: 20px; }
+.modal h2 { font-size: 14px; margin-bottom: 4px; color: var(--text-primary); text-transform: none; letter-spacing: 0; }
+.modal .hint { font-size: 11px; color: var(--text-tertiary); margin-bottom: 10px; }
+.modal label { display: block; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
+.modal input, .modal textarea, .modal select {
+  width: 100%; background: var(--surface-1); border: 1px solid var(--border-default); border-radius: 6px;
+  color: var(--text-primary); font: 13px/1.5 var(--font-ui); padding: 7px 9px;
+}
+.modal textarea { min-height: 84px; resize: vertical; }
+.modal input:focus-visible, .modal textarea:focus-visible, .modal select:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; border-color: transparent; }
+.modal .row { display: flex; gap: 10px; }
+.modal .row > div { flex: 1; }
+.modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.toast { position: fixed; bottom: 22px; left: 50%; transform: translate(-50%, 8px); z-index: 60; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 9px; padding: 9px 14px; font-size: 12px; opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; box-shadow: var(--shadow-popover); }
+.toast[data-show="true"] { opacity: 1; }
+.toast[data-show="true"] { transform: translate(-50%, 0); }
+.empty { padding: 26px 20px; color: var(--text-tertiary); text-align: center; font-size: 12px; }
+.page-state { display: none; padding: 32px 20px; margin-bottom: 24px; text-align: center; border: 1px dashed var(--border-default); border-radius: 13px; background: #ffffff03; color: var(--text-tertiary); }
+.page-state[data-show="true"] { display: block; }
+.page-state b { display: block; color: var(--text-primary); font-size: 14px; margin-bottom: 4px; }
+.table-card { padding: 4px 10px; overflow-x: auto; }
+
+@media (max-width: 1023px) {
+  body { max-width: 860px; padding-inline: 20px; }
+  .head { align-items: flex-start; }
+  .head .spacer { display: none; }
+  .head-actions { width: 100%; margin-top: 4px; }
+  .head-actions .button { flex: 1; }
+  .sub { margin-left: 0; }
+}
+@media (max-width: 620px) {
+  body { padding: 18px 14px 48px; background: radial-gradient(circle at 50% -10%, #30281d 0, var(--bg-canvas) 25rem); }
+  .head { gap: 8px; padding-bottom: 14px; }
+  .brand { width: 100%; }
+  .chip { font-size: 11px; min-height: 40px; display: inline-flex; align-items: center; }
+  .button { min-height: 44px; }
+  section { margin-bottom: 24px; }
+  .card { padding: 14px; border-radius: 11px; }
+  .action { display: grid; grid-template-columns: auto 1fr; padding: 13px; }
+  .action .btns { grid-column: 1 / -1; margin-left: 0; }
+  .action .btns .button { width: 100%; }
+  .rail-label { width: 28px; }
+  .legend { gap: 7px 12px; }
+  .table-card { padding: 3px 0; overflow: visible; }
+  table, tbody { display: block; }
+  thead { display: none; }
+  tbody tr { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; padding: 14px; border-bottom: 1px solid var(--border-subtle); }
+  tbody tr:last-child { border-bottom: 0; }
+  td { display: block; padding: 0; border: 0; }
+  td:first-child { grid-column: 1 / -1; }
+  td:nth-child(3), td:nth-child(4), td:nth-child(5) { font-size: 11px; }
+  td:nth-child(6) { grid-column: 2; grid-row: 2; }
+  .modal { padding: 17px; }
+  .modal .row { display: grid; grid-template-columns: 1fr 1fr; }
+  .modal .row > div:first-child { grid-column: 1 / -1; }
+  .intel-row { display: grid; gap: 2px; }
+  .intel-row .k { width: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <div class="brand">
+    <a class="brand-mark" href="/" aria-label="返回 Ownward">⌁</a>
+    <div class="brand-copy"><a href="/">Ownward</a><h1>投资策略</h1></div>
+  </div>
+  <span class="chip">读取 STRATEGY.md</span>
+  <span class="chip" id="meta-chip">加载中…</span>
+  <div class="spacer"></div>
+  <div class="head-actions">
+    <button class="button" id="btn-scan">立即扫描</button>
+    <button class="button primary" id="btn-refresh">刷新持仓</button>
+  </div>
+</div>
+<div class="sub" id="sub-line"></div>
+<div class="page-state" id="page-state" role="status" aria-live="polite" data-show="true"><b>正在读取策略</b>加载持仓、论点卡与最近扫描结果…</div>
+
+<section id="sec-structure" style="display:none">
+  <h2>结构 · 计划 vs 现状</h2>
+  <div class="card">
+    <div class="rail-row"><span class="rail-label">目标</span><div class="rail" id="rail-target"></div></div>
+    <div class="rail-row"><span class="rail-label">现状</span><div class="rail" id="rail-actual"></div></div>
+    <div class="legend" id="legend"></div>
+    <div class="dev" id="deviations"></div>
+  </div>
+</section>
+
+<section>
+  <h2 id="actions-head">需要你行动</h2>
+  <div id="actions-list"></div>
+</section>
+
+<section>
+  <h2>持仓 · 论点优先</h2>
+  <div class="card table-card">
+    <table>
+      <thead><tr><th>标的</th><th>仓位</th><th>论点卡</th><th>距止损</th><th>技术面</th><th style="text-align:right">盈亏</th></tr></thead>
+      <tbody id="holdings"></tbody>
+    </table>
+    <div class="empty" id="holdings-empty" style="display:none">无持仓快照——点「刷新持仓」或导入 data/strategy/positions.json</div>
+  </div>
+</section>
+
+<section>
+  <h2>情报 · 收盘后更新</h2>
+  <div class="card" id="intel"></div>
+</section>
+
+<!-- 论点卡 modal -->
+<div class="overlay" id="th-overlay" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="th-title">
+    <h2 id="th-title">论点卡</h2>
+    <div class="hint">不写卡，系统不追踪不提醒。止损价填了才会有盘中 L1 监控。</div>
+    <div class="row">
+      <div><label>状态</label>
+        <select id="th-status">
+          <option value="active">active · 论点成立</option>
+          <option value="review">review · 需重审</option>
+          <option value="closed">closed · 已了结</option>
+        </select></div>
+      <div><label>止损价 $</label><input id="th-stop" type="number" step="0.01" placeholder="触发即 L1"></div>
+      <div><label>目标价 $</label><input id="th-target" type="number" step="0.01" placeholder="可选"></div>
+    </div>
+    <label>失效条件（什么情况说明看错了）</label>
+    <input id="th-invalid" type="text" placeholder="如：AI capex 指引下修 / 跌破周线 EMA20 不收回">
+    <label>为什么买（论点正文）</label>
+    <textarea id="th-body" placeholder="当初的判断、依据、预期路径……"></textarea>
+    <div class="actions">
+      <button class="button" id="th-cancel">取消</button>
+      <button class="button primary" id="th-save">保存</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const LAYER_NAME = { core: "核心", satellite: "卫星", tactical: "战术", cash: "现金" };
+const LAYER_COLOR = { core: "var(--core)", satellite: "var(--satellite)", tactical: "var(--tactical)", cash: "var(--cash)" };
+let V = null;
+let toastTimer;
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg; t.dataset.show = "true";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.dataset.show = "false", 2400);
+}
+async function post(url, body) {
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    return await r.json();
+  } catch (e) { return { ok: false, msg: String(e) }; }
+}
+const fmtMoney = (v) => (v < 0 ? "−" : "+") + "$" + Math.abs(v).toLocaleString("en-US", { maximumFractionDigits: 0 });
+const ago = (iso) => {
+  if (!iso) return "–";
+  const h = (Date.now() - new Date(iso)) / 3600000;
+  return h < 1 ? Math.round(h * 60) + "m 前" : h < 48 ? Math.round(h) + "h 前" : Math.round(h / 24) + "d 前";
+};
+
+function render() {
+  const v = V;
+  $("#page-state").dataset.show = "false";
+  $("#meta-chip").textContent = v.meta.asOf
+    ? `持仓 ${v.meta.source === "manual" ? "手动快照" : "自动"} · ${ago(v.meta.asOf)}`
+    : "无持仓快照";
+  $("#sub-line").textContent =
+    (v.meta.netLiq ? `净值 $${v.meta.netLiq.toLocaleString("en-US", { maximumFractionDigits: 0 })} · ` : "") +
+    `技术扫描 ${v.meta.scanAt ? ago(v.meta.scanAt) : "未跑"} · 规则引擎纯确定性，LLM 只写文案`;
+
+  /* 结构 */
+  if (v.structure) {
+    $("#sec-structure").style.display = "";
+    const t = v.structure.targets, L = v.structure.layers;
+    $("#rail-target").innerHTML = ["core", "satellite", "tactical"]
+      .map((k) => `<div class="seg" style="width:${t[k] || 0}%;background:${LAYER_COLOR[k]}"></div>`).join("");
+    $("#rail-actual").innerHTML = ["core", "satellite", "tactical", "cash"]
+      .map((k) => `<div class="seg" style="width:${L[k].pct}%;background:${LAYER_COLOR[k]}"></div>`).join("");
+    $("#legend").innerHTML = ["core", "satellite", "tactical", "cash"].map((k) =>
+      `<span><i class="dot" style="background:${LAYER_COLOR[k]}"></i>${LAYER_NAME[k]} ${L[k].pct}%${k !== "cash" ? ` / ${t[k] ?? 0}%` : ""}</span>`).join("");
+    const devs = [...v.structure.deviations.map((d) => `${d.label} ${d.pp > 0 ? "+" : ""}${d.pp}pp`)];
+    if (v.structure.themeTop && v.structure.themeTop.pctOfSatellite > 50)
+      devs.push(`主题集中 ${v.structure.themeTop.pctOfSatellite}%＞50%`);
+    $("#deviations").innerHTML = devs.map((d) => `<span>${esc(d)}</span>`).join("");
+  } else $("#sec-structure").style.display = "none";
+
+  /* 行动：L1/L2 = 今天处理；L3 = 可复盘，默认折叠不抢注意力 */
+  const actionCard = (a) => `
+    <div class="action" data-lv="${a.level}">
+      <span class="lv">${a.level}</span>
+      <div><b>${esc(a.title)}</b><p>${esc(a.reason)}</p></div>
+      ${a.kind === "stop"
+        ? `<div class="btns"><button class="button primary" onclick="document.querySelector('#holdings').scrollIntoView({behavior:'smooth'})">查看破线持仓</button></div>`
+        : a.kind === "thesis" || a.kind === "review" || a.symbol
+        ? `<div class="btns"><button class="button primary open-thesis" data-symbol="${esc(a.symbol || firstMissing())}">${a.kind === "thesis" ? "补论点卡" : "打开论点卡"}</button></div>` : ""}
+    </div>`;
+  const todo = v.actions.filter((a) => a.level !== "L3");
+  const later = v.actions.filter((a) => a.level === "L3");
+  $("#actions-head").textContent = `今天需要处理 · ${todo.length}`;
+  $("#actions-list").innerHTML =
+    (todo.length ? todo.map(actionCard).join("") : `<div class="card empty">全部硬规则通过——今天没有必须处理的事</div>`) +
+    (later.length ? `
+      <button class="button" style="width:100%;margin-top:2px" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">可复盘 · ${later.length} ▾</button>
+      <div style="display:none;margin-top:8px">${later.map(actionCard).join("")}</div>` : "");
+
+  /* 持仓 */
+  $("#holdings-empty").style.display = v.holdings.length ? "none" : "block";
+  $("#holdings").innerHTML = v.holdings.map((h) => {
+    const stopTxt = h.stop.state === "unset" ? (h.stop.note || "未设")
+      : h.stop.state === "breach" ? (h.stop.note || `已破 $${h.stop.price}`)
+      : `距 ${h.stop.distPct}%${h.stop.price ? ` ($${h.stop.price})` : ""}`;
+    const bear = h.ta && h.ta.verdict === "空·空·空";
+    return `<tr class="holding-row" data-symbol="${esc(h.symbol)}" tabindex="0" role="button" aria-label="打开 ${esc(h.display)} 论点卡">
+      <td><span class="sym">${esc(h.display)}</span><span class="layer" data-l="${h.layer}">${LAYER_NAME[h.layer]}</span>
+        ${h.legs ? `<div class="legs">${h.legs.map(esc).join(" · ")}</div>` : ""}</td>
+      <td><i class="wbar" style="width:${Math.max(3, h.pctNav * 3)}px;${h.layer === "tactical" ? "background:var(--tactical)" : ""}"></i><span class="num">${h.pctNav}%</span></td>
+      <td><span class="thesis" data-t="${h.thesis}">${{ missing: "缺失", review: "需重审", active: "已立卡" }[h.thesis]}</span>${h.fragment ? `<span class="muted" style="margin-left:5px">碎仓</span>` : ""}</td>
+      <td><span class="stop" data-s="${h.stop.state}">${esc(stopTxt)}${h.stop.state === "breach" && h.unrealPct != null ? ` (${h.unrealPct}%)` : ""}</span></td>
+      <td><span class="ta" data-bear="${!!bear}">${h.ta ? esc(h.ta.verdict) + (h.ta.flags.includes("派发") ? " 派发" : "") : "待扫描"}</span></td>
+      <td class="muted" style="text-align:right">${fmtMoney(h.unrealPnl)}</td>
+    </tr>`;
+  }).join("");
+
+  /* 情报 */
+  $("#intel").innerHTML = v.intel.map((i) =>
+    `<div class="intel-row"><span class="k">${esc(i.label)}</span><span class="mono">${esc(i.value)}</span></div>`).join("") ||
+    `<div class="empty">尚无收盘情报，完成扫描后会在这里更新</div>`;
+}
+
+document.addEventListener("click", (e) => {
+  const target = e.target instanceof Element ? e.target.closest(".open-thesis, .holding-row") : null;
+  if (target) openThesis(target.dataset.symbol || "");
+});
+document.addEventListener("keydown", (e) => {
+  const target = e.target instanceof Element ? e.target.closest(".holding-row") : null;
+  if (target && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openThesis(target.dataset.symbol || ""); }
+});
+
+function showPageError(message) {
+  const state = $("#page-state");
+  state.innerHTML = `<b>策略数据暂时不可用</b>${esc(message)} <button class="button" type="button" onclick="init()" style="margin-left:8px">重试</button>`;
+  state.dataset.show = "true";
+}
+
+function firstMissing() {
+  const h = (V?.holdings || []).find((x) => x.thesis === "missing");
+  return h ? h.symbol : "";
+}
+
+/* 论点卡 modal */
+let thSymbol = "", thOpenSeq = 0;
+async function openThesis(sym) {
+  if (!sym) return;
+  const seq = ++thOpenSeq;
+  thSymbol = "";
+  $("#th-title").textContent = `论点卡 · ${sym}`;
+  let r;
+  try {
+    const response = await fetch(`/api/strategy/thesis?symbol=${encodeURIComponent(sym)}`);
+    if (!response.ok) throw new Error(`读取失败 (${response.status})`);
+    r = await response.json();
+  } catch (e) {
+    if (seq !== thOpenSeq) return;
+    toast(e instanceof Error ? e.message : "论点卡读取失败");
+    return;
+  }
+  if (seq !== thOpenSeq) return;
+  thSymbol = sym;
+  const t = r.thesis || {};
+  $("#th-status").value = t.status || "active";
+  $("#th-stop").value = t.stop ?? "";
+  $("#th-target").value = t.target ?? "";
+  $("#th-invalid").value = t.invalidation || "";
+  $("#th-body").value = t.body || "";
+  $("#th-overlay").dataset.open = "true";
+  $("#th-overlay").setAttribute("aria-hidden", "false");
+  $("#th-status").focus();
+}
+window.openThesis = openThesis;
+function closeThesis() {
+  thOpenSeq++;
+  thSymbol = "";
+  $("#th-overlay").dataset.open = "false";
+  $("#th-overlay").setAttribute("aria-hidden", "true");
+}
+$("#th-cancel").addEventListener("click", closeThesis);
+$("#th-overlay").addEventListener("click", (e) => { if (e.target === $("#th-overlay")) closeThesis(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#th-overlay").dataset.open === "true") closeThesis(); });
+$("#th-save").addEventListener("click", async () => {
+  const symbol = thSymbol;
+  if (!symbol) { toast("论点卡仍在载入，请稍候"); return; }
+  const res = await post(`/api/strategy/thesis?symbol=${encodeURIComponent(symbol)}`, {
+    status: $("#th-status").value,
+    stop: $("#th-stop").value ? parseFloat($("#th-stop").value) : null,
+    target: $("#th-target").value ? parseFloat($("#th-target").value) : null,
+    invalidation: $("#th-invalid").value.trim(),
+    body: $("#th-body").value,
+  });
+  toast(res.msg || "已保存");
+  if (res.ok) {
+    if (thSymbol === symbol) closeThesis();
+    if (res.view) { V = res.view; render(); }
+  }
+});
+
+/* 顶部动作 */
+$("#btn-refresh").addEventListener("click", async () => {
+  $("#btn-refresh").disabled = true;
+  const res = await post("/api/strategy/refresh");
+  $("#btn-refresh").disabled = false;
+  toast(res.msg || (res.ok ? "持仓已刷新" : "刷新失败"));
+  if (res.view) { V = res.view; render(); }
+});
+$("#btn-scan").addEventListener("click", async () => {
+  $("#btn-scan").disabled = true;
+  const before = V?.meta?.scanAt;
+  const scan = await post("/api/strategy/scan");
+  toast(scan.msg || (scan.ok ? "扫描已开始" : "扫描启动失败"));
+  if (!scan.ok) { $("#btn-scan").disabled = false; return; }
+  // 轮询等扫描落盘（最多 3 分钟）
+  let n = 0;
+  const timer = setInterval(async () => {
+    try {
+      const response = await fetch("/api/strategy");
+      if (!response.ok) throw new Error();
+      const v = await response.json();
+      if (v.meta.scanAt !== before || ++n > 18) {
+        clearInterval(timer);
+        $("#btn-scan").disabled = false;
+        if (v.meta.scanAt !== before) { V = v; render(); toast("扫描完成"); }
+        else toast("扫描仍在后台运行");
+      }
+    } catch { if (++n > 18) { clearInterval(timer); $("#btn-scan").disabled = false; toast("暂时无法读取扫描结果"); } }
+  }, 10_000);
+});
+
+async function init() {
+  const state = $("#page-state");
+  state.innerHTML = `<b>正在读取策略</b>加载持仓、论点卡与最近扫描结果…`;
+  state.dataset.show = "true";
+  try {
+    const response = await fetch("/api/strategy");
+    if (!response.ok) throw new Error(`服务返回 ${response.status}`);
+    V = await response.json();
+    render();
+  } catch (e) {
+    showPageError(e instanceof Error ? e.message : "请检查服务后重试");
+  }
+}
+init();
+setInterval(async () => {
+  try {
+    const response = await fetch("/api/strategy");
+    if (!response.ok) return;
+    V = await response.json(); render();
+  } catch { /* 后台刷新失败保留最近一次可用数据 */ }
+}, 120_000);
+</script>
+</body>
+</html>

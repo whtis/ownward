@@ -1,0 +1,12 @@
+{
+  "name": "Ownward",
+  "short_name": "Ownward",
+  "description": "本地优先的 AI 工作连续性层",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0c1118",
+  "theme_color": "#0c1118",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

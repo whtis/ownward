@@ -1,0 +1,83 @@
+# XcodeGen 工程定义：`xcodegen generate`（或 ./build.sh）生成 Ownward.xcodeproj（不进 git）。
+name: Ownward
+options:
+  bundleIdPrefix: ai.ownward
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "26.0"
+  createIntermediateGroups: true
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    # 版本约定（dev-guidelines）：CFBundleShortVersionString 只能是纯数字点分（App Store 校验），
+    # 渠道+日期（0.1.0-alpha.20260823）放 Info.plist 的 OwnwardVersionName；build = YYYYMMDDN
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "202608231"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_EMIT_LOC_STRINGS: NO
+    DEAD_CODE_STRIPPING: YES
+targets:
+  Ownward:
+    type: application
+    platform: iOS
+    sources:
+      - path: Ownward
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.ownward.app
+        PRODUCT_NAME: Ownward
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited)"
+    info:
+      path: Ownward/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Ownward
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        OwnwardVersionName: "0.1.0-alpha.20260823"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        ITSAppUsesNonExemptEncryption: false
+        NSPhotoLibraryUsageDescription: "选择图片发给 agent 或 AI 对话"
+        # daemon 多半是 http://LAN / Tailscale 地址；公网部署请自己套 TLS（README 隐私与安全）
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
+  OwnwardTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: OwnwardTests
+    dependencies:
+      - target: Ownward
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.ownward.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Ownward:
+    build:
+      targets:
+        Ownward: all
+        OwnwardTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [OwnwardTests]
+    archive:
+      config: Release

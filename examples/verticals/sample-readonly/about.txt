@@ -1,0 +1,5 @@
+Read-only Vertical contract fixture.
+
+This external Vertical exposes an anonymized candidate summary DTO. It does not
+connect to a live external system, read Vault data, call an Agent, send notifications,
+or perform writes. The package exists only as the first external contract consumer.

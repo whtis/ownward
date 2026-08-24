@@ -1,0 +1,15 @@
+{
+  "name": "ownward",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "daemon": "bun src/daemon.ts",
+    "gmail-auth": "bun scripts/gmail-auth.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
+  }
+}

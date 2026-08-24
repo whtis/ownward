@@ -1,0 +1,11 @@
+[
+  {
+    "id": "candidate-example-01",
+    "type": "candidate",
+    "displayName": "候选人 A",
+    "stage": "screening",
+    "stageLabel": "初步沟通",
+    "headline": "示例行业 · 示例岗位",
+    "updatedAt": "2026-08-17T00:00:00.000Z"
+  }
+]

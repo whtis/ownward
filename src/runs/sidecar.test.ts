@@ -1,0 +1,24 @@
+import { describe, expect, test } from "bun:test";
+import { acceptRunSidecar, beginRunSidecar, crossRunDispatchBoundary, diagnoseUnstartedRunSidecar, finishRunSidecar, markRunDispatchingSidecar, markRunStartedSidecar, type RunSidecarDiagnostic } from "./sidecar.ts";
+import type { RunEvent } from "./repository.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+function harness(failAt = -1) { const events: RunEvent[] = [], diagnostics: RunSidecarDiagnostic[] = []; let n = 0; const deps = { dataRoot: "/missing", repository: { append(e: RunEvent) { if (n++ === failAt) throw new Error("SECRET prompt"); events.push(e); return { appended: true, event: e }; } }, now: () => "2026-08-16T00:00:00.000Z", uuid: (() => { let i = 0; return () => `id-${++i}`; })(), diagnostic: (d: RunSidecarDiagnostic) => { diagnostics.push(d); } }; return { events, diagnostics, deps }; }
+describe("Run sidecar", () => {
+  test("accepted → dispatching → started → 唯一 terminal，且不保存输入", () => { const h = harness(), run = beginRunSidecar("task-a", "claude", h.deps); finishRunSidecar(run, "completed", { exitCode: 0, usage: { inputTokens: 3, outputTokens: 2 } }, h.deps); finishRunSidecar(run, "failed", {}, h.deps); expect(h.events.map(e => e.type)).toEqual(["command-accepted", "run-dispatching", "run-started", "run-completed"]); expect(h.events.at(-1)).toMatchObject({ usage: { inputTokens: 3, outputTokens: 2 } }); expect(JSON.stringify(h.events)).not.toContain("totalTokens"); expect(JSON.stringify(h.events)).not.toContain("prompt"); });
+  test("中断与无终帧失败不同", () => { const a = harness(), r1 = beginRunSidecar("t1", "claude", a.deps); finishRunSidecar(r1, "interrupted", { reason: "user_interrupt" }, a.deps); expect(a.events.at(-1)?.type).toBe("run-interrupted"); const b = harness(), r2 = beginRunSidecar("t2", "codex", b.deps); finishRunSidecar(r2, "failed", { exitCode: 0, reason: "provider_exit_without_terminal" }, b.deps); expect(b.events.at(-1)).toMatchObject({ type: "run-failed", reason: "provider_exit_without_terminal" }); });
+  test("旁路失败不抛，诊断无异常正文/task 原值，terminal 可重试", () => { const a = harness(0), run = beginRunSidecar("private-task", "claude", a.deps); expect(run.active).toBe(false); expect(JSON.stringify(a.diagnostics)).not.toContain("SECRET"); expect(JSON.stringify(a.diagnostics)).not.toContain("private-task"); const b = harness(3), active = beginRunSidecar("private-task", "codex", b.deps); expect(() => finishRunSidecar(active, "completed", {}, b.deps)).not.toThrow(); expect(active.terminal).toBe(false); expect(b.diagnostics).toMatchObject([{ operation: "terminal" }]); finishRunSidecar(active, "completed", {}, b.deps); expect(active.terminal).toBe(true); expect(b.events.at(-1)?.type).toBe("run-completed"); });
+  test("dispatching 跨 Provider 发送边界，已知 spawn 失败收敛 failed", () => { const h = harness(), run = acceptRunSidecar("task-a", "codex", h.deps); expect(h.events.map(e => e.type)).toEqual(["command-accepted"]); markRunDispatchingSidecar(run, h.deps); diagnoseUnstartedRunSidecar(run, new Error("SECRET argv"), h.deps); expect(h.diagnostics).toMatchObject([{ operation: "start", errorClass: "Error" }]); expect(JSON.stringify(h.diagnostics)).not.toContain("SECRET"); expect(h.events.map(e => e.type)).toEqual(["command-accepted", "run-dispatching", "run-failed"]); markRunStartedSidecar(run, h.deps); expect(h.events.map(e => e.type)).toEqual(["command-accepted", "run-dispatching", "run-failed"]); });
+  test("accepted 或 dispatching append 失败都硬拦 Provider callback", () => {
+    for (const failAt of [0, 1]) {
+      const h = harness(failAt), run = acceptRunSidecar("private-prompt", "codex", h.deps);
+      let called = false;
+      expect(() => crossRunDispatchBoundary(run, () => { called = true; }, h.deps)).toThrow("Run dispatch journal unavailable");
+      expect(called).toBe(false);
+      expect(JSON.stringify(h.diagnostics)).not.toContain("private-prompt");
+      expect(h.diagnostics.at(-1)).toMatchObject({ operation: failAt === 0 ? "accept" : "dispatch", errorClass: "Error" });
+    }
+  });
+  test("sessionId 优先 canonical，仓库尚无记录时直接等于 taskId", () => { const fallback = harness(); expect(acceptRunSidecar("task-fallback", "claude", fallback.deps).sessionId).toBe("task-fallback"); const root = mkdtempSync(join(tmpdir(), "ownward-sidecar-session-")); try { writeFileSync(join(root, "sessions.json"), JSON.stringify({ schemaVersion: 1, sessions: [{ id: "session-canonical", providerId: "claude", nativeRef: "native-1", previousRefs: [], cwd: "/tmp", control: "ownward", taskIds: ["task-alias"], recoverable: true, source: "native", createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z" }] })); const h = harness(); h.deps.dataRoot = root; expect(acceptRunSidecar("task-alias", "claude", h.deps).sessionId).toBe("session-canonical"); } finally { rmSync(root, { recursive: true, force: true }); } });
+});

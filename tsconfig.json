@@ -1,0 +1,16 @@
+{
+  // 只为 verify.sh 的类型检查门服务（bun 运行时不看这个文件）。
+  // strict 先关：目标是拦「对象字面量漏必填字段」这类结构性错误，不是逼全库 null 检查改造。
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "module": "ESNext",
+    "target": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "types": ["bun"]
+  },
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
+}

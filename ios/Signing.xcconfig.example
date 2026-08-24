@@ -1,0 +1,2 @@
+// 复制为 Signing.xcconfig（gitignored）并填你的 Team ID，真机安装/归档需要；模拟器可留空。
+DEVELOPMENT_TEAM =

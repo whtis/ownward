@@ -1,0 +1,5 @@
+Ownward.xcodeproj/
+build/
+DerivedData/
+Signing.xcconfig
+*.xcuserstate

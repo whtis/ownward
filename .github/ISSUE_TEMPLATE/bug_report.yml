@@ -1,0 +1,25 @@
+name: Bug report
+description: Report reproducible behavior in Ownward.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include tokens, private prompts, raw transcripts, or personal paths.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

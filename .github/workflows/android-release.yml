@@ -1,0 +1,168 @@
+# 安卓发布流水线：构建签名 APK → 发到 GitHub Releases。
+#
+# 触发：
+#   - 推 tag `android-v<versionName>+<versionCode>`（由 scripts/android-publish.sh 生成）→ 构建 + 建 Release
+#   - 推 tag `android-test*` / workflow_dispatch → 只构建、传 Actions artifact，不建 Release（流水线自检用）
+#   - push main 且改了 android/ → 同上只构建：早发现编译挂，顺便给默认分支写 Gradle 缓存（tag 构建只能读默认分支的缓存）
+#
+# 签名：四个 repo secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
+#   还原成 ~/.ownward/android-signing.properties，走 android/app/build.gradle.kts 原有的读法。
+#   缺 secrets 时 release tag 直接失败（debug 签名的包装了就升不了级），自检构建允许 debug 签名。
+#
+# Release 资产：ownward-<versionName>-<versionCode>.apk、android.json（与 daemon data/app/android.json 同格式）、SHA256SUMS
+#   daemon 侧用 `scripts/android-release.sh --from-github [tag]` 拉取，手机「检查更新」即可升级。
+name: android-release
+
+on:
+  push:
+    tags:
+      - "android-v*"
+      - "android-test*"
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - ".github/workflows/android-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE: ${{ startsWith(github.ref, 'refs/tags/android-v') && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: 读取版本号并校验 tag
+        id: ver
+        run: |
+          set -euo pipefail
+          G=android/app/build.gradle.kts
+          NAME=$(grep -o 'versionName = "[^"]*"' "$G" | cut -d'"' -f2)
+          CODE=$(grep -o 'versionCode = [0-9]*' "$G" | grep -o '[0-9]*')
+          [ -n "$NAME" ] && [ -n "$CODE" ] || { echo "::error::读不到 $G 的 versionName/versionCode"; exit 1; }
+          if [ "$RELEASE" = "true" ]; then
+            EXPECT="android-v${NAME}+${CODE}"
+            [ "$GITHUB_REF_NAME" = "$EXPECT" ] || { echo "::error::tag $GITHUB_REF_NAME 与代码里的版本不符（应为 $EXPECT）——请用 scripts/android-publish.sh 打 tag"; exit 1; }
+          fi
+          PRE=false; case "$NAME" in *-*) PRE=true;; esac
+          {
+            echo "name=$NAME"; echo "code=$CODE"; echo "prerelease=$PRE"
+            echo "apk=ownward-${NAME}-${CODE}.apk"
+          } >> "$GITHUB_OUTPUT"
+          echo "版本 $NAME ($CODE) ref=$GITHUB_REF_NAME release=$RELEASE"
+
+      - name: 还原签名配置
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KS_B64" ] || [ -z "$KS_PW" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PW" ]; then
+            if [ "$RELEASE" = "true" ]; then
+              echo "::error::缺签名 secrets（ANDROID_KEYSTORE_BASE64 等四个），正式 release 不能用 debug 签名"; exit 1
+            fi
+            echo "::warning::无签名 secrets，本次用 debug 签名（仅自检）"; exit 0
+          fi
+          mkdir -p ~/.ownward && chmod 700 ~/.ownward
+          echo "$KS_B64" | base64 -d > ~/.ownward/ownward-release.jks
+          cat > ~/.ownward/android-signing.properties <<EOF
+          storeFile=$HOME/.ownward/ownward-release.jks
+          storePassword=$KS_PW
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PW
+          EOF
+          chmod 600 ~/.ownward/ownward-release.jks ~/.ownward/android-signing.properties
+          echo "签名配置就绪"
+
+      - name: 构建 release APK
+        working-directory: android
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: 整理产物
+        env:
+          APK_NAME: ${{ steps.ver.outputs.apk }}
+          NAME: ${{ steps.ver.outputs.name }}
+          CODE: ${{ steps.ver.outputs.code }}
+        run: |
+          set -euo pipefail
+          SRC=$(ls android/app/build/outputs/apk/release/app-release*.apk | head -1)
+          [ -f "$SRC" ] || { echo "::error::找不到 release APK"; exit 1; }
+          mkdir -p dist && cp "$SRC" "dist/$APK_NAME"
+          # 校验签名确实是 release key（debug key 的证书 CN=Android Debug）
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "dist/$APK_NAME" | tee /tmp/certs.txt
+          if [ "$RELEASE" = "true" ] && grep -q 'CN=Android Debug' /tmp/certs.txt; then
+            echo "::error::APK 是 debug 签名"; exit 1
+          fi
+          # 发布说明 = 附注 tag 的内容（actions/checkout 只拿到 commit，要重新拉 tag 对象；lightweight tag 为空）
+          NOTES=""
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git fetch --force --quiet origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME" || true
+            NOTES=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | python3 -c 'import sys; print(sys.stdin.read().strip())')
+          fi
+          python3 - "$NAME" "$CODE" "$NOTES" > dist/android.json <<'PY'
+          import json, sys
+          print(json.dumps({"ok": True, "versionName": sys.argv[1], "versionCode": int(sys.argv[2]), "notes": sys.argv[3]}, ensure_ascii=False))
+          PY
+          (cd dist && sha256sum "$APK_NAME" android.json > SHA256SUMS)
+          {
+            echo "## Android $NAME ($CODE)"; echo
+            [ -n "$NOTES" ] && { echo "$NOTES"; echo; }
+            echo '```'; cat dist/SHA256SUMS; echo '```'; echo
+            echo "- 手机直装：下载 \`$APK_NAME\` 安装（已装旧版可直接覆盖，同一签名）"
+            echo "- daemon 分发：\`scripts/android-release.sh --from-github $GITHUB_REF_NAME\`，手机端「设置 → 检查更新」升级"
+          } > dist/RELEASE_NOTES.md
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ownward-android-${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}
+          path: |
+            dist/*.apk
+            dist/android.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布 GitHub Release
+        if: env.RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          NAME: ${{ steps.ver.outputs.name }}
+          CODE: ${{ steps.ver.outputs.code }}
+          PRE: ${{ steps.ver.outputs.prerelease }}
+          APK_NAME: ${{ steps.ver.outputs.apk }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release 已存在，只更新资产"
+            gh release upload "$TAG" "dist/$APK_NAME" dist/android.json dist/SHA256SUMS --clobber
+          else
+            ARGS=(--verify-tag --title "Android $NAME ($CODE)" --notes-file dist/RELEASE_NOTES.md --generate-notes)
+            [ "$PRE" = "true" ] && ARGS+=(--prerelease)
+            gh release create "$TAG" "dist/$APK_NAME" dist/android.json dist/SHA256SUMS "${ARGS[@]}"
+          fi
+          gh release view "$TAG" --json url -q .url

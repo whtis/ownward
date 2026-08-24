@@ -1,0 +1,12 @@
+/data/
+node_modules
+.DS_Store
+.omc/
+*.log
+.claude/
+.context/
+
+# 本机配置与人设（install.sh 生成，永远不进 git）
+config.json
+prompts/owner.md
+.gstack/

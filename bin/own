@@ -1,0 +1,14 @@
+#!/bin/bash
+# Ownward 命令行入口
+BUN="$(command -v bun || echo /opt/homebrew/bin/bun)"
+SCRIPT_PATH="$0"
+while [ -L "$SCRIPT_PATH" ]; do
+  LINK_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  case "$LINK_TARGET" in
+    /*) SCRIPT_PATH="$LINK_TARGET" ;;
+    *) SCRIPT_PATH="$LINK_DIR/$LINK_TARGET" ;;
+  esac
+done
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+exec "$BUN" "$SCRIPT_DIR/../src/cli.ts" "$@"

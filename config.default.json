@@ -1,0 +1,179 @@
+{
+  "owner": {
+    "name": "",
+    "greeting": ""
+  },
+  "timezone": "Asia/Shanghai",
+  "quietHours": {
+    "start": "23:00",
+    "end": "08:00"
+  },
+  "notify": {
+    "macos": true,
+    "lark": false,
+    "larkUserId": "",
+    "larkSkipSources": [
+      "lark"
+    ]
+  },
+  "dashboard": {
+    "port": 4517
+  },
+  "vault": {
+    "root": "~/Documents/ownward-vault",
+    "workRemoteMatch": "",
+    "workRemoteExclude": [],
+    "autoSync": false
+  },
+  "heartbeat": {
+    "enabled": true,
+    "intervalMin": 30
+  },
+  "digest": {
+    "enabled": false,
+    "time": "02:00"
+  },
+  "triage": {
+    "intervalMin": 20,
+    "maxBatch": 50
+  },
+  "chat": {
+    "providers": {
+      "claude": [
+        "sonnet",
+        "opus",
+        "haiku"
+      ],
+      "codex": [
+        "default"
+      ]
+    },
+    "codexEffort": ""
+  },
+  "llm": {
+    "engine": "claude",
+    "claudeBin": "claude",
+    "claudeModel": "sonnet",
+    "codexBin": "codex",
+    "codexModel": "",
+    "codebuddyBin": "codebuddy"
+  },
+  "dispatch": {
+    "worktreeRoot": "~/.ownward-worktrees",
+    "watchSec": 60,
+    "defaults": {}
+  },
+  "engine": {
+    "autoCompact": true,
+    "compactThreshold": 0.85
+  },
+  "architecture": {
+    "sessionRunnerMode": "runner",
+    "sessionRunnerTaskIds": [],
+    "allowFullAccess": false,
+    "allowedRoots": []
+  },
+  "providers": {
+    "claude-code": {
+      "enabled": true,
+      "version": "1.0.0",
+      "command": [
+        "claude"
+      ]
+    },
+    "codex": {
+      "enabled": true,
+      "version": "1.0.0",
+      "command": [
+        "codex"
+      ]
+    },
+    "codebuddy": {
+      "enabled": false,
+      "version": "1.0.0",
+      "command": [
+        "codebuddy"
+      ]
+    }
+  },
+  "release": {
+    "observationSec": 0,
+    "providerCanary": false
+  },
+  "verticals": {
+    "externalPaths": [],
+    "dev": {
+      "enabled": true
+    },
+    "strategy": {}
+  },
+  "connectors": {
+    "externalPaths": [],
+    "lark": {
+      "enabled": false,
+      "groupPolicy": "unmuted",
+      "eventKeys": [
+        {
+          "key": "im.message.receive_v1",
+          "as": "bot"
+        },
+        {
+          "key": "card.action.trigger",
+          "as": "bot"
+        }
+      ],
+      "pollMin": 3
+    },
+    "github": {
+      "enabled": false,
+      "pollMin": 5
+    },
+    "gmail": {
+      "enabled": false,
+      "pollMin": 10
+    },
+    "stock": {
+      "enabled": false,
+      "watchlist": [],
+      "checkTimes": [
+        "09:40",
+        "14:50"
+      ]
+    }
+  },
+  "strategy": {
+    "enabled": false,
+    "targets": {
+      "core": 70,
+      "satellite": 25,
+      "tactical": 5
+    },
+    "rules": {
+      "singleMaxPct": 10,
+      "themeMaxOfSatellitePct": 50,
+      "defaultStopPct": 8,
+      "nearStopPp": 2,
+      "fragmentPct": 2,
+      "driftPp": 10
+    },
+    "layers": {
+      "core": [],
+      "tactical": []
+    },
+    "themes": {},
+    "symbolSuffix": ".US",
+    "symbolOverrides": {},
+    "lbRegion": "global",
+    "positionsCmd": "",
+    "scanTimes": [
+      "05:10"
+    ],
+    "monitor": {
+      "enabled": false,
+      "intervalMin": 10,
+      "start": "21:30",
+      "end": "04:05",
+      "dropPct": 5
+    }
+  }
+}

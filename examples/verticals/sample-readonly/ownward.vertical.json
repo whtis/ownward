@@ -1,0 +1,16 @@
+{
+  "id": "sample-readonly",
+  "name": "Read-only Vertical Example",
+  "version": "0.1.0",
+  "kernelApiVersion": 1,
+  "entry": "index.ts",
+  "capabilities": ["storage"],
+  "roots": [],
+  "routes": ["/api/verticals/sample-readonly/candidates"],
+  "navigation": [
+    { "id": "sample-readonly", "label": "Read-only example", "href": "/verticals/sample-readonly/about.txt" }
+  ],
+  "assets": [
+    { "path": "/verticals/sample-readonly/about.txt", "file": "about.txt", "contentType": "text/plain" }
+  ]
+}
