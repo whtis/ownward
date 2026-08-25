@@ -172,11 +172,13 @@ describe("Runner Unix IPC", () => {
     finally { server.stop(); }
   });
 
+  // This intentionally writes 5,000 durable journal records. Keep a finite
+  // deadline, but allow macOS hosted runners enough I/O scheduling headroom.
   test("5000 个 best-effort usage 有容量、append latency 与 drop metrics", async () => {
     const r = root(), server = new RunnerServer(r, () => ({ async *execute(command) { yield { eventId: "load-start", type: "started", at: new Date().toISOString(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId }; for (let i = 0; i < 5_000; i++) yield { eventId: `load-${i}`, type: "usage", durability: "best-effort", at: new Date().toISOString(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId, payload: "{\"inputTokens\":0,\"outputTokens\":0}" }; yield { eventId: "load-done", type: "completed", at: new Date().toISOString(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId }; } })); server.start();
     try { const client = new RunnerClient(r, 10_000); await client.request("submit", { ...submit("load"), providerId: "custom" }); client.close(); const probe = new RunnerClient(r, 10_000); const deadline = Date.now() + 15_000; while (Date.now() < deadline && ((await probe.request("ping", {})).body.activeRuns as string[]).includes("load")) await Bun.sleep(20); const events = new RunnerEventJournal(r).readStrict().filter((event) => event.commandId === "load"); expect(events).toHaveLength(5_003); expect(server.metrics).toMatchObject({ observationalAppended: 5_000, observationalDropped: 0, eventsAttempted: 5_002 }); expect(server.metrics.appendLatencyMsMax).toBeGreaterThan(0); expect(statSync(join(r, "runner", "events.jsonl")).size).toBeGreaterThan(100_000); probe.close(); }
     finally { server.stop(); }
-  });
+  }, 15_000);
 
   test("关键 message event 无法落盘会 abort Provider 并以无 payload unknown 收敛", async () => {
     const r = root(); let aborted = 0;
