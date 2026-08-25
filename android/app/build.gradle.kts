@@ -22,8 +22,8 @@ android {
         applicationId = "ai.ownward.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 202608241
-        versionName = "0.1.0-alpha.20260824"
+        versionCode = 202608251
+        versionName = "0.1.0-alpha.20260825"
     }
 
     signingConfigs {
