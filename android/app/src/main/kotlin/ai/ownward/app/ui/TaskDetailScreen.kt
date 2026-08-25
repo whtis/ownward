@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import ai.ownward.app.data.AgentState
+import ai.ownward.app.data.ApiException
 import ai.ownward.app.data.OwnwardClient
 import ai.ownward.app.data.ImageEncoder
 import ai.ownward.app.data.OutImage
@@ -69,6 +71,9 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
     var input by remember { mutableStateOf("") }
     var pendingImages by remember { mutableStateOf<List<Pair<Uri, OutImage>>>(emptyList()) }
     var sending by remember { mutableStateOf(false) }
+    var handoffTarget by remember { mutableStateOf<String?>(null) }
+    var confirmUnknownHandoff by remember { mutableStateOf(false) }
+    var switching by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val listState = rememberLazyListState()
@@ -316,6 +321,24 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                 }
                 s.ctxTokens?.let { InfoRow("上下文", "%.1fk".format(it / 1000.0)) }
                 InfoRow("最近活动", timeAgo(s.lastActivityAt))
+                Text("切换引擎", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp))
+                val handoffBlock = handoffBlockReason(s)
+                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("claude", "codex", "codebuddy").filter { it != s.backend }.forEach { provider ->
+                        OutlinedButton(
+                            enabled = handoffBlock == null && !switching,
+                            onClick = { confirmUnknownHandoff = false; handoffTarget = provider },
+                        ) { Text(provider) }
+                    }
+                }
+                if (handoffBlock != null) {
+                    Text(
+                        handoffBlock,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
                 // 接管租约切换（web detailHead 同款）：ownward → 可释放给桌面终端；observing → 接管回手机
                 if (s.operability != "read-only") {
                     Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -347,6 +370,53 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
             }
         }
     }
+
+    handoffTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { if (!switching) { handoffTarget = null; confirmUnknownHandoff = false } },
+            title = { Text(if (confirmUnknownHandoff) "确认未知副作用后切换？" else "切换到 $target？") },
+            text = {
+                Text(if (confirmUnknownHandoff)
+                    "旧 Run 的执行结果未知，可能已经产生文件或命令副作用。继续接力不会重放旧命令，请先核对工作区状态。"
+                else "当前会话会保留，新引擎将接力继续这个任务。")
+            },
+            dismissButton = { TextButton(enabled = !switching, onClick = { handoffTarget = null; confirmUnknownHandoff = false }) { Text("取消") } },
+            confirmButton = {
+                Button(enabled = !switching, onClick = {
+                    switching = true
+                    scope.launch {
+                        try {
+                            client.devHandoff(taskId, target, confirmUnknownHandoff)
+                            handoffTarget = null
+                            confirmUnknownHandoff = false
+                            showInfo = false
+                            refresh()
+                        } catch (e: Exception) {
+                            if (needsUnknownHandoffConfirmation(e)) {
+                                confirmUnknownHandoff = true
+                            } else {
+                                error = e.message
+                            }
+                        } finally {
+                            switching = false
+                        }
+                    }
+                }) { Text(if (switching) "切换中…" else if (confirmUnknownHandoff) "理解风险，继续" else "确认切换") }
+            },
+        )
+    }
+}
+
+fun needsUnknownHandoffConfirmation(error: Throwable): Boolean =
+    error is ApiException && error.errorCode == "SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED"
+
+fun handoffBlockReason(state: AgentState): String? = when {
+    state.control != "ownward" -> "仅 ownward 持有输入权时可切换"
+    state.turn == "running" -> "当前轮次运行中，请等待结束或先中断"
+    state.pending.isNotEmpty() -> "有待处理的审批，请先确认"
+    state.queued.isNotEmpty() -> "有排队消息，请先等待发送或撤回"
+    state.operability == "read-only" -> "会话已归档，不能切换"
+    else -> null
 }
 
 @Composable

@@ -129,7 +129,7 @@ fun AgentScreen(
                     EntityRow(
                         dot = ownwardColors.Success,
                         title = s.title.ifBlank { s.last }.ifBlank { "会话" },
-                        sub = sessionSub(s.project, engineLabel(s.mode), timeAgo(s.lastAt)),
+                        sub = sessionSub(s.project, engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
                     ) { open { onOpenTask(s.id) } }
                 }
                 items(terminalRunning.size, key = { "term-" + terminalRunning[it].id }) { i ->
@@ -150,7 +150,7 @@ fun AgentScreen(
                         dot = if (s.status == "done") ownwardColors.Accent
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                         title = s.title.ifBlank { s.last }.ifBlank { "会话" },
-                        sub = sessionSub(s.project, engineLabel(s.mode), timeAgo(s.lastAt)),
+                        sub = sessionSub(s.project, engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
                     ) { open { onOpenTask(s.id) } }
                 }
             }

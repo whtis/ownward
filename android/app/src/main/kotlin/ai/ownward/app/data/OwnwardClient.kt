@@ -12,6 +12,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,7 +24,7 @@ import okhttp3.sse.EventSources
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class ApiException(val code: Int, message: String) : IOException(message)
+class ApiException(val code: Int, message: String, val errorCode: String? = null) : IOException(message)
 
 internal fun fsDirsPath(path: String?): String =
     "/api/fs/dirs" + (path?.takeIf { it.isNotBlank() }?.let {
@@ -69,7 +70,12 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
     private suspend fun exec(rb: Request.Builder): String = withContext(Dispatchers.IO) {
         http.newCall(rb.build()).execute().use { resp ->
             val body = resp.body?.string() ?: ""
-            if (!resp.isSuccessful) throw ApiException(resp.code, failMsg(resp.code, body))
+            if (!resp.isSuccessful) {
+                val errorCode = runCatching {
+                    AppJson.parseToJsonElement(body).jsonObject["errorCode"]?.jsonPrimitive?.content
+                }.getOrNull()
+                throw ApiException(resp.code, failMsg(resp.code, body), errorCode)
+            }
             body
         }
     }
@@ -122,6 +128,12 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
 
     suspend fun devInterrupt(id: String): OkMsg =
         post("/api/dev/interrupt", buildJsonObject { put("id", id) })
+
+    suspend fun devHandoff(id: String, providerId: String, confirmUnknownOutcome: Boolean = false): OkMsg =
+        post("/api/dev/handoff", buildJsonObject {
+            put("id", id); put("providerId", providerId); put("reason", "manual")
+            put("confirmUnknownOutcome", confirmUnknownOutcome)
+        })
 
     /**
      * 接管租约：take = 取得输入权（ownward），release = 交还只旁观（observing）。

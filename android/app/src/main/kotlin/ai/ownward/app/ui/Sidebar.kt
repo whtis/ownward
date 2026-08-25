@@ -216,7 +216,7 @@ fun AppDrawer(
                         EntityRow(
                             selected = selectedKey == "task:${s.id}", dot = ownwardColors.Success,
                             title = s.title.ifBlank { s.last }.ifBlank { "会话" },
-                            sub = sessionSub(s.project, engineLabel(s.mode), timeAgo(s.lastAt)),
+                            sub = sessionSub(s.project, engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
                         ) { go(DrawerDest.Task(s.id)) }
                     }
                     items(terminal.size, key = { "term-" + terminal[it].id }) { i ->
@@ -236,7 +236,7 @@ fun AppDrawer(
                             selected = selectedKey == "task:${s.id}",
                             dot = if (s.status == "done") ownwardColors.Accent else MaterialTheme.colorScheme.onSurfaceVariant,
                             title = s.title.ifBlank { s.last }.ifBlank { "会话" },
-                            sub = sessionSub(s.project, engineLabel(s.mode), timeAgo(s.lastAt)),
+                            sub = sessionSub(s.project, engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
                         ) { go(DrawerDest.Task(s.id)) }
                     }
                     item { DrawerMore(restAll.size - rest.size) }

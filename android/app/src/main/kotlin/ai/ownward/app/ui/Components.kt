@@ -164,8 +164,15 @@ fun searchHit(query: String, vararg fields: String?): Boolean {
     return q.isEmpty() || fields.any { it?.contains(q, ignoreCase = true) == true }
 }
 
-/** 会话引擎标签：RecentSession.mode 形如 codex-bg / claude-bg */
-fun engineLabel(mode: String): String = if (mode.startsWith("codex")) "codex" else "claude"
+/** 新 daemon 给真实 provider；老 daemon 回退到 mode。 */
+fun engineLabel(mode: String, backend: String? = null, providerId: String? = null): String =
+    providerId?.takeIf { it.isNotBlank() }
+        ?: backend?.takeIf { it.isNotBlank() }
+        ?: when {
+            mode.startsWith("codex") -> "codex"
+            mode.startsWith("codebuddy") -> "codebuddy"
+            else -> "claude"
+        }
 
 /** 列表行副标题：「项目 · 引擎 · 时间」，空段自动省略 */
 fun sessionSub(vararg parts: String): String = parts.filter { it.isNotBlank() }.joinToString(" · ")

@@ -136,6 +136,8 @@ data class RecentSession(
     val msgs: Int = 0,
     val userMsgs: Int = 0,
     val last: String = "",
+    val backend: String? = null,
+    val providerId: String? = null,
 )
 
 @Serializable
