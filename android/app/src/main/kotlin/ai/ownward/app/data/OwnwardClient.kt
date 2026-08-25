@@ -215,19 +215,32 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
                 val b = resp.body?.string() ?: ""
                 throw ApiException(resp.code, failMsg(resp.code, b))
             }
-            val source = resp.body!!.source()
+            val source = resp.body?.source() ?: throw IOException("对话服务返回了空响应")
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (line.isBlank()) continue
-                val obj = runCatching { AppJson.parseToJsonElement(line).jsonObject }.getOrNull() ?: continue
+                val obj = try {
+                    AppJson.parseToJsonElement(line).jsonObject
+                } catch (e: Exception) {
+                    throw IOException("对话流格式错误", e)
+                }
                 when (obj.str("type")) {
                     "delta" -> emit(ChatEvent.Delta(obj.str("text")))
                     "tool" -> emit(ChatEvent.Tool(obj.str("text")))
-                    "error" -> emit(ChatEvent.Error(obj.str("msg")))
+                    "error" -> {
+                        emit(ChatEvent.Error(obj.str("msg").ifBlank { "对话服务返回错误" }))
+                        return@flow
+                    }
                     "done" -> {
-                        val chat = AppJson.decodeFromJsonElement(AiChat.serializer(), obj["chat"]!!)
+                        val chatJson = obj["chat"] ?: throw IOException("对话完成帧缺少会话数据")
+                        val chat = try {
+                            AppJson.decodeFromJsonElement(AiChat.serializer(), chatJson)
+                        } catch (e: Exception) {
+                            throw IOException("对话完成帧格式错误", e)
+                        }
                         emit(ChatEvent.Done(chat))
                     }
+                    else -> throw IOException("对话流包含未知事件")
                 }
             }
         }

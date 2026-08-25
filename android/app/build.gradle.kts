@@ -82,4 +82,5 @@ dependencies {
     implementation(libs.haze.materials)
     // 纯逻辑的 JVM 测试（会话流分组等）：跑 ./gradlew :app:testReleaseUnitTest，不需要设备
     testImplementation(libs.junit)
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

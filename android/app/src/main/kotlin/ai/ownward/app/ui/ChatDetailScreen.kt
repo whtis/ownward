@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -29,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,6 +56,32 @@ import ai.ownward.app.data.OutImage
 import ai.ownward.app.ui.theme.ownwardColors
 import kotlinx.coroutines.launch
 
+internal data class ChatProviderSelection(
+    val providers: Map<String, List<String>>,
+    val provider: String,
+    val model: String,
+)
+
+internal fun selectChatProvider(
+    raw: Map<String, List<String>>,
+    requestedProvider: String,
+    requestedModel: String,
+    existingChat: Boolean,
+): ChatProviderSelection {
+    val available = raw.filterValues { it.isNotEmpty() }
+    require(available.isNotEmpty()) { "服务端没有可用的对话模型" }
+    if (existingChat) {
+        require(available[requestedProvider]?.contains(requestedModel) == true) {
+            "此对话使用的 $requestedProvider · $requestedModel 当前不可用"
+        }
+        return ChatProviderSelection(available, requestedProvider, requestedModel)
+    }
+    val selected = available[requestedProvider]?.firstOrNull()
+        ?.let { requestedProvider to it }
+        ?: available.entries.first().let { it.key to it.value.first() }
+    return ChatProviderSelection(available, selected.first, selected.second)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatDetailScreen(client: OwnwardClient, chatId: String?, onBack: () -> Unit) {
@@ -73,26 +101,37 @@ fun ChatDetailScreen(client: OwnwardClient, chatId: String?, onBack: () -> Unit)
     var optimisticImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var modelMenu by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var loadAttempt by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val listState = rememberLazyListState()
 
-    LaunchedEffect(chatId) {
-        runCatching { providers = client.chatProviders() }
-        // 新对话取该供应商型号表第一个（配置里排在首位的即默认，如 gpt-5.6-sol）；
-        // 既有对话跟随会话已存的 provider/model
-        if (chatId == null) providers[provider]?.firstOrNull()?.let { model = it }
-        else providers[provider]?.firstOrNull()?.let { if (model !in (providers[provider] ?: emptyList())) model = it }
-        if (chatId != null) {
-            try {
+    LaunchedEffect(chatId, loadAttempt) {
+        loading = true
+        loadError = null
+        try {
+            val available = client.chatProviders()
+            if (chatId != null) {
                 val chat = client.chatMessages(chatId)
                 messages = chat.messages
-                provider = chat.provider
-                model = chat.model
                 title = chat.title
-            } catch (e: Exception) {
-                error = e.message
+                val selected = selectChatProvider(available, chat.provider, chat.model, existingChat = true)
+                providers = selected.providers
+                provider = selected.provider
+                model = selected.model
+            } else {
+                val selected = selectChatProvider(available, provider, model, existingChat = false)
+                providers = selected.providers
+                provider = selected.provider
+                model = selected.model
             }
+        } catch (e: Exception) {
+            providers = emptyMap()
+            loadError = e.message ?: "对话服务加载失败"
+        } finally {
+            loading = false
         }
     }
 
@@ -116,7 +155,7 @@ fun ChatDetailScreen(client: OwnwardClient, chatId: String?, onBack: () -> Unit)
     fun send() {
         val text = input.trim()
         val images = pendingImages
-        if ((text.isBlank() && images.isEmpty()) || streaming) return
+        if ((text.isBlank() && images.isEmpty()) || streaming || loading || loadError != null || providers[provider]?.contains(model) != true) return
         // 乐观提交：无 done 帧就回滚（对齐 web/chat.js 的事务语义）
         val optimistic = AiMessage(
             role = "user",
@@ -220,8 +259,15 @@ fun ChatDetailScreen(client: OwnwardClient, chatId: String?, onBack: () -> Unit)
                 onPickImages = {
                     picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
-                canSend = !streaming,
+                canSend = !streaming && !loading && loadError == null && providers[provider]?.contains(model) == true,
                 busy = streaming,
+                controlHint = when {
+                    loading -> "正在连接对话服务…"
+                    loadError != null -> loadError
+                    else -> null
+                },
+                controlAction = loadError?.let { "重试" to { loadAttempt++ } },
+                placeholder = if (loading) "正在加载模型…" else if (loadError != null) "对话暂不可用" else "发消息…",
                 onSend = ::send,
             )
         },
@@ -237,6 +283,28 @@ fun ChatDetailScreen(client: OwnwardClient, chatId: String?, onBack: () -> Unit)
                 bottom = padding.calculateBottomPadding() + 8.dp,
             ),
         ) {
+            if (loading && messages.isEmpty()) {
+                item(key = "loading") {
+                    Row(
+                        Modifier.fillMaxWidth().padding(24.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text("正在加载对话…", modifier = Modifier.padding(start = 10.dp))
+                    }
+                }
+            } else if (loadError != null && messages.isEmpty()) {
+                item(key = "load-error") {
+                    Column(
+                        Modifier.fillMaxWidth().padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(loadError ?: "对话服务加载失败", color = ownwardColors.Danger)
+                        TextButton(onClick = { loadAttempt++ }) { Text("重新加载") }
+                    }
+                }
+            }
             // reverseLayout：先写的在底部——流式气泡最下、消息倒序；key 用正序下标，追加新消息时旧项不换位
             if (streaming) {
                 item(key = "stream") {

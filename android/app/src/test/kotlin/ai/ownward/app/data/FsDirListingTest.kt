@@ -14,7 +14,7 @@ class FsDirListingTest {
         val requestPath = fsDirsPath(path)
 
         assertEquals(
-            "/api/fs/dirs?path=%2FUsers%2Ftis%2F%E5%85%A8%E9%83%A8+%E5%B7%A5%E4%BD%9C%2F%23%E8%8D%89%E7%A8%BF",
+            "/api/fs/dirs?path=%2FUsers%2Fexample%2F%E5%85%A8%E9%83%A8+%E5%B7%A5%E4%BD%9C%2F%23%E8%8D%89%E7%A8%BF",
             requestPath,
         )
         assertEquals(path, URLDecoder.decode(requestPath.substringAfter("path="), "UTF-8"))
