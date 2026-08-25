@@ -1,16 +1,6 @@
-# 安卓发布流水线：构建签名 APK → 发到 GitHub Releases。
-#
-# 触发：
-#   - 推 tag `android-v<versionName>+<versionCode>`（由 scripts/android-publish.sh 生成）→ 构建 + 建 Release
-#   - 推 tag `android-test*` / workflow_dispatch → 只构建、传 Actions artifact，不建 Release（流水线自检用）
-#   - push main 且改了 android/ → 同上只构建：早发现编译挂，顺便给默认分支写 Gradle 缓存（tag 构建只能读默认分支的缓存）
-#
-# 签名：四个 repo secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
-#   还原成 ~/.ownward/android-signing.properties，走 android/app/build.gradle.kts 原有的读法。
-#   缺 secrets 时 release tag 直接失败（debug 签名的包装了就升不了级），自检构建允许 debug 签名。
-#
-# Release 资产：ownward-<versionName>-<versionCode>.apk、android.json（与 daemon data/app/android.json 同格式）、SHA256SUMS
-#   daemon 侧用 `scripts/android-release.sh --from-github [tag]` 拉取，手机「检查更新」即可升级。
+# Android build and release.
+# Both repositories build artifacts. Only an android-v* tag in whtis/ownward
+# that points to public main can create a GitHub Release.
 name: android-release
 
 on:
@@ -20,13 +10,11 @@ on:
       - "android-test*"
     branches:
       - main
+      - master
     paths:
       - "android/**"
       - ".github/workflows/android-release.yml"
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 concurrency:
   group: android-release-${{ github.ref }}
@@ -36,13 +24,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      name: ${{ steps.ver.outputs.name }}
+      code: ${{ steps.ver.outputs.code }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
+      apk: ${{ steps.ver.outputs.apk }}
     defaults:
       run:
         shell: bash
     env:
-      RELEASE: ${{ startsWith(github.ref, 'refs/tags/android-v') && 'true' || 'false' }}
+      RELEASE: ${{ github.repository == 'whtis/ownward' && startsWith(github.ref, 'refs/tags/android-v') && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-java@v5
         with:
@@ -61,7 +58,7 @@ jobs:
           [ -n "$NAME" ] && [ -n "$CODE" ] || { echo "::error::读不到 $G 的 versionName/versionCode"; exit 1; }
           if [ "$RELEASE" = "true" ]; then
             EXPECT="android-v${NAME}+${CODE}"
-            [ "$GITHUB_REF_NAME" = "$EXPECT" ] || { echo "::error::tag $GITHUB_REF_NAME 与代码里的版本不符（应为 $EXPECT）——请用 scripts/android-publish.sh 打 tag"; exit 1; }
+            [ "$GITHUB_REF_NAME" = "$EXPECT" ] || { echo "::error::tag $GITHUB_REF_NAME 与代码里的版本不符（应为 $EXPECT）"; exit 1; }
           fi
           PRE=false; case "$NAME" in *-*) PRE=true;; esac
           {
@@ -109,17 +106,14 @@ jobs:
           SRC=$(ls android/app/build/outputs/apk/release/app-release*.apk | head -1)
           [ -f "$SRC" ] || { echo "::error::找不到 release APK"; exit 1; }
           mkdir -p dist && cp "$SRC" "dist/$APK_NAME"
-          # 校验签名确实是 release key（debug key 的证书 CN=Android Debug）
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
           "$BT/apksigner" verify --print-certs "dist/$APK_NAME" | tee /tmp/certs.txt
           if [ "$RELEASE" = "true" ] && grep -q 'CN=Android Debug' /tmp/certs.txt; then
             echo "::error::APK 是 debug 签名"; exit 1
           fi
-          # 发布说明 = 附注 tag 的内容（actions/checkout 只拿到 commit，要重新拉 tag 对象；lightweight tag 为空）
           NOTES=""
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            git fetch --force --quiet origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME" || true
             NOTES=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | python3 -c 'import sys; print(sys.stdin.read().strip())')
           fi
           python3 - "$NAME" "$CODE" "$NOTES" > dist/android.json <<'PY'
@@ -132,9 +126,8 @@ jobs:
             [ -n "$NOTES" ] && { echo "$NOTES"; echo; }
             echo '```'; cat dist/SHA256SUMS; echo '```'; echo
             echo "- 手机直装：下载 \`$APK_NAME\` 安装（已装旧版可直接覆盖，同一签名）"
-            echo "- daemon 分发：\`scripts/android-release.sh --from-github $GITHUB_REF_NAME\`，手机端「设置 → 检查更新」升级"
+            echo "- daemon 分发：\`scripts/android-release.sh --from-github $GITHUB_REF_NAME\`，手机端「检查更新」升级"
           } > dist/RELEASE_NOTES.md
-          ls -la dist
 
       - uses: actions/upload-artifact@v7
         with:
@@ -143,18 +136,43 @@ jobs:
             dist/*.apk
             dist/android.json
             dist/SHA256SUMS
+            dist/RELEASE_NOTES.md
           if-no-files-found: error
           retention-days: 30
 
+  publish:
+    if: github.repository == 'whtis/ownward' && startsWith(github.ref, 'refs/tags/android-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 确认 release tag 来自 main
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          TAG_COMMIT=$(git rev-list -n 1 "$GITHUB_REF")
+          git merge-base --is-ancestor "$TAG_COMMIT" origin/main || {
+            echo "::error::正式 Android tag 必须指向 main 可达的提交"; exit 1
+          }
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: ownward-android-${{ needs.build.outputs.name }}-${{ needs.build.outputs.code }}
+          path: dist
+
       - name: 发布 GitHub Release
-        if: env.RELEASE == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          NAME: ${{ steps.ver.outputs.name }}
-          CODE: ${{ steps.ver.outputs.code }}
-          PRE: ${{ steps.ver.outputs.prerelease }}
-          APK_NAME: ${{ steps.ver.outputs.apk }}
+          NAME: ${{ needs.build.outputs.name }}
+          CODE: ${{ needs.build.outputs.code }}
+          PRE: ${{ needs.build.outputs.prerelease }}
+          APK_NAME: ${{ needs.build.outputs.apk }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then

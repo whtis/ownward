@@ -12,7 +12,7 @@ export const KERNEL_API_VERSION = 1;
  *  没有 minKernelVersion 的话，「新 Vertical 装到老 Kernel」会一路放行到
  *  运行时才炸（老 Kernel 的方法分发链走到末尾抛 EXTENSION_KERNEL_METHOD_DENIED），
  *  用户看到的是「页面打得开，一点某个功能就报错」。 */
-export const KERNEL_VERSION = "1.0.0";
+export const KERNEL_VERSION = "1.0.1";
 
 export type VerticalState = "discovered" | "disabled" | "starting" | "migration_failed" | "ready" | "degraded" | "failed" | "stopping";
 export type VerticalCapability = "storage" | "sessions" | "tasks" | "tasks:full-access" | "actions" | "events" | "scheduler" | "notify" | "vault" | "llm";

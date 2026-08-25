@@ -306,15 +306,15 @@ bun install --frozen-lockfile
 ### 安卓发版
 
 ```bash
-scripts/android-publish.sh -n "发布说明"                 # 在 main：bump 版本 → 提交 → 打 tag → push
-scripts/android-release.sh --from-github                  # 构建完成后：把 GitHub Release 的 APK 发到 daemon，手机「检查更新」升级
+cd /path/to/ownward-public && scripts/android-publish.sh -n "发布说明" # 仅在公开 main：bump 版本 → tag → push
+scripts/android-release.sh --from-github                  # 从公开 GitHub Release 下载 APK 到 daemon，手机「检查更新」升级
 ```
 
-推 `android-v<versionName>+<versionCode>` tag 后，GitHub Actions（`.github/workflows/android-release.yml`）
+推 `android-v<versionName>+<versionCode>` tag 后，公开仓库 `whtis/ownward` 的 GitHub Actions（`.github/workflows/android-release.yml`）
 用 repo secrets 里的签名密钥构建 release APK，连同 `android.json`、`SHA256SUMS` 发到 GitHub Releases
 （alpha/beta 标为 prerelease）。渠道 `--channel alpha|beta|stable` 只能前进，stable 必须已有同版本 beta；
 `--version X.Y.Z` 才改版本号，默认只递增构建号（`YYYYMMDDN`）。推 `android-test*` tag 或手动触发只构建不发布，
-用来自检流水线。
+用来自检流水线。私有仓只保留 Android 构建 artifact，不能创建 Release。
 
 ## 二次开发
 

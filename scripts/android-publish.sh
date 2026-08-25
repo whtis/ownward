@@ -1,6 +1,7 @@
 #!/bin/bash
-# 安卓发版：bump 版本 → 提交 → 打附注 tag → push，GitHub Actions（.github/workflows/android-release.yml）
+# 安卓正式发版：bump 版本 → 提交 → 打附注 tag → push，GitHub Actions（.github/workflows/android-release.yml）
 # 接手构建签名 APK 并发到 GitHub Releases；daemon 侧再用 scripts/android-release.sh --from-github 拉取分发。
+# 只能在公开仓库 whtis/ownward 的 main 上执行；私有仓只做构建自检，不能产生第二个分发渠道。
 #
 # 版本规则：
 #   versionCode = YYYYMMDDN（今天 + 当日序号，每次发版自动 +1）
@@ -9,20 +10,19 @@
 #   tag = android-v<versionName>+<versionCode>（workflow 会校验 tag 与代码一致）
 #
 # 用法：scripts/android-publish.sh [-n "发布说明"] [--channel alpha|beta|stable] [--version X.Y.Z]
-#                                  [--allow-branch] [--no-push] [--dry-run]
-#   默认只允许在 main 上发；--allow-branch 放行其他分支（流水线自检用）
+#                                  [--no-push] [--dry-run]
+#   只允许在 main 上正式发布；自检使用 android-test* tag 或 workflow_dispatch。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GRADLE="$ROOT/android/app/build.gradle.kts"
-NOTES=""; CHANNEL=""; NEW_BASE=""; ALLOW_BRANCH=0; PUSH=1; DRY=0
+NOTES=""; CHANNEL=""; NEW_BASE=""; PUSH=1; DRY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     -n|--notes) NOTES="$2"; shift 2;;
     --channel) CHANNEL="$2"; shift 2;;
     --version) NEW_BASE="$2"; shift 2;;
-    --allow-branch) ALLOW_BRANCH=1; shift;;
     --no-push) PUSH=0; shift;;
     --dry-run) DRY=1; shift;;
     -h|--help) sed -n '2,14p' "$0"; exit 0;;
@@ -31,9 +31,11 @@ while [ $# -gt 0 ]; do
 done
 
 cd "$ROOT"
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || git remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')
+[ "$REPO" = "whtis/ownward" ] || { echo "正式 Android Release 只从 whtis/ownward 发布；当前仓库是 $REPO"; exit 1; }
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ "$BRANCH" != "main" ] && [ $ALLOW_BRANCH = 0 ]; then
-  echo "当前分支 $BRANCH 不是 main；发版应在 main 上做（自检可加 --allow-branch）"; exit 1
+if [ "$BRANCH" != "main" ]; then
+  echo "当前分支 $BRANCH 不是 main；正式 Android 发布只能在 main 上做"; exit 1
 fi
 if [ -n "$(git status --porcelain)" ] && [ $DRY = 0 ]; then
   echo "工作区不干净，先提交或 stash"; git status --short | head; exit 1
@@ -90,7 +92,6 @@ if [ $PUSH = 1 ]; then
   # 先推分支再推 tag：实测 tag 指向的 commit 不在任何远端分支上时 GitHub 不触发 workflow
   git push -q origin "HEAD:$BRANCH"
   git push -q origin "refs/tags/$TAG"
-  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || git remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')
   echo "已推送；GitHub Actions 构建中：gh run list --workflow android-release.yml -R $REPO"
   echo "发布页：https://github.com/$REPO/releases/tag/${TAG//+/%2B}"
   echo "daemon 分发：scripts/android-release.sh --from-github $TAG"
