@@ -7,7 +7,7 @@ cd "$(dirname "$0")/..";SOURCE_ROOT="$(pwd)";DATA_ROOT="${OWNWARD_DATA_ROOT:-$SO
 durable_write(){ local path="$1" mode="${2:-384}";"$BUN" "$SOURCE_ROOT/src/release/durable-write.ts" write "$path" "$mode"; }
 durable_remove(){ "$BUN" "$SOURCE_ROOT/src/release/durable-write.ts" remove "$1"; }
 proc_start(){ ps -o lstart= -p "$1" 2>/dev/null|sed 's/^ *//'; }
-if ! mkdir -m 700 "$LOCK" 2>/dev/null;then LPID="$(sed -n 's/^pid=//p' "$LOCK/owner" 2>/dev/null||true)";LSTART="$(sed -n 's/^start=//p' "$LOCK/owner" 2>/dev/null||true)";if [[ "$LPID" =~ ^[1-9][0-9]*$ ]]&&kill -0 "$LPID" 2>/dev/null&&[ "$(proc_start "$LPID")" = "$LSTART" ];then echo "❌ 已有 release transaction pid=$LPID" >&2;exit 75;fi;STALE="$RELEASES/.install.stale.$$";mv "$LOCK" "$STALE"||exit 75;chmod -R u+rwX,go-rwx "$STALE" 2>/dev/null||true;rm -rf "$STALE";mkdir -m 700 "$LOCK"||exit 75;fi
+if ! mkdir -m 700 "$LOCK" 2>/dev/null;then [ -d "$LOCK" ]&&[ ! -L "$LOCK" ]||{ echo "❌ release lock path invalid" >&2;exit 75;};LPID="$(sed -n 's/^pid=//p' "$LOCK/owner" 2>/dev/null||true)";LSTART="$(sed -n 's/^start=//p' "$LOCK/owner" 2>/dev/null||true)";if [[ "$LPID" =~ ^[1-9][0-9]*$ ]]&&kill -0 "$LPID" 2>/dev/null&&[ "$(proc_start "$LPID")" = "$LSTART" ];then echo "❌ 已有 release transaction pid=$LPID" >&2;exit 75;fi;STALE="$RELEASES/.install.stale.$$";chmod u+rwx "$LOCK" 2>/dev/null||true;mv "$LOCK" "$STALE"||exit 75;chmod -R u+rwX,go-rwx "$STALE" 2>/dev/null||true;rm -rf "$STALE";mkdir -m 700 "$LOCK"||exit 75;fi
 printf 'pid=%s\nstart=%s\n' "$$" "$(proc_start $$)"|durable_write "$LOCK/owner" 384;chmod 700 "$LOCK"
 initial_cleanup(){ rm -f "$LOCK/owner";rmdir "$LOCK" 2>/dev/null||true; }
 trap initial_cleanup EXIT
