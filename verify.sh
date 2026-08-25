@@ -50,17 +50,25 @@ step "3/6 单元测试（bun test：src 下全部 *.test.ts，含子目录）"
 # worktree 里没有 data/releases，所以这个坑只在主检出暴露——别因为 worktree 全绿就以为没事。
 # -co 含未提交的新测试，--exclude-standard 吃 .gitignore 排除 data/；NUL 分隔防文件名带空格。
 TEST_FILES=()
+SERIAL_TEST_FILES=()
 while IFS= read -r -d '' f; do
   [ -f "$f" ] || continue  # 已删除但尚未暂存的 tracked test 不应传给 Bun。
+  # This test spawns a release shell transaction and deliberately changes
+  # filesystem permissions. Keep it in an independent Bun process so no other
+  # test file can supply inherited process state to that transaction.
+  if [ "$f" = "src/release/install-release-lock.test.ts" ]; then
+    SERIAL_TEST_FILES+=("$PWD/$f")
+    continue
+  fi
   TEST_FILES+=("$PWD/$f")
 done \
   < <(git ls-files -zco --exclude-standard -- 'src/**/*.test.ts' 'src/*.test.ts' 2>/dev/null)
 if [ "${#TEST_FILES[@]}" -eq 0 ]; then
   bad "找不到任何测试文件（不在 git 仓库里？）"
-elif bun test "${TEST_FILES[@]}" >/tmp/ownward-verify-test.log 2>&1; then
-  ok "$(grep -oE '[0-9]+ pass' /tmp/ownward-verify-test.log | tail -1) bun test"
+elif bun test --timeout 15000 "${TEST_FILES[@]}" >/tmp/ownward-verify-test.log 2>&1 && bun test --timeout 15000 "${SERIAL_TEST_FILES[@]}" >>/tmp/ownward-verify-test.log 2>&1; then
+  ok "$(grep -oE '[0-9]+ pass' /tmp/ownward-verify-test.log | paste -sd+ -) bun test"
 else
-  tail -8 /tmp/ownward-verify-test.log
+  tail -80 /tmp/ownward-verify-test.log
   bad "bun test 失败"
 fi
 
