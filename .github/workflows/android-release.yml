@@ -26,11 +26,6 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
-    outputs:
-      name: ${{ steps.ver.outputs.name }}
-      code: ${{ steps.ver.outputs.code }}
-      prerelease: ${{ steps.ver.outputs.prerelease }}
-      apk: ${{ steps.ver.outputs.apk }}
     defaults:
       run:
         shell: bash
@@ -131,7 +126,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ownward-android-${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}
+          name: ownward-android-release
           path: |
             dist/*.apk
             dist/android.json
@@ -162,25 +157,26 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          name: ownward-android-${{ needs.build.outputs.name }}-${{ needs.build.outputs.code }}
+          name: ownward-android-release
           path: dist
 
       - name: 发布 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          NAME: ${{ needs.build.outputs.name }}
-          CODE: ${{ needs.build.outputs.code }}
-          PRE: ${{ needs.build.outputs.prerelease }}
-          APK_NAME: ${{ needs.build.outputs.apk }}
         run: |
           set -euo pipefail
+          APK=$(find dist -maxdepth 1 -type f -name '*.apk' -print -quit)
+          [ -n "$APK" ] || { echo "::error::artifact 缺 APK"; exit 1; }
+          NAME=$(python3 -c 'import json; print(json.load(open("dist/android.json"))["versionName"])')
+          CODE=$(python3 -c 'import json; print(json.load(open("dist/android.json"))["versionCode"])')
+          PRE=false; case "$NAME" in *-*) PRE=true;; esac
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release 已存在，只更新资产"
-            gh release upload "$TAG" "dist/$APK_NAME" dist/android.json dist/SHA256SUMS --clobber
+            gh release upload "$TAG" "$APK" dist/android.json dist/SHA256SUMS --clobber
           else
             ARGS=(--verify-tag --title "Android $NAME ($CODE)" --notes-file dist/RELEASE_NOTES.md --generate-notes)
             [ "$PRE" = "true" ] && ARGS+=(--prerelease)
-            gh release create "$TAG" "dist/$APK_NAME" dist/android.json dist/SHA256SUMS "${ARGS[@]}"
+            gh release create "$TAG" "$APK" dist/android.json dist/SHA256SUMS "${ARGS[@]}"
           fi
           gh release view "$TAG" --json url -q .url
