@@ -15,6 +15,7 @@ describe("directory picker stacking contract", () => {
   test("both directory inputs use the shared picker and preserve their selection targets", () => {
     expect(app).toContain('$("#w-browse").addEventListener("click", () =>\n    openDirPicker((dir) => { $("#w-dir").value = dir;');
     expect(app).toContain('$("#add-dir-browse").addEventListener("click", () =>\n    openDirPicker((dir) => { $("#add-dir-input").value = dir;');
+    expect(app).toContain('$("#w-extra-browse").addEventListener("click", () =>\n    openDirPicker((dir) => addWorkExtraDir(dir)');
     expect(app).toContain('function dpPick(path) { const f = DP.onPick; dpClose(); f?.(path); }');
     expect(app).toContain('$("#dp-cancel").addEventListener("click", dpClose)');
   });

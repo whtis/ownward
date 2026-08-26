@@ -104,7 +104,7 @@ fi
 
 step "5/6 核心 API 探活"
 if [ "$BOOT_OK" = 1 ]; then
-  for ep in "api/feed?limit=1" "api/tasks" "api/chat/list" "api/vault/list" "api/logs?lines=1" "app.js" "style.css"; do
+  for ep in "api/feed?limit=1" "api/tasks" "api/chat/list" "api/vault/list" "api/logs?lines=1" "app.js" "image-viewer.js" "style.css"; do
     if curl -sf "http://127.0.0.1:$PORT/$ep" >/dev/null 2>&1; then ok "$ep"; else bad "$ep"; fi
   done
 fi
@@ -112,7 +112,7 @@ kill $DPID 2>/dev/null; wait $DPID 2>/dev/null
 
 step "6/6 Web 前端资产（语法检查 + 静态路由探活）"
 WEB_OK=1
-for f in web/index.html web/style.css web/app.js web/today.js web/tasks.js web/chat.js web/lark.js web/mail.js web/pr.js web/roles.js web/notes.js web/system.js; do
+for f in web/index.html web/style.css web/app.js web/image-viewer.js web/today.js web/tasks.js web/chat.js web/lark.js web/mail.js web/pr.js web/roles.js web/notes.js web/system.js; do
   [ -f "$f" ] || { bad "缺文件 $f"; WEB_OK=0; }
 done
 for f in web/*.js; do

@@ -5,7 +5,76 @@
 import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { CONFIG_ROOT, ROOT, cfg, log, run } from "./util.ts";
+import { notify } from "./notify.ts";
+import { CONFIG_ROOT, ROOT, cfg, log, run, updateState } from "./util.ts";
+
+type LlmEngine = "claude" | "codex";
+interface ProviderResult { value: any | null; error?: string }
+const FAILOVER_NOTICE_COOLDOWN_MS = 6 * 3600_000;
+
+export function isFailoverEligible(error: string): boolean {
+  return /(quota|usage limit|hit (?:your )?(?:weekly )?limit|reached (?:your )?(?:weekly )?limit|rate.?limit|too many requests|authentication|unauthorized|not logged in|(?:run|use) \/login|login required|overload|unavailable|capacity|timed? out|command not found|\b(?:401|429|529)\b)/i.test(error);
+}
+
+export function safeProviderReason(error: string): string {
+  if (/(quota|usage limit|hit (?:your )?(?:weekly )?limit|reached (?:your )?(?:weekly )?limit)/i.test(error)) return "额度已耗尽";
+  if (/(rate.?limit|too many requests|\b429\b)/i.test(error)) return "请求频率受限";
+  if (/(authentication|unauthorized|not logged in|(?:run|use) \/login|login required|\b401\b)/i.test(error)) return "登录认证失效";
+  if (/(timed? out)/i.test(error)) return "请求超时";
+  if (/(command not found)/i.test(error)) return "命令不可用";
+  return "服务暂不可用";
+}
+
+export function shouldNotifyFailover(previous: any, now: number, cooldownMs = FAILOVER_NOTICE_COOLDOWN_MS): boolean {
+  const last = Date.parse(previous?.lastNotifiedAt || "");
+  return !Number.isFinite(last) || now - last >= cooldownMs;
+}
+
+export async function reportFailover(state: "fallback" | "failed", primary: LlmEngine, fallback: LlmEngine, rawError: string, deps: {
+  update?: typeof updateState; send?: typeof notify; now?: () => number; cooldownMs?: number;
+} = {}) {
+  const update = deps.update || updateState, send = deps.send || notify, now = deps.now?.() ?? Date.now();
+  const detail = safeProviderReason(rawError);
+  let shouldNotify = false;
+  try {
+    update((s) => {
+      shouldNotify = shouldNotifyFailover({ lastNotifiedAt: s.llmFailoverLastNotifiedAt }, now, deps.cooldownMs);
+      if (shouldNotify) s.llmFailoverLastNotifiedAt = new Date(now).toISOString();
+      s.llmFailoverNotice = {
+        state, primary, fallback, detail, at: new Date(now).toISOString(),
+      };
+    });
+  } catch (e) { log(`llm failover state unavailable: ${e}`); shouldNotify = true; }
+  if (!shouldNotify) return;
+  const text = state === "fallback"
+    ? `⚠️ 后台 AI 已自动从 ${primary} 切换到 ${fallback}\n原因：${detail}`
+    : `🚨 后台 AI 摘要不可用：${primary} 与 ${fallback} 均失败\n待收尾任务会自动退避重试，不会丢失。`;
+  try { await send(text, { source: "system" }); } catch (e) { log(`llm failover notification unavailable: ${e}`); }
+}
+
+function clearFailoverNotice() {
+  try { updateState((s) => { delete s.llmFailoverNotice; }); }
+  catch (e) { log(`llm failover recovery state unavailable: ${e}`); }
+}
+
+export async function runWithFailover(
+  primary: LlmEngine,
+  fallback: LlmEngine | null,
+  invoke: (engine: LlmEngine) => Promise<ProviderResult>,
+  report = reportFailover,
+  clear = clearFailoverNotice,
+): Promise<any | null> {
+  const first = await invoke(primary);
+  if (first.value !== null) {
+    try { clear(); } catch (e) { log(`llm failover recovery observer failed: ${e}`); }
+    return first.value;
+  }
+  if (!fallback || !isFailoverEligible(first.error || "")) return null;
+  const second = await invoke(fallback);
+  try { await report(second.value !== null ? "fallback" : "failed", primary, fallback, first.error || "unknown provider failure"); }
+  catch (e) { log(`llm failover observer failed: ${e}`); }
+  return second.value;
+}
 
 const rules = () => {
   let owner = "";
@@ -15,12 +84,14 @@ const rules = () => {
 };
 
 export async function llmJson(prompt: string): Promise<any | null> {
-  const engine = cfg.llm?.engine || "claude";
-  const r = engine === "codex" ? await viaCodex(prompt) : await viaClaude(prompt);
-  return r;
+  const engine = (cfg.llm?.engine || "claude") as LlmEngine;
+  const configured = cfg.llm?.fallbackEngine;
+  const fallback = configured === false || configured === "off" ? null
+    : (configured || (engine === "claude" ? "codex" : null)) as LlmEngine | null;
+  return runWithFailover(engine, fallback, (provider) => provider === "codex" ? viaCodex(prompt) : viaClaude(prompt));
 }
 
-async function viaClaude(prompt: string): Promise<any | null> {
+async function viaClaude(prompt: string): Promise<ProviderResult> {
   const args = [
     "-p", prompt,
     "--model", cfg.llm?.claudeModel || "haiku",
@@ -36,13 +107,14 @@ async function viaClaude(prompt: string): Promise<any | null> {
     env: { DISABLE_OMC: "1" },     // 关掉用户级 OMC hooks，避免注入编排指令
   });
   if (r.code !== 0) {
-    log(`claude -p failed (${r.code}): ${(r.stderr || r.stdout).slice(-300)}`);
-    return null;
+    const error = (r.stderr || r.stdout).slice(-500);
+    log(`claude -p failed (${r.code}): ${error}`);
+    return { value: null, error };
   }
-  return parseJson(r.stdout);
+  return { value: parseJson(r.stdout) };
 }
 
-async function viaCodex(prompt: string): Promise<any | null> {
+async function viaCodex(prompt: string): Promise<ProviderResult> {
   const dir = mkdtempSync(join(tmpdir(), "ownward-llm-"));
   const outFile = join(dir, "last.txt");
   const args = [
@@ -54,12 +126,13 @@ async function viaCodex(prompt: string): Promise<any | null> {
   try {
     const r = await run([cfg.llm?.codexBin || "codex", ...args], { timeoutMs: 180_000 });
     if (r.code !== 0) {
-      log(`codex exec failed (${r.code}): ${r.stderr.slice(-300)}`);
-      return null;
+      const error = (r.stderr || r.stdout).slice(-500);
+      log(`codex exec failed (${r.code}): ${error}`);
+      return { value: null, error };
     }
     let text = "";
     try { text = readFileSync(outFile, "utf8"); } catch { text = r.stdout; }
-    return parseJson(text);
+    return { value: parseJson(text) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

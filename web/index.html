@@ -101,13 +101,14 @@
   <div class="modal" role="dialog" aria-label="追加可写目录">
     <h2>追加可写目录</h2>
     <label>项目目录</label>
-    <div class="row" style="align-items:center;gap:6px">
+    <div class="row dir-input-row" style="align-items:center;gap:6px">
       <input type="text" id="add-dir-input" placeholder="~/workspace/some-repo" spellcheck="false" list="add-dir-list" style="flex:1;margin:0">
       <button class="icon-btn" id="add-dir-browse" title="浏览目录" type="button"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.8 5.5h5l1.5 1.7h7.9v8.3H2.8z"/><path d="M2.8 7.2V4.5h4.5l1.4 1.6"/></svg></button>
     </div>
     <datalist id="add-dir-list"></datalist>
+    <div class="dir-add-status" id="add-dir-status"></div>
     <div class="actions">
-      <button class="button ghost" id="add-dir-cancel" type="button">取消</button>
+      <button class="button ghost" id="add-dir-cancel" type="button">完成</button>
       <button class="button primary" id="add-dir-submit" type="button">加入目录</button>
     </div>
   </div>
@@ -118,11 +119,22 @@
   <div class="modal" role="dialog" aria-label="派新任务">
     <h2>派新任务</h2>
     <label>项目目录</label>
-    <div class="row" style="align-items:center;gap:6px">
+    <div class="row dir-input-row" style="align-items:center;gap:6px">
       <input type="text" id="w-dir" placeholder="~/workspace/some-repo" spellcheck="false" list="w-dir-list" style="flex:1;margin:0">
       <button class="icon-btn" id="w-browse" title="浏览目录" type="button"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.8 5.5h5l1.5 1.7h7.9v8.3H2.8z"/><path d="M2.8 7.2V4.5h4.5l1.4 1.6"/></svg></button>
     </div>
     <datalist id="w-dir-list"></datalist>
+    <div id="w-extra-wrap">
+      <label>附加目录 <span class="label-hint">可选，后台 agent 可同时读写多个项目</span></label>
+      <div class="row dir-input-row" style="align-items:center;gap:6px">
+        <input type="text" id="w-extra-input" placeholder="输入或选择后按 Enter 添加" spellcheck="false" list="w-extra-list" style="flex:1;margin:0">
+        <button class="icon-btn" id="w-extra-browse" title="浏览附加目录" type="button"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.8 5.5h5l1.5 1.7h7.9v8.3H2.8z"/><path d="M2.8 7.2V4.5h4.5l1.4 1.6"/></svg></button>
+        <button class="button ghost sm" id="w-extra-add" type="button">添加</button>
+      </div>
+      <datalist id="w-extra-list"></datalist>
+      <div class="dir-chips" id="w-extra-chips"></div>
+      <div class="label-hint" id="w-extra-disabled" hidden>terminal 模式不支持附加目录</div>
+    </div>
     <label>任务描述</label>
     <textarea id="w-task" placeholder="修复登录页闪退…（可粘贴/拖入图片，仅后台任务）"></textarea>
     <div class="composer-imgs" id="w-imgs" style="padding:6px 0 0"></div>
@@ -259,6 +271,7 @@
 <div class="toast" id="toast"></div>
 
 <script src="/app.js"></script>
+<script src="/image-viewer.js"></script>
 <script src="/skin.js"></script>
 <script src="/today.js"></script>
 <script src="/feed.js"></script>
@@ -270,6 +283,6 @@
 <script src="/roles.js"></script>
 <script src="/notes.js"></script>
 <script src="/system.js"></script>
-<script>appInit();</script>
+<script>ImageViewer.init();appInit();</script>
 </body>
 </html>

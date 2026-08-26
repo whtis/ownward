@@ -117,6 +117,7 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
   const mode: WorkTask["mode"] = opts.bg ? (`${provider}-bg` as WorkTask["mode"]) : "terminal";
   // terminal 模式给不了图（交互式 claude 只吃 argv 文本）——显式报错，不许静默丢（守则 9）
   if (opts.images?.length && mode === "terminal") throw new Error("terminal 模式不支持图片，请勾选「后台运行」");
+  if (opts.extraDirs?.length && mode === "terminal") throw new Error("terminal 模式不支持附加目录，请勾选「后台运行」");
 
   // worktree：bg 默认开（保护主 checkout），terminal 默认原地
   const useWorktree = opts.worktree ?? !!opts.bg;

@@ -266,6 +266,13 @@ export function startServer() {
         if (img) return new Response(img.bin, { headers: { "Content-Type": img.mime, "Cache-Control": "public, max-age=31536000, immutable" } });
         return new Response("not found", { status: 404 });
       }
+      const sessionImgM = p.match(/^\/api\/session-image\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/([a-f0-9]{64})$/);
+      if ((req.method === "GET" || req.method === "HEAD") && sessionImgM) {
+        const { readSessionImage } = await import("./kernel/sessions/session-images.ts");
+        const img = readSessionImage(DATA, sessionImgM[1], sessionImgM[2]);
+        if (img) return new Response(req.method === "HEAD" ? null : img.bin, { headers: { "Content-Type": img.mime, "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=31536000, immutable" } });
+        return new Response("not found", { status: 404 });
+      }
       // Android 客户端自更新：data/app/ 由 scripts/android-release.sh 写入（APK 不进 git）
       if (p === "/api/app/android") {
         const f = join(DATA, "app", "android.json");

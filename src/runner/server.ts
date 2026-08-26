@@ -182,6 +182,9 @@ export class RunnerServer {
           if (durability === "best-effort") this.metrics.observationalAppended++;
           const observed=this.providerObservations.get(provider.id??command.providerId);if(observed&&event.type==="completed"){observed.lastSuccessAt=new Date().toISOString();observed.errorClass=null;}else if(observed&&["failed","unknown-outcome"].includes(event.type)){observed.lastFailureAt=new Date().toISOString();observed.errorClass=typeof(event as any).reason==="string"?(event as any).reason:"PROVIDER_RUNTIME_ERROR";}
           this.push(saved);
+          // durable terminal 已经结束 Runner 对该 command 的所有权；不能继续等待 Provider EOF。
+          // 某些 Provider 的事件流在 terminal 后仍保持打开，继续 next() 会让 health 永久残留 activeRuns。
+          if (terminal(saved.type)) return;
         }
         catch (journalError) {
           if (durability === "best-effort") {

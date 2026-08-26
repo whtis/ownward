@@ -31,7 +31,7 @@ describe("production Session call graph", () => {
   });
   test("startWork never writes its stale whole-task snapshot after Runner submit", () => { expect(source("src/dispatch.ts")).not.toContain("updateTask(id, t)"); });
   test("uncertain Runner submit stays running for durable recovery",()=>{const text=source("src/dispatch.ts");expect(text).toContain("error?.outcomeUnknown===true");expect(text).toContain('status:"running",launchState:"accepted"');});
-  test("unknown outcome converges Task once but never enters harvest",()=>{const dispatch=source("src/dispatch.ts"),harvest=source("src/harvest.ts");expect(dispatch).toContain('runner?.status === "unknown_outcome"');expect(dispatch).toContain('run.status==="unknown_outcome")return{status:"exited"');expect(dispatch).toContain('runner-uncertain:${t.id}');expect(harvest).toContain("if (t.uncertain) continue");});
+  test("unknown outcome converges Task once but never enters harvest",()=>{const dispatch=source("src/dispatch.ts"),harvest=source("src/harvest.ts");expect(dispatch).toContain('runner?.status === "unknown_outcome"');expect(dispatch).toContain('run.status==="unknown_outcome")return{status:"exited"');expect(dispatch).toContain('runner-uncertain:${t.id}');expect(harvest).toMatch(/const candidates = loadTasks\(\)\.filter\(\(t\) => \{[\s\S]*?if \(t\.kind === "routine" \|\| t\.uncertain \|\| t\.mode === "terminal"\) return false;/);});
   test("new work ignores legacy canary and always enters Runner",()=>{expect(source("src/dispatch.ts")).toContain("createNewSessionService(roots)");});
   test("every manual/Terminal/Codex adoption bypasses the legacy canary",()=>{
     expect(source("src/dispatch.ts")).toContain("createNewSessionService([meta.cwd]).adopt");

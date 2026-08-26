@@ -20,10 +20,11 @@ const Chat = {
   model: localStorage.getItem("ownward-chat-model") || "sonnet",
   /** 角色页「与这个角色对话」入口：开一个新对话并预选角色 + 全部关联项目 */
   startWithRole(role) {
+    stashChatComposer();
     if (!Chat.roles.some((r) => r.id === role.id)) Chat.roles = [...Chat.roles, role];
     Chat.openSeq++;
     Chat.sel = null; Chat.msgs = []; Chat.binding = null;
-    clearChatImages();
+    restoreChatComposer();
     Chat.newRole = role.id;
     Chat.newProjects = chatDefaultProjects(role);
     $("#chat-root").dataset.mobileView = "detail";
@@ -47,10 +48,13 @@ TABS.chat = {
         <div class="chat-context">
           <button class="button ghost sm chat-back" id="ch-back">← 对话</button>
           <div class="chat-models"><select id="ch-provider" aria-label="对话供应商"></select><select id="ch-model" aria-label="对话模型"></select></div>
-          <div class="tools">
-            <button class="button ghost sm" id="ch-rename">重命名</button>
-            <button class="button ghost sm" id="ch-del">删除</button>
-          </div>
+          <details class="chat-more">
+            <summary class="button ghost sm">更多</summary>
+            <div class="chat-more-menu">
+              <button class="button ghost sm" id="ch-rename">重命名</button>
+              <button class="button ghost sm" id="ch-del">删除</button>
+            </div>
+          </details>
         </div>
         <div class="chat-bind" id="ch-bind"></div>
         <div class="panel session-pane">
@@ -71,19 +75,21 @@ TABS.chat = {
         </div>
       </div>`;
     $("#ch-new").addEventListener("click", () => {
+      stashChatComposer();
       Chat.openSeq++; Chat.sel = null; Chat.msgs = []; Chat.binding = null;
       Chat.newRole = ""; Chat.newProjects = [];
-      clearChatImages();
+      restoreChatComposer();
       root.dataset.mobileView = "detail";
       renderChatMsgs(); renderChatList(); renderChatBind(); $("#ch-input").focus();
     });
     $("#ch-back").addEventListener("click", () => { root.dataset.mobileView = "list"; });
     $("#ch-send").addEventListener("click", sendChat);
     const ci = $("#ch-input");
-    ci.addEventListener("input", () => { ci.style.height = "auto"; ci.style.height = Math.min(ci.scrollHeight, 200) + "px"; });
+    ci.addEventListener("input", () => { ci.style.height = "auto"; ci.style.height = Math.min(ci.scrollHeight, 200) + "px"; ComposerDrafts.setText(chatDraftKey(), ci.value); });
     // 只要 Enter 发送 + ↑ 翻历史：对话走的是裸模型，没有斜杠命令可补全
-    bindComposer(ci, { key: "chat", send: sendChat });
+    bindComposer(ci, { key: chatDraftKey, send: sendChat });
     bindChatImages(ci);
+    restoreChatComposer();
     $("#ch-rename").addEventListener("click", async () => {
       if (!Chat.sel) return;
       const title = prompt("新标题：", Chat.list.find((c) => c.id === Chat.sel)?.title || "");
@@ -96,7 +102,7 @@ TABS.chat = {
       const deletingId = Chat.sel;
       Chat.openSeq++;  // 先让尚未返回的历史读取失效，不能等删除请求结束后才清空
       await post("/api/chat/delete", { id: deletingId });
-      if (Chat.sel === deletingId) { Chat.sel = null; Chat.msgs = []; renderChatMsgs(); }
+      if (Chat.sel === deletingId) { ComposerDrafts.clearText(`chat:${deletingId}`); clearChatImages(); Chat.sel = null; Chat.msgs = []; restoreChatComposer(); renderChatMsgs(); }
       loadChatList();
     });
     $("#ch-provider").addEventListener("change", () => { Chat.provider = $("#ch-provider").value; localStorage.setItem("ownward-chat-provider", Chat.provider); fillModels(); });
@@ -141,8 +147,9 @@ function renderChatList() {
 }
 async function openChat(id) {
   const seq = ++Chat.openSeq;
-  if (Chat.sel !== id) clearChatImages();   // 待发图片跟着对话走：别把给 A 挑的图发进 B
+  if (Chat.sel !== id) stashChatComposer();
   Chat.sel = id;
+  restoreChatComposer();
   $("#chat-root").dataset.mobileView = "detail";
   $("#ch-scroll").innerHTML = stateBox("正在载入会话…", "loading");
   const c = await getJSON(`/api/chat/messages?id=${encodeURIComponent(id)}`).catch(() => null);
@@ -162,7 +169,7 @@ function renderChatMsgs(partial) {
       <div class="who">${m.role === "user" ? "我" : "AI"}</div>
       ${msgImgsHtml(m)}
       <div class="bubble">${m.role === "user" ? esc(m.text) : mdHtml(m.text)}</div>
-      ${canSave && m.role !== "user" && !Chat.streaming
+      ${canSave && m.role !== "user" && !Chat.sending?.has(chatDraftKey())
         ? `<div class="msg-actions"><button class="button ghost sm" onclick="openCandModal(${i})">存为候选</button></div>` : ""}
     </div>`).join("") || `<div class="empty">新对话</div>`) +
     (partial !== undefined ? `<div class="msg" data-role="assistant"><div class="who">AI</div><div class="bubble partial">${mdHtml(partial)}</div></div>` : "");
@@ -185,11 +192,7 @@ function chatImgSrc(im) {
   return `/api/chat/image?chat_id=${encodeURIComponent(Chat.sel || "")}&id=${encodeURIComponent(im.id || "")}`;
 }
 function msgImgsHtml(m) {
-  if (!m.images?.length) return "";
-  return `<div class="msg-imgs">${m.images.map((im) => {
-    const src = esc(chatImgSrc(im));
-    return `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="图片附件" loading="lazy"></a>`;
-  }).join("")}</div>`;
+  return imageThumbsHtml((m.images || []).map(chatImgSrc), safeChatImageUrl);
 }
 
 function bindChatImages(input) {
@@ -214,7 +217,9 @@ function bindChatImages(input) {
  *  每一条拒绝都给原话（哪张、为什么），不静默丢掉。 */
 async function addChatImage(file) {
   if (!file) return;
-  if (Chat.images.length >= CH_IMG_MAX) { toast(`一条消息最多 ${CH_IMG_MAX} 张图`); return; }
+  const key = chatDraftKey();
+  const target = ComposerDrafts.getAttachments(key);
+  if (target.length >= CH_IMG_MAX) { toast(`一条消息最多 ${CH_IMG_MAX} 张图`); return; }
   // HEIC 按 type + 扩展名双判：某些拖拽路径下 file.type 是空串（同 skin.js）
   const isHeic = /^image\/hei[cf]/.test(file.type) || /\.hei[cf]$/i.test(file.name || "");
   if (!isHeic && !CH_IMG_TYPES.includes(file.type)) { toast("只支持 PNG / JPEG / WebP / GIF / HEIC"); return; }
@@ -235,11 +240,12 @@ async function addChatImage(file) {
       toast(`图片较大（${chMb(blob.size)}），已压缩后附上`);   // 改了内容就明说，不偷偷换掉用户的图
       blob = small; type = "image/jpeg";
     }
-    const total = Chat.images.reduce((n, i) => n + i.size, 0) + blob.size;
+    const total = target.reduce((n, i) => n + i.size, 0) + blob.size;
     if (total > CH_IMG_TOTAL) { toast(`图片合计不能超过 ${chMb(CH_IMG_TOTAL)}，少发几张`); return; }
     const data = await blobToBase64(blob);
-    Chat.images.push({ media_type: type, data, size: blob.size, url: URL.createObjectURL(blob) });
-    renderChatThumbs();
+    target.push({ media_type: type, data, size: blob.size, url: URL.createObjectURL(blob) });
+    ComposerDrafts.setAttachments(key, target);
+    if (chatDraftKey() === key) { Chat.images = target; renderChatThumbs(); }
   } catch (e) { toast(`读取图片失败：${String(e).slice(0, 80)}`); }
 }
 
@@ -287,12 +293,28 @@ function renderChatThumbs() {
 function removeChatImage(i) {
   const [gone] = Chat.images.splice(i, 1);
   if (gone) URL.revokeObjectURL(gone.url);
+  ComposerDrafts.setAttachments(chatDraftKey(), Chat.images);
   renderChatThumbs();
 }
 /** 清空待发图片（换对话/发送成功）：blob url 要还回去，不然这一页一直占着内存 */
 function clearChatImages() {
   for (const im of Chat.images) URL.revokeObjectURL(im.url);
   Chat.images = [];
+  ComposerDrafts.setAttachments(chatDraftKey(), []);
+  renderChatThumbs();
+}
+
+function chatDraftKey() { return Chat.sel ? `chat:${Chat.sel}` : "chat:new"; }
+function stashChatComposer() {
+  const key = chatDraftKey(), input = $("#ch-input");
+  if (input) ComposerDrafts.setText(key, input.value);
+  ComposerDrafts.setAttachments(key, Chat.images);
+}
+function restoreChatComposer() {
+  const key = chatDraftKey(), input = $("#ch-input");
+  Chat.images = ComposerDrafts.getAttachments(key);
+  if (input) { input.value = ComposerDrafts.getText(key); input.dispatchEvent(new Event("input")); }
+  if ($("#ch-send")) $("#ch-send").disabled = !!Chat.sending?.has(key);
   renderChatThumbs();
 }
 
@@ -451,28 +473,31 @@ async function saveCandidate() {
 }
 
 async function sendChat() {
-  if (Chat.streaming) { toast("上一条还在生成"); return; }
+  const sendKey = chatDraftKey();
+  if ((Chat.sending ||= new Set()).has(sendKey)) { toast("这条对话的上一条还在生成"); return; }
   const input = $("#ch-input");
-  const text = input.value.trim();
+  const draftSnapshot = input.value;
+  const text = draftSnapshot.trim();
   const pics = Chat.images;
   if (!text && !pics.length) return;
-  composerSent("chat", text);
   input.value = "";
   input.style.height = "auto";
   // 纯图片发送的默认提示语与后端 defaultImageText 一致：气泡上写的必须是真发出去的那句
   const shown = text || (pics.length > 1 ? "看一下这几张图" : "看一下这张图");
   Chat.images = [];
+  ComposerDrafts.setAttachments(sendKey, []);
   renderChatThumbs();
   Chat.msgs.push({
     role: "user", text: shown, ts: new Date().toISOString(),
     ...(pics.length ? { images: pics.map((im) => ({ url: im.url })) } : {}),
   });
-  Chat.streaming = true;
+  const sendMsgs = Chat.msgs;
+  Chat.sending.add(sendKey);
   $("#ch-send").disabled = true;
   renderChatMsgs("");
   let acc = "";
   let status = "";  // 联网工具进行时的状态行（tool 事件），有正文后不再显示
-  const paint = () => renderChatMsgs(acc + (!acc && status ? `⟳ ${status}…` : ""));
+  const paint = () => paintChatSend(sendKey, createdId, acc + (!acc && status ? `⟳ ${status}…` : ""));
   // 角色只在新建那一刻带上；已有对话不重发绑定（后端对改绑一律报错，不静默忽略）
   const isNew = !Chat.sel;
   const bind = isNew && Chat.newRole ? { role_id: Chat.newRole, project_ids: Chat.newProjects } : {};
@@ -512,35 +537,53 @@ async function sendChat() {
         else if (ev.type === "error") { failMsg = ev.msg || "发送失败"; acc += `\n[错误] ${ev.msg}`; paint(); }
         else if (ev.type === "done" && ev.chat) {
           if (isNew) createdId = ev.chat.id;
-          Chat.sel = ev.chat.id;
-          Chat.msgs = ev.chat.messages;   // 服务端真相：图片换成受控 id 引用
+          sendMsgs.splice(0, sendMsgs.length, ...ev.chat.messages);   // 服务端真相：图片换成受控 id 引用
+          if (chatDraftKey() === sendKey) {
+            Chat.sel = ev.chat.id;
+            Chat.msgs = sendMsgs;
+          }
           landed = true;
         }
       }
     }
   } catch (e) {
-    Chat.msgs.push({ role: "assistant", text: `[请求失败] ${e}`, ts: new Date().toISOString() });
+    sendMsgs.push({ role: "assistant", text: `[请求失败] ${e}`, ts: new Date().toISOString() });
   } finally {
-    Chat.streaming = false;
-    $("#ch-send").disabled = false;
+    Chat.sending.delete(sendKey);
+    if (chatSendOwnsView(sendKey, createdId)) $("#ch-send").disabled = false;
     if (landed) {
+      composerSent(createdId ? `chat:${createdId}` : sendKey, text);
+      ComposerDrafts.clearText(sendKey, draftSnapshot);
+      if (createdId) { ComposerDrafts.moveText(sendKey, `chat:${createdId}`); ComposerDrafts.moveAttachments(sendKey, `chat:${createdId}`); }
       for (const im of pics) URL.revokeObjectURL(im.url);   // 已经能按 id 取图，预览可以还回去
     } else {
       // 没有 done = 后端一个字都没落盘（用户消息、附件都回滚了）。
       // 本地也要退回发送前：撤掉那条气泡，内容与图片放回输入框，点一下就能重发
       // 用发送前记下的序号撤回，不能按文本找：相同问题可能在历史里出现多次。
-      if (Chat.msgs[pendingAt]?.role === "user") Chat.msgs.splice(pendingAt, 1);
-      if (!input.value.trim()) input.value = text;
-      Chat.images = [...pics, ...Chat.images].slice(0, CH_IMG_MAX);
-      renderChatThumbs();
-      if (failMsg) toast(failMsg);
+      if (sendMsgs[pendingAt]?.role === "user") sendMsgs.splice(pendingAt, 1);
+      if (!ComposerDrafts.getText(sendKey)) ComposerDrafts.setText(sendKey, draftSnapshot);
+      ComposerDrafts.setAttachments(sendKey, [...pics, ...ComposerDrafts.getAttachments(sendKey)].slice(0, CH_IMG_MAX));
+      if (chatDraftKey() === sendKey) restoreChatComposer();
+      if (failMsg && chatSendOwnsView(sendKey, createdId)) toast(failMsg);
     }
     // 新对话刚落盘：绑定详情（角色名/真正注入的项目）以后端为准，不在前端拼一份平行逻辑
     if (createdId) { Chat.newRole = ""; Chat.newProjects = []; await loadChatBinding(createdId); }
-    renderChatMsgs();
-    renderChatBind();
+    if (chatSendOwnsView(sendKey, createdId)) {
+      Chat.msgs = sendMsgs;
+      renderChatMsgs(); renderChatBind();
+    }
     loadChatList();
   }
+}
+
+/** 流式请求只能绘制它发起时的 composer；chat:new 落盘后允许新 id 接续同一视图。 */
+function chatSendOwnsView(sendKey, createdId = "") {
+  return chatDraftKey() === sendKey || !!createdId && Chat.sel === createdId;
+}
+function paintChatSend(sendKey, createdId, partial) {
+  if (!chatSendOwnsView(sendKey, createdId)) return false;
+  renderChatMsgs(partial);
+  return true;
 }
 
 /** 只取绑定详情（消息已经在手上）；对话已被切走就丢弃结果 */

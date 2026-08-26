@@ -25,6 +25,7 @@ describe("recent Ownward sessions", () => {
         new RunnerCommandJournal(data).accept({commandId:"command-new",kind:"start-run",runId:"run-new",sessionId:"task-new",providerId:"codex",input:JSON.stringify({text:"首轮问题"})},"2026-08-18T09:00:00.000Z");
         new RunnerEventJournal(data).append({eventId:"started-new",type:"started",at:"2026-08-18T09:00:00.500Z",commandId:"command-new",runId:"run-new",sessionId:"task-new",providerId:"codex"});
         new RunnerEventJournal(data).append({eventId:"message-new",type:"message-completed",at:"2026-08-18T09:00:01.000Z",commandId:"command-new",runId:"run-new",sessionId:"task-new",providerId:"codex",payload:JSON.stringify({text:"首轮回答"})});
+        new RunnerEventJournal(data).append({eventId:"approval-new",type:"approval-requested",at:"2026-08-18T09:00:01.500Z",commandId:"command-new",runId:"run-new",sessionId:"task-new",providerId:"codex",approvalRequestId:"approval-1",payload:JSON.stringify({kind:"question",question:"继续吗？",options:["继续","停止"]})});
         new RunnerCommandJournal(data).accept({commandId:"command-followup",kind:"resume-run",runId:"run-followup",sessionId:"task-new",providerId:"codex",input:JSON.stringify({text:"继续追问"})},"2026-08-18T09:00:02.000Z");
         new SessionRepository(data).bind({taskId:"task-accepted",providerId:"codex",nativeRef:"00000000-0000-4000-8000-000000000002",cwd,source:"native"});
         new RunnerCommandJournal(data).accept({commandId:"command-accepted",kind:"start-run",runId:"run-accepted",sessionId:"task-accepted",providerId:"codex",input:JSON.stringify({text:"刚刚派发"})},"2026-08-18T09:01:00.000Z");
@@ -50,7 +51,7 @@ describe("recent Ownward sessions", () => {
       const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       expect(code, err).toBe(0);
       const recent = JSON.parse(out.trim().split("\n").at(-1)!);
-      expect(recent).toContainEqual(expect.objectContaining({ id: "task-new", msgs: 3, userMsgs: 2, last: "我：继续追问" }));
+      expect(recent).toContainEqual(expect.objectContaining({ id: "task-new", msgs: 3, userMsgs: 2, last: "我：继续追问", runnerState: expect.objectContaining({ pending: [expect.objectContaining({ toolName: "AskUserQuestion" })] }) }));
       expect(recent).toContainEqual(expect.objectContaining({ id: "task-accepted", msgs: 1, userMsgs: 1, last: "我：刚刚派发" }));
       expect(recent).toContainEqual(expect.objectContaining({ id: "task-adopted", msgs: 5, userMsgs: 4, last: "我：接管后追问" }));
       expect(recent).toContainEqual(expect.objectContaining({ id: "multi-new", msgs: 1, userMsgs: 1 }));
@@ -67,11 +68,11 @@ describe("recent Ownward sessions", () => {
         { id: "native", project: "project", cwd, task: "native", mode: "codex-bg", engine: true, startedAt: "2026-08-18T09:00:00.000Z", status: "running" },
         { id: "legacy", project: "project", cwd, task: "legacy", mode: "claude-bg", engine: true, startedAt: "2026-08-18T08:00:00.000Z", status: "exited" },
       ]));
-      writeFileSync(join(data, "tasks/legacy.session.json"), JSON.stringify({ messages: [{ role: "user", text: "旧问题" }, { role: "assistant", text: "旧回答" }], lastActivityAt: 1787040000000 }));
+      writeFileSync(join(data, "tasks/legacy.session.json"), JSON.stringify({ messages: [{ role: "user", text: "旧问题" }, { role: "assistant", text: "旧回答" }], pending: [{ toolName: "AskUserQuestion", brief: "请选择" }], lastActivityAt: 1787040000000 }));
       writeFileSync(join(data, "runner/events.jsonl"), "{broken}\n");
       const script = `import{SessionRepository}from ${JSON.stringify(join(import.meta.dir,"sessions/repository.ts"))};const data=${JSON.stringify(data)},cwd=${JSON.stringify(cwd)};new SessionRepository(data).bind({taskId:"native",providerId:"codex",nativeRef:"00000000-0000-4000-8000-000000000009",cwd,source:"native"});const{handleWorkbench}=await import(${JSON.stringify(join(import.meta.dir,"workbench.ts"))});const u=new URL("http://localhost/api/dev/recent"),r=await handleWorkbench(new Request(u),u);console.log(JSON.stringify({status:r.status,body:await r.json()}));`;
       const proc=Bun.spawn([process.execPath,"--eval",script],{cwd:import.meta.dir,env:{...process.env,OWNWARD_DATA_ROOT:data},stdout:"pipe",stderr:"pipe"}),[out,err,code]=await Promise.all([new Response(proc.stdout).text(),new Response(proc.stderr).text(),proc.exited]);
-      expect(code,err).toBe(0);const result=JSON.parse(out.trim().split("\n").at(-1)!);expect(result.status).toBe(200);expect(result.body).toContainEqual(expect.objectContaining({id:"legacy",msgs:2,last:"旧回答"}));
+      expect(code,err).toBe(0);const result=JSON.parse(out.trim().split("\n").at(-1)!);expect(result.status).toBe(200);expect(result.body).toContainEqual(expect.objectContaining({id:"legacy",msgs:2,last:"旧回答",runnerState:{pending:[{toolName:"AskUserQuestion",brief:"请选择"}],turn:""}}));
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

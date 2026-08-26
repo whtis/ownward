@@ -321,6 +321,9 @@ textarea { resize: vertical; }
 .session-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border-subtle); flex-wrap: wrap; }
 .session-head .title { font-weight: 600; }
 .session-head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tasks-detail-col .session-head { flex-wrap:nowrap; overflow-x:auto; }
+.tasks-detail-col .session-head > :not(.session-dirs) { flex:none; }
+.tasks-detail-col .session-head .right { flex-wrap:nowrap; }
 /* overflow-x hidden：消息流永不横滚——需要横滚的内容（代码块/工具输出）各自带 overflow-x:auto */
 .session-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 12px; }
 /* 消息流：我的消息 = 贴内容宽度的右侧气泡（几个字就是小气泡，不拉长条）；
@@ -335,9 +338,16 @@ textarea { resize: vertical; }
 .msg[data-role="assistant"] .bubble { background: none; padding: 0 2px; border-radius: 0; }
 .msg[data-role="user"] { margin-left: auto; align-items: flex-end; }
 .msg[data-role="user"] .bubble { background: var(--accent-soft); border-radius: 14px 14px 5px 14px; }
-.msg-imgs { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin: 0 2px 5px; max-width: min(560px, 80vw); }
-.msg-imgs a { display: block; border-radius: 10px; overflow: hidden; border: 1px solid var(--border-default); background: var(--surface-2); }
-.msg-imgs img { display: block; width: auto; height: auto; max-width: min(260px, 70vw); max-height: 260px; object-fit: contain; }
+.msg-imgs { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-end; gap: 6px; margin: 0 2px 5px; max-width: min(560px, 80vw); }
+/* button 的 max-content 会先采用图片原始宽度；仅限制 img 时，超宽截图会把按钮撑到整行，
+ * 再在里面画一张较小图片。按钮本身也必须有同一上限，才能真正贴合缩略图。 */
+.msg-img {
+  display: inline-flex; flex: 0 1 auto; width: fit-content; max-width: min(340px, 70vw); padding: 0;
+  line-height: 0; border-radius: 10px; overflow: hidden; border: 1px solid var(--border-default);
+  background: var(--surface-2); cursor: zoom-in;
+}
+.msg-imgs img { display: block; width: auto; height: auto; max-width: 100%; max-height: 280px; object-fit: contain; }
+.msg-img.is-error { min-width: 120px; min-height: 72px; padding: 12px; color: var(--text-tertiary); cursor: default; }
 .composer-box[data-drop="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 /* LLM 输出的 markdown 渲染（mdHtml）——bubble 默认 pre-wrap，.md 内回归普通排版 */
 .bubble .md { white-space: normal; }
@@ -422,9 +432,25 @@ textarea { resize: vertical; }
 .pal-item:hover { background: var(--surface-hover); }
 .pal-empty { padding: 14px; color: var(--text-tertiary); font-size: 12.5px; text-align: center; }
 
-/* 会话消息里的图片（agent 截图/读图），点开原图 */
-.msg-imgs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
-.msg-imgs img { max-width: min(340px, 100%); max-height: 280px; border-radius: 10px; border: 1px solid var(--border-default); cursor: zoom-in; }
+/* 任务和对话共用的页内图片查看器：不离开当前上下文，键盘/触屏都可操作。 */
+.image-viewer {
+  position: fixed; inset: 0; z-index: 100; display: none; place-items: center;
+  background: #000d; color: #fff;
+}
+.image-viewer[data-open="true"] { display: grid; }
+.image-viewer-bar { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; z-index: 1; }
+.image-viewer-counter { min-width: 52px; text-align: center; font-size: 13px; }
+.image-viewer-close, .image-viewer-nav {
+  border: 0; border-radius: 50%; background: #ffffff20; color: #fff; cursor: pointer;
+  width: 44px; height: 44px; font-size: 22px;
+}
+.image-viewer-close:hover, .image-viewer-nav:hover { background: #ffffff38; }
+.image-viewer-nav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 1; font-size: 36px; line-height: 1; }
+.image-viewer-prev { left: max(12px, env(safe-area-inset-left)); }
+.image-viewer-next { right: max(12px, env(safe-area-inset-right)); }
+.image-viewer-stage { width: 100%; height: 100%; display: grid; place-items: center; padding: 72px 68px 24px; pointer-events: none; }
+.image-viewer-stage img { max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 8px 40px #0008; }
+.image-viewer-error { padding: 16px 20px; border-radius: 10px; background: #ffffff16; }
 
 .composer-box {
   border: 1px solid var(--border-default); border-radius: 12px; background: var(--surface-1);
@@ -467,7 +493,10 @@ textarea { resize: vertical; }
 .chat-item { padding: 9px 11px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
 .chat-item:hover { background: var(--surface-hover); }
 .chat-item[data-on="true"] { background: var(--surface-active); }
-.chat-item .t { font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.chat-item .t {
+  font-size: 13px; line-height: 1.45; overflow: hidden; display: -webkit-box;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+}
 .chat-item .m { font-size: 11px; color: var(--text-tertiary); display: flex; gap: 6px; margin-top: 1px; }
 
 /* 角色绑定条（对话 tab 顶部）：新建时可选，落盘后只读 */
@@ -698,14 +727,48 @@ textarea { resize: vertical; }
 .tasks-detail-kicker { color: var(--text-tertiary); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
 .tasks-back { display: none; flex: none; }
 .task-project { color: var(--text-tertiary); font-size: 11.5px; }
+.session-dirs,.dir-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.session-head .session-dirs { min-width:48px; max-width:min(34vw,460px); flex:0 1 460px; flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
+.session-head .session-dirs::-webkit-scrollbar { display:none; }
+.session-head .session-dirs .dir-chip { flex:none; }
+.dir-chip { display:inline-flex; align-items:center; gap:5px; max-width:280px; padding:3px 8px; border:1px solid var(--border-subtle); border-radius:999px; background:var(--surface-1); color:var(--text-secondary); font-size:11px; white-space:nowrap; }
+.dir-chip.primary { border-color:var(--accent); color:var(--text-primary); }
+.dir-chip span { overflow:hidden; text-overflow:ellipsis; }
+.dir-chip button { border:0; background:none; color:var(--text-tertiary); padding:0; cursor:pointer; }
+.label-hint { color:var(--text-tertiary); font-size:11px; font-weight:400; }
+.dir-add-status { display:flex; flex-direction:column; gap:3px; margin-top:8px; max-height:110px; overflow:auto; font-size:11px; color:var(--text-secondary); }
+.dir-add-status [data-ok="false"] { color:var(--danger); }
+.dir-input-row > input[type=text] { min-width:0; }
+@media (max-width: 320px) {
+  .modal { width:calc(100vw - 12px); padding:12px; }
+  .modal .dir-input-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:6px; }
+}
+.session-state { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--text-tertiary); font-size: 11px; font-weight: 600; }
+.session-state[data-state="pending"], .session-state[data-state="uncertain"] { color: var(--warning); }
+.session-state[data-state="running"] { color: var(--accent); }
+.session-state[data-state="failed"] { color: var(--danger); }
+.session-state-symbol { width: 12px; text-align: center; font: 700 11px/1 var(--font-ui); }
+.handoff-select { width: auto; max-width: 230px; height: 30px; padding: 0 26px 0 9px; font-size: 11px; }
+.handoff-select:disabled { cursor: not-allowed; color: var(--text-tertiary); }
+.handoff-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--accent); font-size: 11px; font-weight: 650; }
+.handoff-divider::before, .handoff-divider::after { content: ""; height: 1px; flex: 1; background: color-mix(in srgb, var(--accent) 35%, var(--border-subtle)); }
+.handoff-divider span { max-width: 72%; text-align: center; }
 .task-card-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--text-primary) !important; font-size: 13px !important; font-weight: 560; line-height: 1.45 !important; }
 .layout-notes { grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); }
 .layout-system { grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }
 .chat-list-col, .notes-list-col, .system-summary-col { gap: 0; }
+.chat-list-col > .page-head { flex: none; }
+.chat-list-col > #ch-list { flex: 1; min-height: 0; }
 .chat-context { min-height: 50px; display: flex; align-items: center; gap: 8px; padding: 2px 3px 10px; }
 .chat-context .tools { margin-left: auto; display: flex; gap: 5px; }
 .chat-models { display: flex; gap: 6px; }
 .chat-models select { width: 112px; height: 30px; }
+.chat-more { margin-left: auto; position: relative; }
+.chat-more > summary { display: none; list-style: none; }
+.chat-more > summary::-webkit-details-marker { display: none; }
+.chat-more-menu { display: flex; gap: 5px; }
+.chat-detail-col .session-scroll > .msg { width: min(100%, 980px); max-width: 980px; margin-left: auto; margin-right: auto; }
+.chat-detail-col .composer-box { width: min(100%, 980px); margin-inline: auto; }
 .chat-back, .notes-back { display: none; flex: none; }
 .chat-item { margin: 3px; border-bottom: 0; border-radius: 9px; padding: 10px 11px; }
 .chat-item .m { justify-content: space-between; margin-top: 4px; }
@@ -716,6 +779,29 @@ textarea { resize: vertical; }
 .system-summary-col .panel { overflow: hidden; }
 .rail-actions .button { min-height: 32px; border-radius: 8px; padding-inline: 10px; }
 .log-view[data-state="error"] { color: var(--danger); background: var(--danger-soft); }
+
+/* 对话的模型/角色控件比普通主从页更宽，中等视口提前切成单页，避免两栏互相覆盖。 */
+@media (max-width: 1100px) {
+  #chat-root { display: block; overflow: hidden; }
+  #chat-root .chat-list-col, #chat-root .chat-detail-col { width: 100%; height: 100%; max-height: none; }
+  #chat-root[data-mobile-view="detail"] .chat-list-col { display: none; }
+  #chat-root:not([data-mobile-view="detail"]) .chat-detail-col { display: none; }
+  #chat-root[data-mobile-view="detail"] .chat-detail-col { animation: mobile-detail-enter 160ms cubic-bezier(.2,.8,.2,1); }
+  #chat-root .chat-back { display: inline-flex; }
+  #chat-root .session-pane { height: auto; min-height: 0; flex: 1; }
+  #chat-root .chat-context { flex-wrap: nowrap; }
+  #chat-root .chat-models { min-width: 0; flex: 1; }
+  #chat-root .chat-models select { min-width: 0; flex: 1; }
+  #chat-root .chat-more { flex: none; }
+  #chat-root .chat-more > summary { display: inline-flex; align-items: center; justify-content: center; }
+  #chat-root .chat-more-menu {
+    display: none; position: absolute; z-index: 30; right: 0; top: calc(100% + 4px); min-width: 116px;
+    padding: 5px; border: 1px solid var(--border-default); border-radius: 9px;
+    background: var(--surface-popover); box-shadow: var(--shadow-popover);
+  }
+  #chat-root .chat-more[open] .chat-more-menu { display: flex; flex-direction: column; }
+  #chat-root .chat-more-menu .button { width: 100%; justify-content: flex-start; }
+}
 
 @media (max-width: 1023px) {
   .app-shell { grid-template-rows: 56px minmax(0, 1fr); }
@@ -767,11 +853,15 @@ textarea { resize: vertical; }
   #notes-root:not([data-mobile-view="detail"]) .notes-detail-col { display: none; }
   .chat-back, .notes-back, .roles-back { display: inline-flex; }
   .session-pane, .editor { height: 100%; }
+  /* 对话详情上方还有模型和角色栏；占剩余空间，不能再按父容器全高计算。 */
+  #chat-root .session-pane { height: auto; min-height: 0; flex: 1; }
   .layout-system { display: grid; grid-template-columns: minmax(260px, .85fr) minmax(0, 1.6fr); overflow: hidden; }
   .layout-system .col { min-height: 0; max-height: none; }
   .clock { display: none; }
 }
 @media (max-width: 620px) {
+  .image-viewer-stage { padding: 70px 8px 68px; }
+  .image-viewer-nav { top: auto; bottom: max(12px, env(safe-area-inset-bottom)); transform: none; }
   .pane-root { padding: 10px; }
   .brand { display: none; }
   .nav-tabs { gap: 1px; }
@@ -813,10 +903,20 @@ textarea { resize: vertical; }
   .layout-system { display: flex; overflow-y: auto; }
   .layout-system .col { width: 100%; height: auto; overflow: visible; }
   .layout-system .col-scroll { overflow: visible; }
-  .chat-context { flex-wrap: wrap; }
-  .chat-context .tools { order: 3; width: 100%; justify-content: flex-end; }
+  .chat-context { flex-wrap: nowrap; min-height: 50px; }
   .chat-models { flex: 1; }
   .chat-models select { min-width: 0; flex: 1; }
+  .chat-more { flex: none; }
+  .chat-more > summary { display: inline-flex; min-width: 40px; min-height: 40px; padding-inline: 10px; align-items: center; justify-content: center; }
+  .chat-more-menu {
+    display: none; position: absolute; z-index: 30; right: 0; top: calc(100% + 4px); min-width: 116px;
+    padding: 5px; border: 1px solid var(--border-default); border-radius: 9px;
+    background: var(--surface-popover); box-shadow: var(--shadow-popover);
+  }
+  .chat-more[open] .chat-more-menu { display: flex; flex-direction: column; }
+  .chat-more-menu .button { width: 100%; justify-content: flex-start; }
+  .composer-bar .hint { display: none; }
+  .composer-bar .icon-btn, .composer-bar .button.primary { min-width: 40px; min-height: 40px; }
   /* 角色详情：标题与操作分两行，390px 下 3 个按钮不挤成一列 */
   .roles-context { flex-wrap: wrap; }
   .rl-crumb { flex: 1; }
@@ -1005,6 +1105,7 @@ html[data-look="win98"] .empty { color: #1c1c1c; }
 .stab:hover { background: var(--surface-hover); }
 .stab[data-on="true"] { background: var(--surface-active); color: var(--text-primary); box-shadow: inset 0 -2px 0 var(--accent); }
 .stab .lbl { overflow: hidden; text-overflow: ellipsis; }
+.stab .session-state { width: 12px; }
 .stab .sub { color: var(--text-tertiary); }
 .stab[data-on="true"] .sub { color: var(--text-secondary); }
 .stab .x { border: none; background: none; color: var(--text-tertiary); cursor: pointer; font-size: 10px; padding: 2px 5px; border-radius: 5px; }

@@ -33,6 +33,9 @@ function taskMetaControl(taskId: string, provider: "claude" | "codex" | "codebud
 }
 
 export interface AgentState {
+  /** /api/dev/messages 会用 canonical SessionRepository 装饰；旧调用方可缺省。 */
+  cwd?: string;
+  extraDirs?: string[];
   messages: DevMsg[];
   turn: string;           // running | idle
   alive: boolean;

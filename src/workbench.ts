@@ -1,8 +1,8 @@
 // 工作台 API：客户端六个 tab 的数据与操作。
 // 飞书读写走 lark-cli 的 user 身份（你的账号）；vault 只允许读 vault 目录内的 md。
 import { isStrictlyWithin, isWithin } from "./path-within.ts";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
-import { basename, isAbsolute, join, normalize, sep } from "path";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "fs";
+import { basename, isAbsolute, join, normalize, resolve, sep } from "path";
 import { listActions, resolveAction, setActionState } from "./actions.ts";
 import { chatBinding, deleteChat, getChat, listChats, providers, renameChat, resolveChatBinding, saveChatCandidate, streamChat } from "./chat.ts";
 import { loadTasks } from "./dispatch.ts";
@@ -34,7 +34,7 @@ export async function queueRouteResponse(method:string,id:string,state:()=>Promi
   if(!r.removed)return json({ok:false,errorCode:"QUEUE_ITEM_GONE",msg:"这条已经发出，或已不在队列里",queued:r.queued},409);
   return json({ok:true,msg:"已撤回",queued:r.queued});
 }
-function sessionError(error: any): Response { const code = typeof error?.code === "string" ? error.code : undefined, status = code === "RUNNER_UNAVAILABLE" || code === "RUNNER_CONTROL_TIMEOUT" ? 503 : code === "SESSION_RUNNER_DRAIN_REQUIRED" ? 409 : 400, known: Record<string, string> = { RUNNER_UNAVAILABLE: "Runner 不可用，请使用原 commandId 查询结果", RUNNER_CONTROL_TIMEOUT: "Runner 结果未知，请使用原 commandId 查询结果", SESSION_RUNNER_DRAIN_REQUIRED: "Runner 命令尚未收敛，暂不能切回旧链写入" }, raw = String(error instanceof Error ? error.message : error), safe = /(?:ENOENT|lstat|\/Users\/|\/var\/|\.sock)/.test(raw) ? "Session 操作失败" : raw.slice(0, 240); return json({ ok: false, msg: code ? (known[code] ?? safe) : safe, ...(code ? { errorCode: code } : {}), ...(typeof error?.commandId === "string" ? { commandId: error.commandId } : {}), ...(typeof error?.runId === "string" ? { runId: error.runId } : {}), ...(error?.outcomeUnknown === true ? { outcomeUnknown: true } : {}) }, status); }
+function sessionError(error:any):Response{const code=typeof error?.code==="string"?error.code:undefined,unavailable=new Set(["RUNNER_UNAVAILABLE","RUNNER_CONTROL_TIMEOUT","RUNNER_PROVIDER_UNAVAILABLE","RUNNER_PROVIDER_MISSING","RUNNER_PROVIDER_DEGRADED"]),conflict=code==="SESSION_RUNNER_DRAIN_REQUIRED"||!!code?.startsWith("SESSION_HANDOFF_"),status=unavailable.has(code??"")?503:conflict?409:400,known:Record<string,string>={RUNNER_UNAVAILABLE:"Runner 不可用，请使用原 commandId 查询结果",RUNNER_CONTROL_TIMEOUT:"Runner 结果未知，请使用原 commandId 查询结果",SESSION_RUNNER_DRAIN_REQUIRED:"Runner 命令尚未收敛，暂不能切回旧链写入"},raw=String(error instanceof Error?error.message:error),safe=/(?:ENOENT|lstat|\/Users\/|\/var\/|\.sock)/.test(raw)?"Session 操作失败":raw.slice(0,240);return json({ok:false,msg:code?(known[code]??safe):safe,...(code?{errorCode:code}:{}),...(typeof error?.commandId==="string"?{commandId:error.commandId}:{}),...(typeof error?.runId==="string"?{runId:error.runId}:{}),...(error?.outcomeUnknown===true?{outcomeUnknown:true}:{})},status);}
 
 async function sessionService(taskId: string) { const mode=effectiveSessionMode(taskId);return{mode,service:createSessionService(taskId,cfg.architecture?.allowedRoots??[])}; }
 
@@ -615,16 +615,36 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   // 派发下拉的真实价值来自「你最近在哪些目录干过活」——从活动数据自动喂
   if (p === "/api/projects") {
     const fav = loadProjects();
-    const seen = new Set(fav.map((x) => x.dir));
-    const out = [...fav];
-    const wtRoot = expandHome(cfg.dispatch?.worktreeRoot || "~/.ownward-worktrees");
-    const push = (dir?: string | null) => {
-      if (!dir || seen.has(dir) || !existsSync(dir)) return;
-      if (isStrictlyWithin(wtRoot, dir) || /-\d{8}-[a-z0-9]{4}$/.test(dir)) return;  // 任务临时 worktree 不进候选
-      seen.add(dir);
-      out.push({ name: basename(dir) || dir, dir });
+    const seen = new Set<string>();
+    const out: { name: string; dir: string }[] = [];
+    const allowedRoots = (cfg.architecture?.allowedRoots ?? []).flatMap((root) => {
+      try { const actual = realpathSync(resolve(expandHome(root))); return statSync(actual).isDirectory() ? [actual] : []; }
+      catch { return []; }
+    });
+    let wtRoot = expandHome(cfg.dispatch?.worktreeRoot || "~/.ownward-worktrees");
+    try { wtRoot = realpathSync(wtRoot); } catch { /* 尚未创建时沿用展开路径 */ }
+    const push = (dir?: string | null, name?: string) => {
+      if (!dir) return;
+      let actual: string;
+      try { actual = realpathSync(resolve(expandHome(dir))); if (!statSync(actual).isDirectory()) return; }
+      catch { return; }
+      if (!allowedRoots.some((root) => isWithin(root, actual)) || seen.has(actual)) return;
+      if (isStrictlyWithin(wtRoot, actual) || /-\d{8}-[a-z0-9]{4}$/.test(actual)) return;  // 任务临时 worktree 不进候选
+      seen.add(actual);
+      out.push({ name: name || basename(actual) || actual, dir: actual });
     };
-    for (const t of [...loadTasks()].reverse()) push((t as any).projectDir);
+    for (const project of fav) push(project.dir, project.name);
+    for (const t of [...loadTasks()].reverse()) {
+      push((t as any).projectDir);
+      for (const dir of (t as any).extraDirs ?? []) push(dir);
+    }
+    try {
+      const { SessionRepository } = await import("./sessions/repository.ts");
+      for (const session of new SessionRepository(DATA).list().reverse()) {
+        push(session.cwd);
+        for (const dir of session.extraDirs ?? []) push(dir);
+      }
+    } catch { /* 仓库损坏时仍保留任务与历史会话 fallback */ }
     try {
       const { listCcSessions } = await import("./cc-sessions.ts");
       for (const s of listCcSessions(30)) push((s as any).cwd);
@@ -675,7 +695,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     } catch (e) { runnerStates = new Map(); log(`recent sessions runner snapshot failed, fallback legacy: ${e}`); }
     const list = tasks
       .map((t) => {
-        let msgs = 0, userMsgs = 0, last = "", lastAt = +new Date(t.endedAt || t.startedAt) || 0;
+        let msgs = 0, userMsgs = 0, last = "", pending: any[] = [], runnerTurn = "", lastAt = +new Date(t.endedAt || t.startedAt) || 0;
         const derive = (mm: any[]) => {
           msgs = mm.length;
           for (const m of mm) if (m.role === "user") userMsgs++;
@@ -687,11 +707,15 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
         if (runnerState) {
           const messages = runnerState.messages ?? [];
           derive(messages);
+          pending = (runnerState.pending ?? []).map((p: any) => ({ toolName: p.toolName, brief: p.brief }));
+          runnerTurn = runnerState.turn || "";
           lastAt = Math.max(lastAt, runnerState.lastActivityAt || 0, ...messages.map((m) => Date.parse(m.ts || "") || 0));
           dk = sessionId!;
         } else try {
           const s = JSON.parse(readFileSync(join(DATA, "tasks", `${t.id}.session.json`), "utf8"));
           derive(s.messages || []);
+          pending = (s.pending ?? s.pendingPerms ?? []).map((p: any) => ({ toolName: p.toolName, brief: p.brief }));
+          runnerTurn = s.turn || "";
           if (s.lastActivityAt) lastAt = s.lastActivityAt;
         } catch {
           // codex 引擎：data/tasks 只有 meta（rolloutId），消息本体在 codex 的 rollout 文件里
@@ -706,7 +730,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
         // Claude 的 /new 会轮换 native ref，但每个真实 Task 仍须单独展示；仅 Codex 接管副本去重。
         if (t.mode === "codex-bg") dk = sessionByTask.get(t.id) ?? dk;
         return { id: t.id, project: t.project, title: t.title || String(t.task || "").slice(0, 80),
-          mode: t.mode, status: t.status, startedAt: t.startedAt, lastAt, msgs, userMsgs, last, dk };
+          mode: t.mode, backend: runnerState?.providerId ?? (t.mode === "codex-bg" ? "codex" : "claude"), providerId: runnerState?.providerId ?? (t.mode === "codex-bg" ? "codex" : "claude"), status: t.status, exitCode: t.exitCode, uncertain: !!t.uncertain, runnerState: { pending, turn: runnerTurn }, startedAt: t.startedAt, lastAt, msgs, userMsgs, last, dk };
       })
       .filter((s) => s.msgs > 0)   // 两边都没消息的空壳不算「有过对话」
       .sort((a, b) => b.lastAt - a.lastAt || (+new Date(b.startedAt) || 0) - (+new Date(a.startedAt) || 0) || (a.id < b.id ? 1 : -1));
@@ -719,7 +743,18 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   // ---- 开发会话（引擎任务：追问/审批/中断/接管；CC 与 codex 统一走 agent-backend 分发层） ----
   if (p === "/api/dev/messages") {
     const id = url.searchParams.get("id") || "";
-    try { const service=(await sessionService(id)).service;return json(url.searchParams.get("refresh")==="1"?await service.refreshHistory(id):await service.state(id)); } catch (e) { return sessionError(e); }
+    try {
+      const service=(await sessionService(id)).service;
+      const state = url.searchParams.get("refresh")==="1"?await service.refreshHistory(id):await service.state(id);
+      const task = loadTasks().find((t) => t.id === id) as any;
+      let cwd = task?.cwd || task?.projectDir || "", extraDirs = task?.extraDirs ?? [];
+      try {
+        const { SessionRepository } = await import("./sessions/repository.ts");
+        const session = new SessionRepository(DATA).getByTaskId(id);
+        if (session) { cwd = session.cwd; extraDirs = session.extraDirs ?? []; }
+      } catch { /* 旧数据或仓库暂不可读时使用任务快照 */ }
+      return json({ ...state, cwd, extraDirs });
+    } catch (e) { return sessionError(e); }
   }
   if (p === "/api/system/session-migration-report") {
     const id = url.searchParams.get("id") || "";
@@ -773,6 +808,11 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
       const r = await (await sessionService(body.id)).service.send(body.id, { text: body.text || "", images: body.images || [], ...(body.clientMutationId ? { clientMutationId: body.clientMutationId } : {}) });
       return json({ ok: true, queued: r?.queued ?? false, msg: r?.queued ? "已加入队列，本轮结束自动发送" : "已发送", ...(r?.commandId ? { commandId: r.commandId, runId: r.runId } : {}) });
     } catch (e) { return sessionError(e); }
+  }
+  if(req.method==="POST"&&p==="/api/dev/handoff"){
+    const body=await req.json().catch(()=>({})) as {id?:string;providerId?:"claude"|"codex"|"codebuddy";model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean};
+    if(!body.id||!body.providerId||!["claude","codex","codebuddy"].includes(body.providerId))return json({ok:false,msg:"缺少合法 id/providerId"},400);
+    try{const result=await(await sessionService(body.id)).service.handoff(body.id,{providerId:body.providerId,...(body.model?{model:body.model}:{}),...(body.effort?{effort:body.effort}:{}),...(body.reason?{reason:body.reason}:{}),...(body.confirmUnknownOutcome===true?{confirmUnknownOutcome:true}:{})});return json({ok:true,msg:`已接力到 ${body.providerId}`,...result});}catch(e){return sessionError(e);}
   }
   // 忙时输入队列：GET 投影 / POST {action:"remove",queueId} 撤一条还没发出的
   if (p === "/api/dev/queue") {

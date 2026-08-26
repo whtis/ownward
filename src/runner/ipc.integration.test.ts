@@ -133,6 +133,26 @@ describe("Runner Unix IPC", () => {
     finally { server.stop(); }
   });
 
+  test("durable terminal 后立即关闭 Provider iterator 并清理 activeRuns", async () => {
+    const r = root(); let closed = false;
+    const server = new RunnerServer(r, () => ({
+      async *execute(command) {
+        try {
+          yield { eventId: `${command.commandId}:started`, type: "started", at: new Date().toISOString(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId };
+          yield { eventId: `${command.commandId}:completed`, type: "completed", at: new Date().toISOString(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId };
+          await Bun.sleep(5_000);
+        } finally { closed = true; }
+      },
+    })); server.start();
+    try {
+      const client = new RunnerClient(r); await client.request("submit", { ...submit("terminal-open-stream"), providerId: "custom" });
+      const deadline = Date.now() + 500; let active: string[] = [];
+      do { active = (await client.request("ping", {})).body.activeRuns as string[]; if (active.includes("terminal-open-stream")) await Bun.sleep(5); } while (active.includes("terminal-open-stream") && Date.now() < deadline);
+      expect(active).not.toContain("terminal-open-stream"); expect(closed).toBe(true);
+      expect(((await client.queryCommand("terminal-open-stream")).body.events as any[]).map((event) => event.type)).toEqual(["dispatching", "started", "completed"]); client.close();
+    } finally { server.stop(); }
+  });
+
   test("best-effort delta 无法落盘只计数丢弃，turn 仍可 completed", async () => {
     const r = root(); let aborted = 0;
     const server = new RunnerServer(r, () => ({

@@ -22,6 +22,7 @@ export interface KernelSessionState {
   ctxTokens?: number; lastActivityAt?: number; fullAccess?: boolean;
   stale?: boolean; errorCode?: string;
   operability?: "active" | "read-only"; archiveState?: "orphaned-task-link";
+  handoff?: { predecessorId?: string; at: string; reason?: string; currentProviderId: SessionProviderId };
 }
 export interface SessionMutationResult { queued: boolean; commandId?: string; runId?: string; outcomeUnknown?: boolean; }
 export interface SessionService {
@@ -38,4 +39,5 @@ export interface SessionService {
   acquireControl(id: string, owner: "ownward" | "observing"): Promise<{ sessionId: string; control: AgentControl }>;
   setAccess(id: string, access: KernelGrantedAccess): Promise<SessionMutationResult | void>;
   newSession(id: string): Promise<string>;
+  handoff(id:string,input:{providerId:SessionProviderId;model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean}):Promise<SessionMutationResult & {sessionId:string;providerId:SessionProviderId}>;
 }

@@ -6,7 +6,7 @@ import { join } from "path";
 import { llmJson } from "./llm.ts";
 import { appendDaily } from "./obsidian.ts";
 import type { WorkTask } from "./dispatch.ts";
-import { cfg, ensureDir, expandHome, fmt, log, run } from "./util.ts";
+import { cfg, ensureDir, expandHome, fmt, loadState, log, run, updateState } from "./util.ts";
 
 const CLAUDE_PROJECTS = join(homedir(), ".claude", "projects");
 
@@ -155,7 +155,7 @@ export async function harvestTask(t: WorkTask): Promise<string | null> {
   ].join("\n");
 
   const res = await llmJson(prompt);
-  if (!res?.title) { log(`harvest [${t.id}]: codex 总结失败`); return null; }
+  if (!res?.title) { log(`harvest [${t.id}]: AI 总结失败（任务保持待收尾，稍后自动重试）`); return null; }
 
   const { appendKnowledge } = await import("./capture.ts");
   // 标题时间固定用任务开始时间：重收时条目仍停在它该在的时间点上，覆盖也不会把顺序搅乱
@@ -178,6 +178,19 @@ export async function harvestTask(t: WorkTask): Promise<string | null> {
 
 const HARVEST_QUIET_MS = 15 * 60_000;   // 会话沉寂多久算「这一段告一段落」，与 sweepCapture 对齐
 const HARVEST_MAX_AGE_MS = 48 * 3600_000;
+const HARVEST_RETRY_BASE_MS = 20 * 60_000;
+const HARVEST_RETRY_MAX_MS = 6 * 3600_000;
+
+export interface HarvestRetry { attempts: number; nextAt: string; lastAt: string }
+export function harvestRetryDelay(attempts: number): number {
+  return Math.min(HARVEST_RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1), HARVEST_RETRY_MAX_MS);
+}
+export function harvestRetryEligible(retry: HarvestRetry | undefined, now: number): boolean {
+  return !retry || Date.parse(retry.nextAt) <= now;
+}
+export function selectHarvestBudget<T extends { id: string }>(tasks: T[], retries: Record<string, HarvestRetry>, now: number, budget = 2): T[] {
+  return tasks.filter((task) => harvestRetryEligible(retries[task.id], now)).slice(0, budget);
+}
 
 /** 多轮任务的收割补收。
  *
@@ -192,26 +205,43 @@ const HARVEST_MAX_AGE_MS = 48 * 3600_000;
 export async function sweepHarvest(): Promise<void> {
   const { loadTasks, updateTask } = await import("./dispatch.ts");
   const now = Date.now();
-  let budget = 2;   // 每轮最多重收 2 个，控模型成本
-  for (const t of loadTasks()) {
-    if (budget <= 0) break;
-    if (t.kind === "routine") continue;                      // routine 状态机自己管，从不收割
-    if (t.uncertain) continue;                               // unknown outcome 未人工收敛，禁止产出“已结束”记录
-    if (t.mode === "terminal") continue;                     // terminal 由 finalizeTerminalTask 收尾
+  const retries = (loadState().harvestRetries || {}) as Record<string, HarvestRetry>;
+  const candidates = loadTasks().filter((t) => {
+    if (t.kind === "routine" || t.uncertain || t.mode === "terminal") return false;
     const logMtime=t.logFile&&existsSync(t.logFile)?statSync(t.logFile).mtimeMs:0;
     const terminalAt=t.endedAt?Date.parse(t.endedAt):0;
     const mtime=Math.max(logMtime,terminalAt);
-    if(!mtime)continue;
-    if (now - mtime < HARVEST_QUIET_MS) continue;            // 还在动，等它停下来再收
-    if (now - mtime > HARVEST_MAX_AGE_MS) continue;          // 太老不追溯
+    if (!mtime || now - mtime < HARVEST_QUIET_MS || now - mtime > HARVEST_MAX_AGE_MS) return false;
     const since = t.harvestedAt ? new Date(t.harvestedAt).getTime() : 0;
-    if (t.harvested && mtime <= since) continue;             // 上次收割之后没有新内容
-    budget--;
+    return !t.harvested || mtime > since;
+  });
+  // 每轮最多重收 2 个控成本；退避中的失败项不占预算，后续任务不会被饿死。
+  for (const t of selectHarvestBudget(candidates, retries, now)) {
     try {
       const note = await harvestTask(t);
-      if (note) updateTask(t.id, { harvested: true, harvestedAt: new Date().toISOString() });
+      if (note) {
+        updateTask(t.id, { harvested: true, harvestedAt: new Date().toISOString() });
+        updateState((s) => { if (s.harvestRetries) delete s.harvestRetries[t.id]; });
+      } else {
+        updateState((s) => {
+          const previous = s.harvestRetries?.[t.id] as HarvestRetry | undefined;
+          const attempts = (previous?.attempts || 0) + 1;
+          s.harvestRetries ||= {};
+          s.harvestRetries[t.id] = {
+            attempts,
+            lastAt: new Date(now).toISOString(),
+            nextAt: new Date(now + harvestRetryDelay(attempts)).toISOString(),
+          } satisfies HarvestRetry;
+        });
+      }
       log(`re-harvest [${t.id}]: ${note ? "已刷新" : "无产出"}`);
     } catch (e) {
+      updateState((s) => {
+        const previous = s.harvestRetries?.[t.id] as HarvestRetry | undefined;
+        const attempts = (previous?.attempts || 0) + 1;
+        s.harvestRetries ||= {};
+        s.harvestRetries[t.id] = { attempts, lastAt: new Date(now).toISOString(), nextAt: new Date(now + harvestRetryDelay(attempts)).toISOString() } satisfies HarvestRetry;
+      });
       log(`re-harvest [${t.id}] failed: ${e}`);
     }
   }

@@ -141,8 +141,8 @@ const CP = {};  // key → {i, stash, sel}：历史游标与菜单选中项，�
  *  opts: {key, send(), commands?}——commands 为数组时才开补全菜单（codex/对话没有命令表就不开）。 */
 function bindComposer(el, opts) {
   if (!el) return;
-  const key = opts.key || "";
-  const st = (CP[key] ||= { i: -1, stash: "", sel: 0 });
+  const keyOf = () => typeof opts.key === "function" ? opts.key() : (opts.key || "");
+  const state = () => (CP[keyOf()] ||= { i: -1, stash: "", sel: 0 });
   // 菜单挂在 .composer 上而不是 .composer-box：后者 overflow:hidden 会把浮层裁掉
   const host = el.closest(".composer") || el.parentElement;
   let menu = host.querySelector(".slash-menu");
@@ -164,6 +164,7 @@ function bindComposer(el, opts) {
       .slice(0, 40);
   }
   function draw() {
+    const st = state();
     // st.mute：内容是历史回溯填进来的，不弹补全——否则翻出一条裸命令（/new）菜单就开了，
     // 接着按 ↑ 会被菜单接管，历史翻不动
     items = st.mute ? [] : match();
@@ -175,6 +176,7 @@ function bindComposer(el, opts) {
     menu.querySelector('[data-on="true"]')?.scrollIntoView({ block: "nearest" });
   }
   function setVal(v, mute) {
+    const st = state();
     quiet = true;
     st.mute = !!mute;
     el.value = v ?? "";
@@ -183,6 +185,7 @@ function bindComposer(el, opts) {
     el.setSelectionRange(el.value.length, el.value.length);
   }
   function accept(i) {
+    const st = state();
     const c = items[i];
     if (!c) return;
     menu.hidden = true; items = []; st.sel = 0;
@@ -196,9 +199,10 @@ function bindComposer(el, opts) {
     e.preventDefault();
     accept(+b.dataset.i);
   };
-  el.addEventListener("input", () => { if (!quiet) { st.sel = 0; st.i = -1; st.mute = false; } draw(); });
+  el.addEventListener("input", () => { const st = state(); if (!quiet) { st.sel = 0; st.i = -1; st.mute = false; } draw(); });
   el.addEventListener("blur", () => { menu.hidden = true; items = []; });
   el.addEventListener("keydown", (e) => {
+    const st = state();
     if (e.isComposing) return;
     if (!menu.hidden && items.length) {
       if (e.key === "ArrowDown") { e.preventDefault(); st.sel = (st.sel + 1) % items.length; draw(); return; }
@@ -210,7 +214,7 @@ function bindComposer(el, opts) {
     // ↑/↓ 翻历史：只在光标已经在首行/末行（再按也走不动了）时接管，多行草稿里正常上下移动不受影响。
     // 没发出去的草稿存进 stash，↓ 翻回底还能拿回来
     if (el.selectionStart !== el.selectionEnd) return;   // 有选区时让浏览器自己处理
-    const list = histList(key);
+    const list = histList(keyOf());
     if (e.key === "ArrowUp" && !el.value.slice(0, el.selectionStart).includes("\n")) {
       if (st.i >= list.length - 1) return;
       if (st.i < 0) st.stash = el.value;
@@ -225,6 +229,62 @@ function bindComposer(el, opts) {
 }
 /** 发出去了：进历史 + 游标归位（宿主发送成功后调） */
 function composerSent(key, text) { histPush(key, text); const st = CP[key]; if (st) { st.i = -1; st.stash = ""; } }
+
+/* Composer 草稿按稳定会话 identity 隔离。文本写 sessionStorage，附件只留当前页面内存；
+ * storage 损坏/超限都降级为内存，不阻断输入。 */
+const ComposerDrafts = (() => {
+  const STORAGE_KEY = "ownward-composer-drafts-v1";
+  const VERSION = 1, MAX_ENTRIES = 80, MAX_TEXT = 20_000;
+  let texts = {};
+  const attachments = new Map();
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
+    if (saved?.version === VERSION && saved.entries && typeof saved.entries === "object") {
+      texts = Object.fromEntries(Object.entries(saved.entries)
+        .filter(([key, item]) => key && typeof item?.text === "string")
+        .slice(-MAX_ENTRIES)
+        .map(([key, item]) => [key, { text: item.text.slice(0, MAX_TEXT), touched: Number(item.touched) || 0 }]));
+    }
+  } catch { texts = {}; }
+  const persist = () => {
+    try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ version: VERSION, entries: texts })); } catch { /* 内存草稿仍可用 */ }
+  };
+  const trim = () => {
+    const keys = Object.keys(texts);
+    if (keys.length <= MAX_ENTRIES) return;
+    keys.sort((a, b) => texts[a].touched - texts[b].touched)
+      .slice(0, keys.length - MAX_ENTRIES).forEach((key) => delete texts[key]);
+  };
+  return {
+    getText(key) { return texts[key]?.text || ""; },
+    setText(key, text) {
+      if (!key) return;
+      const value = String(text ?? "").slice(0, MAX_TEXT);
+      if (value) texts[key] = { text: value, touched: Date.now() };
+      else delete texts[key];
+      trim(); persist();
+    },
+    clearText(key, expected) {
+      if (key && texts[key] && (expected === undefined || texts[key].text === expected)) { delete texts[key]; persist(); }
+    },
+    moveText(from, to) {
+      if (!from || !to || from === to) return;
+      const value = texts[from]?.text;
+      delete texts[from];
+      if (value && !texts[to]?.text) texts[to] = { text: value, touched: Date.now() };
+      trim(); persist();
+    },
+    getAttachments(key) { return key ? (attachments.get(key) || []) : []; },
+    setAttachments(key, items) { if (!key) return; items?.length ? attachments.set(key, items) : attachments.delete(key); },
+    moveAttachments(from, to) {
+      if (!from || !to || from === to) return;
+      const items = attachments.get(from);
+      attachments.delete(from);
+      if (items?.length && !attachments.has(to)) attachments.set(to, items);
+    },
+  };
+})();
+globalThis.ComposerDrafts = ComposerDrafts;
 
 /* ============ 全局状态 ============ */
 const S = {
@@ -427,6 +487,33 @@ function bindTopbar() {
   $("#text-overlay").addEventListener("click", (e) => { if (e.target.id === "text-overlay") e.target.dataset.open = "false"; });
 
   const overlay = $("#work-overlay");
+  let workExtraDirs = [];
+  const refreshProjectCandidates = async () => {
+    S.projects = await getJSON("/api/projects").catch(() => S.projects);
+    const options = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
+    $("#w-dir-list").innerHTML = options;
+    $("#w-extra-list").innerHTML = options;
+    $("#add-dir-list").innerHTML = options;
+  };
+  const renderWorkExtraDirs = () => {
+    $("#w-extra-chips").innerHTML = workExtraDirs.map((dir, i) =>
+      `<span class="dir-chip" title="${esc(dir)}"><span>${esc(dir.split("/").filter(Boolean).at(-1) || dir)}</span><button type="button" data-i="${i}" title="移除">✕</button></span>`).join("");
+    $$("#w-extra-chips button").forEach((b) => b.addEventListener("click", () => { workExtraDirs.splice(+b.dataset.i, 1); renderWorkExtraDirs(); }));
+  };
+  const addWorkExtraDir = (value) => {
+    const dir = String(value || $("#w-extra-input").value).trim();
+    if (!dir) return;
+    if (dir === $("#w-dir").value.trim()) { toast("附加目录不能和主目录相同"); return; }
+    if (!workExtraDirs.includes(dir)) workExtraDirs.push(dir);
+    $("#w-extra-input").value = "";
+    renderWorkExtraDirs();
+  };
+  const syncWorkMode = () => {
+    const enabled = $("#w-bg").checked;
+    for (const el of [$("#w-extra-input"), $("#w-extra-browse"), $("#w-extra-add")]) el.disabled = !enabled;
+    $("#w-extra-disabled").hidden = enabled;
+    if (!enabled && workExtraDirs.length) { workExtraDirs = []; renderWorkExtraDirs(); toast("terminal 模式已清除附加目录"); }
+  };
   const openWork = (dir) => {
     overlay.dataset.open = "true";
     // 默认值由服务端下发（config dispatch.defaults）：目录/模型/权限预填好，
@@ -436,12 +523,14 @@ function bindTopbar() {
     else if (!$("#w-dir").value && d.dir) $("#w-dir").value = d.dir;
     if (!$("#w-task").value) { if (d.provider) $("#w-engine").value = d.provider; else if (d.codex !== undefined) $("#w-engine").value = d.codex ? "codex" : "claude"; }
     if (d.model && !$("#w-model").value) { $("#w-engine").dispatchEvent(new Event("change")); $("#w-model").value = d.model; }
-    $("#w-dir-list").innerHTML = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
+    const options = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
+    $("#w-dir-list").innerHTML = options;
+    $("#w-extra-list").innerHTML = options;
     const bypass=$("#w-perm option[value=bypass]");if(bypass){bypass.disabled=S.state?.allowFullAccess!==true;bypass.hidden=S.state?.allowFullAccess!==true;if(bypass.disabled&&$("#w-perm").value==="bypass")$("#w-perm").value="";}
     if (d.permission && !$("#w-perm").value && !(d.permission === "bypass" && S.state?.allowFullAccess !== true)) $("#w-perm").value = d.permission;
     ($("#w-dir").value ? $("#w-task") : $("#w-dir")).focus();
   };
-  const closeWork = () => (overlay.dataset.open = "false");
+  const closeWork = () => { overlay.dataset.open = "false"; workExtraDirs = []; renderWorkExtraDirs(); };
   window.openWork = openWork;
   $("#btn-work").addEventListener("click", () => openWork());
   $("#w-cancel").addEventListener("click", closeWork);
@@ -451,6 +540,12 @@ function bindTopbar() {
   // 远程打开 web 时弹窗在 daemon 那台机器的屏幕上，这边只会挂死
   $("#w-browse").addEventListener("click", () =>
     openDirPicker((dir) => { $("#w-dir").value = dir; $("#w-task").focus(); }, $("#w-dir").value.trim() || null));
+  $("#w-extra-browse").addEventListener("click", () =>
+    openDirPicker((dir) => addWorkExtraDir(dir), $("#w-extra-input").value.trim() || null));
+  $("#w-extra-add").addEventListener("click", () => addWorkExtraDir());
+  $("#w-extra-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addWorkExtraDir(); } });
+  $("#w-bg").addEventListener("change", syncWorkMode);
+  syncWorkMode();
 
   // 给现有 agent 会话追加目录：沿用派新任务的候选补全、手动输入和目录选择弹窗。
   const addDirOverlay = $("#add-dir-overlay");
@@ -462,6 +557,7 @@ function bindTopbar() {
   window.openAddDirPicker = (taskId) => {
     addDirTaskId = taskId;
     $("#add-dir-input").value = "";
+    $("#add-dir-status").innerHTML = "";
     $("#add-dir-list").innerHTML = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
     addDirOverlay.dataset.open = "true";
     $("#add-dir-input").focus();
@@ -479,7 +575,9 @@ function bindTopbar() {
     const r = await post("/api/dev/add-dir", { id: addDirTaskId, dir });
     btn.disabled = false;
     toast(r.msg || (r.ok ? "已加入" : "失败"));
-    if (r.ok) closeAddDir();
+    const status = $("#add-dir-status");
+    status.insertAdjacentHTML("beforeend", `<div data-ok="${!!r.ok}" title="${esc(dir)}">${r.ok ? "✓" : "✕"} ${esc(dir)}${r.ok ? "" : ` · ${esc(r.msg || "失败")}`}</div>`);
+    if (r.ok) { $("#add-dir-input").value = ""; await refreshProjectCandidates(); $("#add-dir-input").focus(); }
     if (typeof pollDetail === "function") pollDetail(true);
   };
   $("#add-dir-submit").addEventListener("click", submitAddDir);
@@ -536,17 +634,20 @@ function bindTopbar() {
       || (($("#w-bg").checked) ? "你是常驻结对助手。本条只是开场，简短确认待命即可，等我下一条消息再开始干活。" : "");
     if (!dir || !task) { toast(dir ? "terminal 模式必须写任务描述" : "先选项目目录"); return; }
     if (workImgs.length && !$("#w-bg").checked) { toast("terminal 模式不支持图片——勾选「后台运行」"); return; }
+    if (workExtraDirs.length && !$("#w-bg").checked) { toast("terminal 模式不支持附加目录——勾选「后台运行」"); return; }
     $("#w-submit").disabled = true;
     const res = await post("/api/work", {
       dir, task,
       bg: $("#w-bg").checked, provider: $("#w-engine").value || undefined, worktree: $("#w-worktree").checked,
       model: $("#w-model").value || undefined, permission: $("#w-perm").value || undefined,
+      extraDirs: workExtraDirs.length ? [...workExtraDirs] : undefined,
       images: workImgs.length ? workImgs : undefined,
     });
     $("#w-submit").disabled = false;
     toast(res.msg);
     if (res.ok) {
       closeWork(); $("#w-task").value = ""; workImgs = []; renderWorkImgs();
+      await refreshProjectCandidates();
       await Promise.all([refreshTasks(), typeof loadTasksAux === "function" ? loadTasksAux() : Promise.resolve()]);
       switchTab("tasks");
       // 派完直接进会话（而不是停在列表）：追问/旁观零点击开始

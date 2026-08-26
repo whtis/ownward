@@ -12,13 +12,13 @@ const Tasks = {
   openTools: new Set(),    // 工具帧展开状态（重渲染保持）
   images: [],              // 粘贴待发的图片 [{media_type, data(base64), size}]
   repoOpen: false, repo: null,  // repo 验收面板
-  timer: null, auxTick: 0, busy: false, auxLoaded: false, auxError: "", tasksError: "",
+  timer: null, auxTick: 0, busy: false, recentBusy: false, auxLoaded: false, auxError: "", tasksError: "",
   selKind: "task",         // task | cc：选中的是任务还是旁观会话（分组里两种混排，靠它路由详情）
   tabs: JSON.parse(localStorage.getItem("ownward-session-tabs") || "[]"),  // 打开过的会话工作集（桌面版的 tab 页习惯）
-  select(id) { Tasks.selKind = "task"; Tasks.sel = id; Tasks.resetSession(); tabUpsert("task", id); tkOpenDetail("task", id); renderTaskList(); pollDetail(true); },
+  select(id) { stashTaskComposer(); Tasks.selKind = "task"; Tasks.sel = id; Tasks.resetSession(); tabUpsert("task", id); tkOpenDetail("task", id); renderTaskList(); pollDetail(true); },
   resetSession() {
     Tasks.dev = null; Tasks.ccMsgs = []; Tasks.ccOffset = 0; Tasks.openTools = new Set();
-    Tasks.images = []; Tasks.repoOpen = false; Tasks.repo = null;
+    Tasks.images = ComposerDrafts.getAttachments(Tasks.selKind === "task" && Tasks.sel ? `task:${Tasks.sel}` : ""); Tasks.repoOpen = false; Tasks.repo = null;
   },
 };
 // 项目组展开状态（localStorage 持久化，同 mac 端 AppStorage 的习惯）
@@ -70,6 +70,7 @@ TABS.tasks = {
     loadTasksAux().then(renderTaskList);
     Tasks.timer = setInterval(() => {
       pollDetail(false);
+      refreshRecentSessions();
       // 会话列表/置顶/隐藏是慢数据：每 60s 跟一轮就够（24 × 2.5s）
       if (++Tasks.auxTick % 24 === 0) loadTasksAux().then(renderTaskList);
     }, 2500);
@@ -108,6 +109,17 @@ async function loadTasksAux() {
   Tasks.auxLoaded = true;
   if (Tasks.selKind === "cc" && Tasks.sel) void pollCcObserve(Tasks.sel, Tasks.selKind, true);
 }
+async function refreshRecentSessions() {
+  if (Tasks.recentBusy) return;
+  Tasks.recentBusy = true;
+  try {
+    const recent = await getJSON("/api/dev/recent");
+    if (JSON.stringify(recent) === JSON.stringify(Tasks.recent)) return;
+    Tasks.recent = recent;
+    renderTaskList(); // 同时刷新列表与 tab；内容未变时不动 DOM
+  } catch { /* 快轮询失败保持上一帧；完整辅助刷新负责展示错误 */ }
+  finally { Tasks.recentBusy = false; }
+}
 TABS._onTasks = () => { if (S.tab === "tasks") renderTaskList(); };
 
 /* ---- 左列 ---- */
@@ -142,8 +154,9 @@ function taskCardHtml(t) {
     : t.kind === "adopted" && t.status === "done" ? `<span class="dot"></span>接管`
     : `<span class="dot ok"></span>${t.status === "done" ? "完成" : "成功"}`;
   const evolve = t.kind === "evolve" ? `<span class="tag" data-tone="${t.verify === "pass" ? "ok" : t.verify === "fail" ? "bad" : "warn"}">演进 ${esc(t.verify || "")}</span>` : "";
+  const provider = Tasks.sel === t.id && Tasks.dev ? (Tasks.dev.backend || Tasks.dev.providerId) : (t.backend || t.providerId || t.mode);
   return `<div class="card clickable" ${tone ? `data-tone="${tone}"` : ""} data-selected="${Tasks.sel === t.id}" onclick="Tasks.select('${jsq(t.id)}')"
-    title="${esc(t.mode)}${t.branch ? ` · ${esc(t.branch)}` : ""}">
+    title="${esc(provider)}${t.branch ? ` · ${esc(t.branch)}` : ""}">
     <div class="top task-card-meta">${st}<span class="task-project">${esc(t.project)}</span>${evolve}
       <span class="right mono">${fmtDur(t)}</span></div>
     <div class="body task-card-title">${esc(t.title || t.task)}</div>
@@ -188,9 +201,9 @@ function tkSetView(v) {
   renderTaskList();
 }
 function rcCardHtml(s) {
-  const running = s.status === "running";
-  return `<div class="card clickable" ${running ? `data-tone="accent"` : ""} data-selected="${Tasks.sel === s.id}" onclick="Tasks.select('${jsq(s.id)}')">
-    <div class="top">${running ? `<span class="dot ok breathe" style="background:var(--accent)"></span>` : ""}
+  const state = sessionState("task", s);
+  return `<div class="card clickable" ${state.tone ? `data-tone="${state.tone}"` : ""} data-selected="${Tasks.sel === s.id}" onclick="Tasks.select('${jsq(s.id)}')">
+    <div class="top">${sessionStateHtml(state)}
       <span class="task-project">${esc(s.project)}</span>
       <span class="tag">${s.mode === "codex-bg" ? "codex" : s.mode === "codebuddy-bg" ? "codebuddy" : "claude"}</span>
       <span class="right mono">${ageText(new Date(s.lastAt).toISOString())}</span></div>
@@ -320,7 +333,14 @@ function renderTaskList() {
     groupsHtml +
     autoHtml;
 }
-function selectCc(id) { Tasks.selKind = "cc"; Tasks.sel = id; Tasks.resetSession(); tabUpsert("cc", id); tkOpenDetail("cc", id); renderTaskList(); pollDetail(true); }
+function selectCc(id) { stashTaskComposer(); Tasks.selKind = "cc"; Tasks.sel = id; Tasks.resetSession(); tabUpsert("cc", id); tkOpenDetail("cc", id); renderTaskList(); pollDetail(true); }
+
+function stashTaskComposer() {
+  if (!Tasks.sel || Tasks.selKind !== "task") return;
+  const key = `task:${Tasks.sel}`, input = $("#tk-input");
+  if (input) ComposerDrafts.setText(key, input.value);
+  ComposerDrafts.setAttachments(key, Tasks.images);
+}
 
 /* ---- 会话 tab 栏：点开的会话常驻成 tab（去重/可关/持久化），切换不用回列表翻 ---- */
 function tabMeta(kind, id) {
@@ -331,6 +351,40 @@ function tabMeta(kind, id) {
   const s = Tasks.ccList.find((x) => x.id === id);
   return { project: s?.project || "会话", title: String(s?.title || "").slice(0, 40) };
 }
+function sessionState(kind, item) {
+  if (kind === "cc") return item?.active
+    ? { key: "running", label: "运行中", tone: "accent", dot: "ok breathe", symbol: "●" }
+    : null;
+  if (!item) return null;
+  const live = Tasks.selKind === "task" && Tasks.sel === item.id ? Tasks.dev : null;
+  const pending = live?.pending ?? item?.runnerState?.pending ?? item?.pending ?? [];
+  if (pending.length) {
+    const question = pending.some((p) => p.toolName === "AskUserQuestion");
+    return { key: "pending", label: question ? "待答复" : "待批准", tone: "warn", dot: "warn", symbol: "!" };
+  }
+  if (item.uncertain || (item.status === "exited" && item.exitCode == null)) return { key: "uncertain", label: "状态待确认", tone: "warn", dot: "warn", symbol: "?" };
+  if (live?.turn === "running" || item?.runnerState?.turn === "running" || item?.status === "running")
+    return { key: "running", label: "运行中", tone: "accent", dot: "ok breathe", symbol: "●" };
+  if (item.status === "exited" && item.exitCode !== 0)
+    return { key: "failed", label: "失败", tone: "bad", dot: "bad", symbol: "×" };
+  if (item.status === "done" || (item.status === "exited" && item.exitCode === 0))
+    return { key: "done", label: "完成", tone: "", dot: "ok", symbol: "✓" };
+  return null;
+}
+function sessionStateHtml(state, compact = false) {
+  if (!state) return "";
+  return `<span class="session-state" data-state="${state.key}" title="${state.label}">${compact ? `<span class="session-state-symbol">${state.symbol}</span>` : `<span class="dot ${state.dot}"></span>${state.label}`}</span>`;
+}
+
+function handoffState(dev) {
+  if (!dev) return { disabled: true, reason: "会话尚未载入" };
+  if (dev.turn === "running") return { disabled: true, reason: "本轮运行中，请先等待结束或中断" };
+  if ((dev.pending || []).length) return { disabled: true, reason: "请先处理待答复或待批准事项" };
+  if ((dev.queued || []).length) return { disabled: true, reason: "请先发送或撤回排队消息" };
+  if ((dev.control ?? "ownward") !== "ownward") return { disabled: true, reason: "输入权不在 Ownward，请先接管输入" };
+  return { disabled: false, reason: "" };
+}
+function handoffErrorCode(result) { return String(result?.errorCode || result?.code || ""); }
 function tabsSave() { localStorage.setItem("ownward-session-tabs", JSON.stringify(Tasks.tabs)); }
 function tabUpsert(kind, id) {
   const meta = tabMeta(kind, id);
@@ -352,12 +406,18 @@ function renderSessionTabs() {
   el.style.display = Tasks.tabs.length ? "" : "none";
   // 标签自愈：打开时缓存没到位的，等列表数据来了补上
   for (const tb of Tasks.tabs) if (!tb.title) { const m = tabMeta(tb.kind, tb.id); if (m.title) Object.assign(tb, m); }
-  el.innerHTML = Tasks.tabs.map((tb) => `
+  el.innerHTML = Tasks.tabs.map((tb) => {
+    const recent = Tasks.recent.find((x) => x.id === tb.id);
+    const current = S.tasks.find((x) => x.id === tb.id);
+    const item = tb.kind === "cc" ? Tasks.ccList.find((x) => x.id === tb.id) : recent && current ? { ...recent, ...current, runnerState: recent.runnerState } : current || recent;
+    const state = sessionState(tb.kind, item);
+    return `
     <div class="stab" data-on="${Tasks.sel === tb.id}" title="${esc(tb.title || tb.project)}"
       onclick="${tb.kind === "cc" ? `selectCc('${jsq(tb.id)}')` : `Tasks.select('${jsq(tb.id)}')`}">
+      ${sessionStateHtml(state, true)}
       <span class="lbl">${esc(tb.project)}${tb.title ? `<span class="sub"> · ${esc(tb.title.slice(0, 15))}</span>` : ""}</span>
       <button class="x" title="关闭" onclick="event.stopPropagation();closeSessionTab('${jsq(tb.id)}')">✕</button>
-    </div>`).join("");
+    </div>`; }).join("");
   const on = el.querySelector('.stab[data-on="true"]');
   on?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
@@ -367,6 +427,7 @@ function closeSessionTab(id) {
   Tasks.tabs.splice(i, 1);
   tabsSave();
   if (Tasks.sel === id) {
+    stashTaskComposer();
     const nb = Tasks.tabs[Math.min(i, Tasks.tabs.length - 1)];
     if (nb) { (nb.kind === "cc" ? selectCc : Tasks.select)(nb.id); return; }
     Tasks.sel = null;
@@ -401,7 +462,7 @@ async function pollDetail(force) {
       }
       const changed = force || JSON.stringify(dev) !== JSON.stringify(Tasks.dev);
       Tasks.dev = dev;
-      if (changed) renderSession(t, dev);
+      if (changed) { renderSessionTabs(); renderSession(t, dev); }
     } else if (t.mode === "terminal") {
       await renderTerminal(t, force, sel, kind);
       if (stale()) return;
@@ -430,6 +491,13 @@ function detailHead(t, extra) {
     }
     if (dev.control === "observing") btns.push(`<button class="button sm secondary" onclick="devControl('${esc(t.id)}','take')">接管输入</button>`);
     else if (dev.control === "ownward") btns.push(`<button class="button sm ghost" onclick="devControl('${esc(t.id)}','release')">释放输入权</button>`);
+    const handoff = handoffState(dev);
+    const current = dev.backend || dev.providerId || t.mode;
+    const targets = ["claude", "codex", "codebuddy"].filter((p) => p !== current);
+    btns.push(`<select class="handoff-select" aria-label="切换引擎" title="${esc(handoff.reason || "创建新会话并接力当前任务")}" onchange="devHandoff('${jsq(t.id)}',this)" ${handoff.disabled ? "disabled" : ""}>
+      <option value="">${handoff.disabled ? `切换引擎 · ${esc(handoff.reason)}` : "切换引擎…"}</option>
+      ${targets.map((p) => `<option value="${p}">${p}</option>`).join("")}
+    </select>`);
   }
   if (t.mode === "terminal") {
     if (t.status === "running") btns.push(`<button class="button sm secondary" onclick="taskDone('${esc(t.id)}')">结束并收割</button>`);
@@ -454,16 +522,20 @@ function detailHead(t, extra) {
     }
   }
   const pills = [
-    `<span class="mode-tag" data-m="${esc(t.mode)}">${esc(t.mode)}</span>`,
+    `<span class="mode-tag" data-m="${esc(dev?.backend || dev?.providerId || t.mode)}">${esc(dev?.backend || dev?.providerId || t.mode)}</span>`,
     t.branch ? `<span class="tag mono">${esc(t.branch)}</span>` : "",
     tok ? `<span class="tag mono" title="token 用量">${(tok / 1000).toFixed(1)}k tok</span>` : "",
     ctxPill,
     dev?.model ? `<span class="tag mono">${esc(dev.model)}</span>` : "",
   ].filter(Boolean).join("");
+  const dirs = dev?.cwd ? `<div class="session-dirs" aria-label="当前会话目录">
+    <span class="dir-chip primary" title="${esc(dev.cwd)}"><b>主目录</b> ${esc(dev.cwd.split("/").filter(Boolean).at(-1) || dev.cwd)}</span>
+    ${(dev.extraDirs || []).map((dir) => `<span class="dir-chip" title="${esc(dir)}"><b>附加</b> ${esc(dir.split("/").filter(Boolean).at(-1) || dir)}</span>`).join("")}
+  </div>` : "";
   return `<div class="session-head">
     <button class="button ghost sm tasks-back" onclick="tkBackToList()" aria-label="返回任务列表">← 返回</button>
     <span class="dot ${t.status === "running" ? "ok breathe" : t.exitCode === 0 || t.status === "done" ? "ok" : "bad"}"></span>
-    <span class="title">${esc(t.project)}</span>${pills}
+    <span class="title">${esc(t.project)}</span>${pills}${dirs}
     <div class="right">${btns.join("")}${extra || ""}</div>
   </div>` + repoPanelHtml(t);
 }
@@ -557,15 +629,16 @@ function toolFrameHtml(m, i) {
     <summary>⚙ ${esc(m.name || "tool")} · ${esc(first)}</summary><pre>${esc(m.text)}</pre>${devImgsHtml(m)}</details>`;
 }
 
-/** 会话里的图片（agent 截图/读图）：URL 由服务端 agent-images 仓生成，只放行自家路径，点开原图 */
+/** 会话里的图片（用户上传/agent 截图）：只放行 daemon 自己的两个只读图片仓。 */
 function devImgsHtml(m) {
-  if (!m.images?.length) return "";
-  return `<div class="msg-imgs">${m.images.filter((u) => String(u).startsWith("/api/agent-image/")).map((u) =>
-    `<img src="${esc(u)}" loading="lazy" alt="" onclick="window.open(this.src,'_blank')" onerror="this.remove()">`).join("")}</div>`;
+  return imageThumbsHtml(m.images, safeTaskImageUrl, "任务图片");
 }
 
 function msgHtml(m, i) {
   const imgs = devImgsHtml(m);
+  if (m.role === "system" && m.name === "handoff") {
+    return `<div class="handoff-divider"><span>${esc(m.text || "已切换引擎，旧会话历史保留")}</span></div>`;
+  }
   if (m.role === "tool") {
     if (m.name === "image" && imgs) return `<div class="msg" data-role="tool">${imgs}</div>`;
     return `<div class="msg" data-role="tool">${toolFrameHtml(m, i)}</div>`;
@@ -573,6 +646,35 @@ function msgHtml(m, i) {
   const who = m.role === "user" ? "我" : m.role === "assistant" ? "agent" : m.role === "thinking" ? "思考" : "系统";
   return `<div class="msg" data-role="${esc(m.role)}"><div class="who">${who} · ${m.ts ? hhmm(m.ts) : ""}</div>
     <div class="bubble">${m.role === "assistant" ? mdHtml(m.text) : esc(m.text)}</div>${imgs}</div>`;
+}
+
+async function devHandoff(id, select) {
+  const providerId = select.value;
+  select.value = "";
+  if (!providerId) return;
+  const state = handoffState(Tasks.dev);
+  if (state.disabled) { toast(state.reason); return; }
+  if (!confirm(`确认切换到 ${providerId}？\n\n系统会创建一个新的 ${providerId} Session 接力当前任务；旧会话和历史消息会完整保留。`)) return;
+  select.disabled = true;
+  let switched = false;
+  try {
+    let res = await post("/api/dev/handoff", { id, providerId, reason: "manual" });
+    if (handoffErrorCode(res) === "SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED") {
+      const proceed = confirm(`旧会话存在结果未知的操作，可能已经产生副作用。\n\n系统不会重放旧命令；继续只会创建新的 ${providerId} Session 接力。确认仍要切换？`);
+      if (!proceed) { toast("已取消切换；请先确认旧会话的实际结果"); return; }
+      res = await post("/api/dev/handoff", { id, providerId, reason: "manual", confirmUnknownOutcome: true });
+    }
+    if (!res?.ok) throw Object.assign(new Error(res?.msg || "切换引擎失败"), { code: handoffErrorCode(res) });
+    switched = true;
+    toast(res.msg || `已切换到 ${providerId}`);
+    await refreshTasks();
+    await pollDetail(true);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    toast(switched ? `切换已完成，但刷新失败：${detail}` : `切换失败：${detail}`);
+  } finally {
+    select.disabled = false;
+  }
 }
 function renderSession(t, dev) {
   const el = $("#tk-detail");
@@ -583,7 +685,8 @@ function renderSession(t, dev) {
   const prevTop = sc ? sc.scrollTop : 0;   // 用户上翻阅读时，重渲染后要回到原位而不是顶部
   // 整块重渲染会吃掉正在输入的文字——先存后还（含焦点）
   const oldInput = $("#tk-input");
-  const draft = oldInput?.value ?? "";
+  const draftKey = `task:${t.id}`;
+  const draft = oldInput?.value ?? ComposerDrafts.getText(draftKey);
   const hadFocus = document.activeElement === oldInput;
 
   const plan = dev.plan?.length ? `<div class="plan-box">${dev.plan.map((p) =>
@@ -674,7 +777,7 @@ function renderSession(t, dev) {
     input.value = draft;
     autoGrow(input);
     if (hadFocus) { input.focus(); input.setSelectionRange(draft.length, draft.length); }
-    input.addEventListener("input", () => autoGrow(input));
+    input.addEventListener("input", () => { autoGrow(input); ComposerDrafts.setText(draftKey, input.value); });
     // Enter 发送 / ↑↓ 翻本会话输入历史 / 输入 "/" 弹命令补全（命令表来自 CC init 帧回报）
     bindComposer(input, { key: `task:${t.id}`, send: () => devSend(t.id), commands: dev.backend === "claude" ? (dev.commands || []) : null });
     input.addEventListener("paste", (e) => {
@@ -706,11 +809,15 @@ function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.
 /** 读一个图片 File → base64 存入 Tasks.images，重渲缩略图 */
 function addImage(f) {
   if (!f || !f.type?.startsWith("image/")) return;
+  const key = Tasks.sel ? `task:${Tasks.sel}` : "";
   const rd = new FileReader();
   rd.onload = () => {
-    Tasks.images.push({ media_type: f.type, data: String(rd.result).split(",")[1], size: f.size });
-    renderThumbs();
+    const images = ComposerDrafts.getAttachments(key);
+    images.push({ media_type: f.type, data: String(rd.result).split(",")[1], size: f.size });
+    ComposerDrafts.setAttachments(key, images);
+    if (Tasks.sel && `task:${Tasks.sel}` === key) { Tasks.images = images; renderThumbs(); }
   };
+  rd.onerror = () => toast("读取图片失败");
   rd.readAsDataURL(f);
 }
 
@@ -719,23 +826,37 @@ function renderThumbs() {
   box.innerHTML = Tasks.images.map((im, i) =>
     `<div class="thumb" title="${Math.round(im.size / 1024)}KB">
       <img src="data:${esc(im.media_type)};base64,${im.data}" alt="">
-      <button title="移除" onclick="Tasks.images.splice(${i},1);renderThumbs()">✕</button>
+      <button title="移除" onclick="Tasks.images.splice(${i},1);ComposerDrafts.setAttachments('task:'+Tasks.sel,Tasks.images);renderThumbs()">✕</button>
     </div>`).join("");
 }
 
 async function devSend(id) {
   const input = $("#tk-input");
-  const text = input.value.trim();
+  const draftSnapshot = input.value;
+  const text = draftSnapshot.trim();
   if (!text && !Tasks.images.length) return;
-  composerSent(`task:${id}`, text);
+  const key = `task:${id}`;
   input.value = "";
   autoGrow(input);
-  const images = Tasks.images.map(({ media_type, data }) => ({ media_type, data }));
+  const pics = Tasks.images;
+  const images = pics.map(({ media_type, data }) => ({ media_type, data }));
   Tasks.images = [];
+  ComposerDrafts.setAttachments(key, []);
   renderThumbs();
   const res = await post("/api/dev/send", { id, text, images: images.length ? images : undefined, clientMutationId: crypto.randomUUID() });
-  if (!res.ok) toast(res.msg);
-  else if (res.queued) toast("agent 忙，已入队（本轮结束自动发出）");
+  if (!res.ok) {
+    if (!ComposerDrafts.getText(key)) ComposerDrafts.setText(key, draftSnapshot);
+    ComposerDrafts.setAttachments(key, [...pics, ...ComposerDrafts.getAttachments(key)]);
+    if (Tasks.sel === id) {
+      const liveInput = $("#tk-input");
+      if (liveInput && !liveInput.value) { liveInput.value = ComposerDrafts.getText(key); autoGrow(liveInput); }
+      Tasks.images = ComposerDrafts.getAttachments(key); renderThumbs();
+    }
+    toast(res.msg);
+  } else {
+    composerSent(key, text); ComposerDrafts.clearText(key, draftSnapshot);
+    if (res.queued) toast("agent 忙，已入队（本轮结束自动发出）");
+  }
   pollDetail(true);
 }
 async function devAddDir(id) {
