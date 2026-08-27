@@ -20,6 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +29,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -53,6 +56,27 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 data class TaskPerm(val taskId: String, val project: String, val perm: PendingPerm)
+
+internal fun routineCanEdit(status: String) = status == "draft"
+
+internal fun routineCanSubmit(status: String, loadedSuccessfully: Boolean) =
+    loadedSuccessfully && routineCanEdit(status)
+
+internal fun routineActions(r: RoutineCard): Set<String> = buildSet {
+    if (r.status == "pending") add("generate")
+    if (r.hasDraft) add("view")
+    if (r.status == "draft") add("skip")
+    if (r.status == "writing" && !r.taskId.isNullOrBlank()) add("task")
+    if (!r.docUrl.isNullOrBlank()) add("document")
+}
+
+internal suspend fun saveThenWrite(
+    save: suspend () -> Unit,
+    write: suspend () -> Unit,
+) {
+    save()
+    write()
+}
 
 private class InboxState {
     var meetings by mutableStateOf<List<Meeting>>(emptyList())
@@ -179,8 +203,8 @@ fun InboxScreen(
             val dueRoutines = st.routines
             if (dueRoutines.isNotEmpty()) {
                 item { SectionHeader("例行") }
-                items(dueRoutines.size) { i ->
-                    RoutineRow(dueRoutines[i], client) { scope.launch { refresh() } }
+                items(dueRoutines.size, key = { i -> "${dueRoutines[i].id}:${dueRoutines[i].date}" }) { i ->
+                    RoutineRow(dueRoutines[i], client, onOpenTask) { scope.launch { refresh() } }
                 }
             }
 
@@ -267,45 +291,145 @@ private fun AttentionRow(item: AttentionItem, onOpenTask: (String) -> Unit) {
 }
 
 @Composable
-private fun RoutineRow(r: RoutineCard, client: OwnwardClient, onChanged: () -> Unit) {
+private fun RoutineRow(
+    r: RoutineCard,
+    client: OwnwardClient,
+    onOpenTask: (String) -> Unit,
+    onChanged: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
+    val uriHandler = LocalUriHandler.current
+    var reviewing by remember(r.id, r.date) { mutableStateOf(false) }
+    var loading by remember(r.id, r.date) { mutableStateOf(false) }
+    var loadedSuccessfully by remember(r.id, r.date) { mutableStateOf(false) }
+    var loadError by remember(r.id, r.date) { mutableStateOf<String?>(null) }
+    var submitting by remember(r.id, r.date) { mutableStateOf(false) }
+    var content by remember(r.id, r.date) { mutableStateOf("") }
+    var draftStatus by remember(r.id, r.date) { mutableStateOf(r.status) }
+    var draftStale by remember(r.id, r.date) { mutableStateOf(r.stale) }
+    var error by remember(r.id, r.date) { mutableStateOf<String?>(null) }
+
+    fun openDraft() {
+        reviewing = true
+        loading = true
+        loadedSuccessfully = false
+        loadError = null
+        scope.launch {
+            try {
+                val draft = client.routineDraft(r.id, r.date)
+                content = draft.draft
+                draftStatus = draft.status
+                draftStale = draft.stale
+                loadedSuccessfully = true
+            } catch (e: Exception) {
+                loadError = e.message ?: "读取草稿失败"
+            } finally {
+                loading = false
+            }
+        }
+    }
+
+    fun submit(action: suspend () -> Unit, close: Boolean = false) {
+        if (submitting) return
+        submitting = true
+        error = null
+        scope.launch {
+            try {
+                action()
+                if (close) reviewing = false
+                onChanged()
+            } catch (e: Exception) {
+                error = e.message ?: "操作失败"
+            } finally {
+                submitting = false
+            }
+        }
+    }
+
+    val actions = routineActions(r)
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surface,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
     ) {
-        Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(r.name, style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    when (r.status) {
-                        "pending" -> if (r.overdue) "已到期，待生成" else "今天 ${r.time}"
-                        "draft" -> "草稿待审" + if (r.stale) "（已过期）" else ""
-                        "writing" -> "正在写入…"
-                        "written" -> "已写入"
-                        "skipped" -> "已跳过"
-                        else -> r.nextLabel
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (r.overdue) ownwardColors.Warn else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            when (r.status) {
-                "pending" -> TextButton(onClick = {
-                    scope.launch { runCatching { client.routineGenerate(r.id) }; onChanged() }
-                }) { Text("生成草稿") }
-
-                "draft" -> {
-                    TextButton(onClick = {
-                        scope.launch { runCatching { client.routineWrite(r.id, r.date) }; onChanged() }
-                    }) { Text("写入") }
-                    TextButton(onClick = {
-                        scope.launch { runCatching { client.routineSkip(r.id, r.date) }; onChanged() }
-                    }) { Text("跳过", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Column {
+            Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(r.name, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        when (r.status) {
+                            "pending" -> if (r.overdue) "已到期，待生成" else "今天 ${r.time}"
+                            "draft" -> "草稿待审"
+                            "writing" -> "正在写入…"
+                            "written" -> "已写入"
+                            "skipped" -> "已跳过"
+                            else -> r.nextLabel
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (r.overdue || r.stale) ownwardColors.Warn else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (r.stale) Text("素材已更新，草稿可能过期", style = MaterialTheme.typography.bodySmall, color = ownwardColors.Warn)
                 }
+                if ("generate" in actions) TextButton(enabled = !submitting, onClick = {
+                    submit({ client.routineGenerate(r.id) })
+                }) { Text("生成草稿") }
+                if ("view" in actions) TextButton(enabled = !loading, onClick = ::openDraft) { Text("查看") }
+                if ("task" in actions) TextButton(onClick = { onOpenTask(r.taskId!!) }) { Text("查看任务") }
+                if ("document" in actions) TextButton(onClick = { uriHandler.openUri(r.docUrl!!) }) { Text("原文") }
+                if ("skip" in actions) TextButton(enabled = !submitting, onClick = {
+                    submit({ client.routineSkip(r.id, r.date) })
+                }) { Text("跳过", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp)) }
         }
     }
+
+    if (reviewing) AlertDialog(
+        onDismissRequest = { if (!submitting) reviewing = false },
+        title = { Text(r.name) },
+        text = {
+            Column {
+                if (loading) CircularProgressIndicator()
+                else if (!loadedSuccessfully) {
+                    Text(loadError ?: "草稿未加载", color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = ::openDraft) { Text("重试") }
+                } else {
+                    if (draftStale) Text("素材已更新，这份草稿可能过期，请重新核对。", color = ownwardColors.Warn)
+                    OutlinedTextField(
+                        value = content,
+                        onValueChange = { content = it },
+                        readOnly = !routineCanEdit(draftStatus),
+                        enabled = !submitting,
+                        label = { Text(if (routineCanEdit(draftStatus)) "草稿正文" else "正文（只读）") },
+                        minLines = 8,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        },
+        confirmButton = {
+            if (!loading && routineCanSubmit(draftStatus, loadedSuccessfully)) Row {
+                TextButton(enabled = !submitting, onClick = {
+                    submit({
+                        client.routineSaveDraft(r.id, r.date, content)
+                        draftStale = false
+                    })
+                }) { Text("保存") }
+                TextButton(enabled = !submitting, onClick = {
+                    submit({ saveThenWrite(
+                        save = {
+                            client.routineSaveDraft(r.id, r.date, content)
+                            draftStale = false
+                        },
+                        write = { client.routineWrite(r.id, r.date) },
+                    ) }, close = true)
+                }) { Text("保存并写入") }
+            }
+        },
+        dismissButton = { TextButton(enabled = !submitting, onClick = { reviewing = false }) { Text("关闭") } },
+    )
 }
 
 @Composable

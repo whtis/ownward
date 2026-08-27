@@ -102,13 +102,23 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
     suspend fun calendarToday(): List<Meeting> = get("/api/calendar/today")
 
     suspend fun routineGenerate(id: String): OkMsg =
-        post("/api/routines/generate", buildJsonObject { put("id", id) })
+        post<OkMsg>("/api/routines/generate", buildJsonObject { put("id", id) }).requireOk()
+
+    suspend fun routineDraft(id: String, date: String): RoutineDraft =
+        get<RoutineDraft>("/api/routines/draft?id=" + id.urlEnc() + "&date=" + date.urlEnc()).also {
+            if (!it.ok) throw ApiException(200, it.msg.ifBlank { "读取草稿失败" })
+        }
+
+    suspend fun routineSaveDraft(id: String, date: String, content: String): OkMsg =
+        post<OkMsg>("/api/routines/draft", buildJsonObject {
+            put("id", id); put("date", date); put("content", content)
+        }).requireOk()
 
     suspend fun routineWrite(id: String, date: String): OkMsg =
-        post("/api/routines/write", buildJsonObject { put("id", id); put("date", date) })
+        post<OkMsg>("/api/routines/write", buildJsonObject { put("id", id); put("date", date) }).requireOk()
 
     suspend fun routineSkip(id: String, date: String): OkMsg =
-        post("/api/routines/skip", buildJsonObject { put("id", id); put("date", date) })
+        post<OkMsg>("/api/routines/skip", buildJsonObject { put("id", id); put("date", date) }).requireOk()
 
     // ---- 任务 / agent 会话 ----
     suspend fun tasks(): List<WorkTask> = get("/api/tasks")
@@ -323,4 +333,9 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
         (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: ""
 
     private fun String.urlEnc(): String = java.net.URLEncoder.encode(this, "UTF-8")
+
+    private fun OkMsg.requireOk(): OkMsg {
+        if (!ok) throw ApiException(200, msg.ifBlank { "操作失败" })
+        return this
+    }
 }

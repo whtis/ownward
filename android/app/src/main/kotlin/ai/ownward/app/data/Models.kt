@@ -94,6 +94,16 @@ data class RoutineCard(
     val hasDraft: Boolean = false,
     val taskId: String? = null,
     val stale: Boolean = false,
+    val docUrl: String? = null,
+)
+
+@Serializable
+data class RoutineDraft(
+    val ok: Boolean = false,
+    val draft: String = "",
+    val status: String = "",
+    val stale: Boolean = false,
+    val msg: String = "",
 )
 
 @Serializable
