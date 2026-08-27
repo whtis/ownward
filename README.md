@@ -98,6 +98,16 @@ CodeBuddy 默认不启用，需要设置 `providers.codebuddy.enabled: true`。
 
 这套循环不是为了保存更多聊天，而是让下一次开发拿到上一次留下的事实。vault 是普通 Markdown，可以直接搜索、编辑、提交到 Git，也可以交给 Obsidian 管理；默认位置是 `~/Documents/ownward-vault/`。
 
+## 同一底座，也能承载其他专业工作台
+
+研发工作台是 Ownward 内置的 `dev` Vertical。它下面的 Kernel、独立 Runner、Provider 适配器，以及事实和权限层，并不依赖“写代码”这个具体场景。
+
+完整 Vertical 契约定义了 sessions、tasks、actions、storage、scheduler、llm、sources 等受控 capability，内置 Vertical 可以按声明获得。当前 external Host 开放的是 storage、actions、scheduler、llm 和 sources；sessions、tasks 仍会被 Host 可用性闸明确拒绝。外部 Vertical 还可以挂载自己的 API 路由、页面和导航，并通过独立 Host 进程获得崩溃隔离和开发时热重载。
+
+实际 Desk 扩展面向猎头顾问，把招聘领域档案、推荐流程和待办放在同一底座上，复用 Ownward 的引擎链、Action、调度、storage 和 sources；完整领域实现不在本仓库。公开的 [Desk 只读示例](examples/verticals/sample-readonly) 只用 scoped storage 展示脱敏候选人列表，用于验证 Host、路由、页面和授权边界。
+
+同样的方式可以用于其他需要个人适配的工作台。外部 Vertical 必须是用户明确启用的 trusted 本地代码；独立进程用于隔离崩溃和生命周期，不是抵御恶意代码的安全沙箱。扩展契约和开发守则见 [开发指南](docs/development.md)。
+
 ## 能力与边界
 
 | 能力 | Claude Code | Codex | CodeBuddy |
