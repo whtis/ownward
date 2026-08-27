@@ -179,6 +179,84 @@ bun install --frozen-lockfile
 
 Ownward 采用 [Apache License 2.0](LICENSE)。
 
+## 附录：让手机从外网连接 Ownward
+
+先在 `config.json` 开启远程监听，再重新安装：
+
+```json
+{
+  "dashboard": { "listen": "all" }
+}
+```
+
+```bash
+bash install.sh
+```
+
+这会让 Ownward 监听 `0.0.0.0:4517`，并启用远程令牌鉴权。用防火墙或路由器挡住公网对 4517 的直接访问，只开放下面的 HTTPS 入口。首次从手机打开时，页面会要求访问令牌，令牌在 `data/secrets/api-token.txt`。
+
+### Nginx
+
+先为域名配置有效的 TLS 证书，再加入以下站点配置：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ownward.example.com;
+
+    # 首次登录会用查询参数交换令牌，不要把完整请求写进 access log。
+    access_log off;
+
+    ssl_certificate     /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:4517;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+重载 Nginx 后，在手机访问 `https://ownward.example.com`。`X-Forwarded-For` 会让 Ownward 按远程请求执行令牌鉴权，`X-Forwarded-Proto: https` 则让登录 cookie 带上 `Secure`。
+
+### Cloudflare Tunnel
+
+Cloudflare Tunnel 不需要在路由器上开放入站端口。安装 `cloudflared` 并准备一个已接入 Cloudflare 的域名后执行：
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create ownward
+cloudflared tunnel route dns ownward ownward.example.com
+```
+
+在 `~/.cloudflared/config.yml` 写入创建命令返回的 Tunnel UUID 和凭据文件路径：
+
+```yaml
+tunnel: <TUNNEL-UUID>
+credentials-file: /Users/<your-user>/.cloudflared/<TUNNEL-UUID>.json
+ingress:
+  - hostname: ownward.example.com
+    service: http://127.0.0.1:4517
+  - service: http_status:404
+```
+
+启动并验证：
+
+```bash
+cloudflared tunnel run ownward
+```
+
+确认手机可以访问后，再按 [Cloudflare 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)将 Tunnel 注册为 macOS 常驻服务。
+
+首次登录会短暂使用带令牌的查询参数，再换成 HttpOnly cookie。不要记录查询字符串，也不要复制或截图这段登录地址；Cloudflare 日志、监控和分析工具也应排除查询参数。如果令牌可能已经泄漏，删除 `data/secrets/api-token.txt` 后重新运行 `bash install.sh`，让所有客户端重新登录。
+
+主要通过浏览器使用时，可以再启用 Cloudflare Access。原生 Android / iOS 客户端接入前，需要确认其鉴权方式与 Access 策略兼容。无论是否启用 Access，Ownward 自己的访问令牌都应保留。Nginx 配置项可查阅其[反向代理文档](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)。
+
 ---
 
 **Ownward — your work, carried forward.**

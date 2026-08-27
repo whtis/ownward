@@ -2,6 +2,7 @@
 // SSE 靠 watch feed.jsonl 文件驱动——CLI 等外部进程写入的通知也能实时到达页面。
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, watch } from "fs";
 import { join } from "path";
+import { isIP } from "net";
 import { loadTasks } from "./dispatch.ts";
 import { FEED_FILE, readFeed } from "./feed.ts";
 import { runHeartbeat } from "./heartbeat.ts";
@@ -134,6 +135,32 @@ function loadApiToken(): string {
   return tok;
 }
 
+const PROXY_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip"] as const;
+
+function isLoopbackIp(ip: string): boolean {
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+function isAllowedLocalOrigin(origin: string | null, port: number): boolean {
+  return !origin || origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}` || origin === `http://[::1]:${port}`;
+}
+
+/** 只信任回环反代写入的 XFF；直连远端即使伪造 XFF 也只能落入其 socket IP 桶。 */
+export function remoteRateLimitKey(peerIp: string, xForwardedFor: string | null): string {
+  if (!isLoopbackIp(peerIp) || !xForwardedFor) return peerIp;
+  const clientIp = xForwardedFor.split(",").at(-1)?.trim() || "";
+  return isIP(clientIp) !== 0 ? clientIp : peerIp;
+}
+
+/** listen=all 时仅真正的本机直连免 token；Host 也必须可信，避免回环 socket 上的 DNS rebinding 绕过鉴权。 */
+export function isTrustedLocalDirectRequest(req: Request, ip: string, port: number): boolean {
+  const host = req.headers.get("host") || "";
+  const localHost = host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === `[::1]:${port}`;
+  const localSocket = isLoopbackIp(ip);
+  const proxied = PROXY_HEADERS.some((header) => req.headers.has(header));
+  return localHost && localSocket && !proxied;
+}
+
 export function startServer() {
   const port = cfg.dashboard?.port || 4517;
   const listenAll = cfg.dashboard?.listen === "all";
@@ -175,7 +202,7 @@ export function startServer() {
         if (!okHost) return new Response("invalid host", { status: 403 });
         if (req.method !== "GET" && req.method !== "HEAD") {
           const origin = req.headers.get("origin");
-          if (origin && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}` && origin !== `http://[::1]:${port}`) {
+          if (!isAllowedLocalOrigin(origin, port)) {
             return new Response("csrf blocked", { status: 403 });
           }
         }
@@ -183,12 +210,15 @@ export function startServer() {
 
       if (listenAll) {
         const ip = server.requestIP(req)?.address || "";
-        // 本地反代(frp/nginx 转发到 127.0.0.1)会让远程流量看起来像本机——带 X-Forwarded-* 的一律按远程对待。
-        // 注意:纯 TCP 转发不带这些头,识别不出来;要反代必须用 http 模式(会加 X-Forwarded-For)。
-        const proxied = !!(req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip"));
-        const isLocal = !proxied && (ip === "127.0.0.1" || ip === "::1" || ip.endsWith("127.0.0.1"));
+        // 本地反代会让远程流量看起来像回环连接；只有回环 socket + 本机 Host + 无代理头才免鉴权。
+        // Host 不能单独信任，否则 DNS rebinding 可借本机 socket 绕过 token。
+        const isLocal = isTrustedLocalDirectRequest(req, ip, port);
+        if (isLocal && req.method !== "GET" && req.method !== "HEAD" && !isAllowedLocalOrigin(req.headers.get("origin"), port)) {
+          return new Response("csrf blocked", { status: 403 });
+        }
         if (!isLocal) {
-          if (authBlocked(ip)) return new Response("尝试次数过多，10 分钟后再试", { status: 429 });
+          const authKey = remoteRateLimitKey(ip, req.headers.get("x-forwarded-for"));
+          if (authBlocked(authKey)) return new Response("尝试次数过多，10 分钟后再试", { status: 429 });
           // TLS 终结在反代（cloudflared/nginx）时给 cookie 加 Secure，纯内网 http（Tailscale IP 直连）不加
           const secure = (req.headers.get("x-forwarded-proto") || "").includes("https") ? "; Secure" : "";
           // 登出：清 cookie 回令牌页（不需要已登录，幂等）
@@ -205,20 +235,20 @@ export function startServer() {
             // 浏览器引导:?token=xxx 验证通过 → 换 HttpOnly cookie → 跳回干净 URL(令牌不留在地址栏)
             const qt = url.searchParams.get("token") || "";
             if (tokenEq(qt, apiToken)) {
-              authFails.delete(ip);
+              authFails.delete(authKey);
               url.searchParams.delete("token");
               return new Response(null, { status: 302, headers: {
                 "Location": url.pathname + url.search,
                 "Set-Cookie": `ownward_token=${apiToken}; Path=/; HttpOnly; SameSite=Strict${secure}; Max-Age=31536000`,
               } });
             }
-            if (qt || bearer || cookieTok) authFail(ip);  // 带了凭证但错了才计数
+            if (qt || bearer || cookieTok) authFail(authKey);  // 带了凭证但错了才计数
             if ((req.headers.get("accept") || "").includes("text/html")) {
               return new Response(TOKEN_PAGE, { status: 401, headers: { "Content-Type": "text/html; charset=utf-8" } });
             }
             return new Response("unauthorized", { status: 401 });
           }
-          authFails.delete(ip);
+          authFails.delete(authKey);
           // cookie 会话有 CSRF 面:改状态请求若带 Origin,必须与 Host 同源(Bearer 的 API 客户端不带 Origin,放行)
           if (req.method !== "GET" && req.method !== "HEAD") {
             const origin = req.headers.get("origin");
