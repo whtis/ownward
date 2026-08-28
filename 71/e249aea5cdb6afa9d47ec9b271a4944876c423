@@ -1,0 +1,85 @@
+web/today.js
+  s_093ae9a852e755::t_7b9efeba935513 39-41
+  s_093ae9a852e755::t_c97c2632e771f5 189-190
+  s_093ae9a852e755::t_eec70b0299dd1e 114-131
+  s_093ae9a852e755::t_c9244ad58f8817 4
+  s_093ae9a852e755::t_80099d26b86a7c 191
+  s_093ae9a852e755::t_32adef7b08c870 132-146
+  s_093ae9a852e755::t_71e12b8bc33a9d 73,78,84
+  s_093ae9a852e755::t_14c23af08d1600 77,83
+  s_093ae9a852e755::t_5f8cfda90f2b7f 106-107
+  s_093ae9a852e755::t_4ab454271d5549 26-29
+src/features.test.ts
+  s_093ae9a852e755::t_4fbbf86657ae82 1-42
+src/capture-lark.test.ts
+  s_093ae9a852e755::t_1053212c710dd7 1-53
+src/midday.ts
+  s_093ae9a852e755::t_392bcff088420c 58
+  s_093ae9a852e755::t_17855995d5537d 1-10,13-57,59-89,91-108
+  s_093ae9a852e755::t_bece6f757a8144 90
+  s_093ae9a852e755::t_7aa8867db79a42 11-12
+src/server.ts
+  s_093ae9a852e755::t_a2f0d8be2af343 384-389
+  s_093ae9a852e755::t_a6a6d60f34e5dc 366-377
+  s_093ae9a852e755::t_5b6f8090448590 378-383
+web/summary.js
+  s_093ae9a852e755::t_002a1ce762edb7 2-4,6,29-30
+src/connectors/lark-policy.ts
+  s_093ae9a852e755::t_45e4f7dfcce31f 3-5
+  s_093ae9a852e755::t_1bbfe08aaf58b3 1
+src/sources/lark.ts
+  s_093ae9a852e755::t_6f2577e56adb20 149-162
+  s_093ae9a852e755::t_3c6dce47001195 225
+  s_093ae9a852e755::t_c62233afc0bbe8 219
+  s_093ae9a852e755::t_a109d0913b11a5 173-175
+src/daemon.ts
+  s_093ae9a852e755::t_21cbd2ee683b00 276
+  s_093ae9a852e755::t_896a49e5436fd9 258
+  s_093ae9a852e755::t_af8c5d0f7f98a7 266-267
+  s_093ae9a852e755::t_230bcf8b36fb54 264
+  s_093ae9a852e755::t_d4296c3f581538 223-224
+src/session-cleanup.ts
+  s_093ae9a852e755::t_fbbe1e6ee33a72 23
+src/capture.ts
+  s_093ae9a852e755::t_2fe0cb7aeb6120 14-15
+  s_093ae9a852e755::t_927b7d4e498a51 350-432
+  s_093ae9a852e755::t_722c58ffb9bdf6 243-250
+  s_093ae9a852e755::t_fd7e3d91118c0c 191-192,194-195,197,201-202,207
+src/harvest.ts
+  s_093ae9a852e755::t_adb3e76d9e7df4 218-219
+src/idev.test.ts
+  s_093ae9a852e755::t_98b6a0686baf53 1-21
+src/midday.test.ts
+  s_093ae9a852e755::t_4699f3e9baaad2 1-44
+src/features.ts
+  s_093ae9a852e755::t_7614dd8ab03ceb 1-2,5,7,9-10,12-18,21-22,25-30
+src/daily-digest.ts
+  s_093ae9a852e755::t_39a2d4f593b24b 74-75,80-81,85
+  s_093ae9a852e755::t_6f0ed2a175c687 103-105,115-116
+  s_093ae9a852e755::t_6c2d9e7d9af079 1-4,15
+  s_093ae9a852e755::t_f088750907c3bd 59-61
+  s_093ae9a852e755::t_28dd9054c6cf4d 12
+web/system.js
+  s_093ae9a852e755::t_d7bf294081a488 102-112
+  s_093ae9a852e755::t_cbb1bb1a476fbe 32-35
+src/idev.ts
+  s_093ae9a852e755::t_b741aa0aa46085 1-110
+src/daily-digest.test.ts
+  s_093ae9a852e755::t_c11d9828a21726 18,21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "71e249aea5cdb6afa9d47ec9b271a4944876c423",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}
