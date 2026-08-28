@@ -308,7 +308,7 @@ function render() {
 
   /* 行动：L1/L2 = 今天处理；L3 = 可复盘，默认折叠不抢注意力 */
   const actionCard = (a) => `
-    <div class="action" data-lv="${a.level}">
+    <div class="action" data-lv="${esc(a.level)}">
       <span class="lv">${a.level}</span>
       <div><b>${esc(a.title)}</b><p>${esc(a.reason)}</p></div>
       ${a.kind === "stop"
@@ -333,11 +333,11 @@ function render() {
       : `距 ${h.stop.distPct}%${h.stop.price ? ` ($${h.stop.price})` : ""}`;
     const bear = h.ta && h.ta.verdict === "空·空·空";
     return `<tr class="holding-row" data-symbol="${esc(h.symbol)}" tabindex="0" role="button" aria-label="打开 ${esc(h.display)} 论点卡">
-      <td><span class="sym">${esc(h.display)}</span><span class="layer" data-l="${h.layer}">${LAYER_NAME[h.layer]}</span>
+      <td><span class="sym">${esc(h.display)}</span><span class="layer" data-l="${esc(h.layer)}">${LAYER_NAME[h.layer]}</span>
         ${h.legs ? `<div class="legs">${h.legs.map(esc).join(" · ")}</div>` : ""}</td>
       <td><i class="wbar" style="width:${Math.max(3, h.pctNav * 3)}px;${h.layer === "tactical" ? "background:var(--tactical)" : ""}"></i><span class="num">${h.pctNav}%</span></td>
-      <td><span class="thesis" data-t="${h.thesis}">${{ missing: "缺失", review: "需重审", active: "已立卡" }[h.thesis]}</span>${h.fragment ? `<span class="muted" style="margin-left:5px">碎仓</span>` : ""}</td>
-      <td><span class="stop" data-s="${h.stop.state}">${esc(stopTxt)}${h.stop.state === "breach" && h.unrealPct != null ? ` (${h.unrealPct}%)` : ""}</span></td>
+      <td><span class="thesis" data-t="${esc(h.thesis)}">${{ missing: "缺失", review: "需重审", active: "已立卡" }[h.thesis]}</span>${h.fragment ? `<span class="muted" style="margin-left:5px">碎仓</span>` : ""}</td>
+      <td><span class="stop" data-s="${esc(h.stop.state)}">${esc(stopTxt)}${h.stop.state === "breach" && h.unrealPct != null ? ` (${h.unrealPct}%)` : ""}</span></td>
       <td><span class="ta" data-bear="${!!bear}">${h.ta ? esc(h.ta.verdict) + (h.ta.flags.includes("派发") ? " 派发" : "") : "待扫描"}</span></td>
       <td class="muted" style="text-align:right">${fmtMoney(h.unrealPnl)}</td>
     </tr>`;

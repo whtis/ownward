@@ -715,8 +715,9 @@ function flushQueue(s: EngineSession): boolean {
     const { text, images } = mergeQueued(batch);
     if (!text.trim() && !images.length) continue;   // 整段空白：跳过，接着看下一段
     // 此时 turn 已置 idle，sendFollowUp 会把它拉回 running 并投帧（进程还活着直接写）
+    // 发失败把本段放回队首（对齐 kernel flushQueue）：s.queued 已是 rest，batch.concat 还原原序
     try { sendFollowUp(s.taskId, text, images); return true; }
-    catch (e) { log(`engine [${s.taskId}] flush queue failed: ${e}`); return false; }
+    catch (e) { s.queued = batch.concat(s.queued); log(`engine [${s.taskId}] flush queue failed: ${e}`); return false; }
   }
   return false;
 }

@@ -103,6 +103,24 @@ struct ProjectDir: Decodable, Sendable, Equatable, Hashable, Identifiable {
     var id: String { dir }
 }
 
+/// GET /api/fs/dirs：目录浏览严格限制在服务端 architecture.allowedRoots 内（src/fs-browse.ts）。
+/// path=null 是「授权根视图」：entries 是各个 allowedRoot，本身不可选。
+struct FsDirEntry: Decodable, Sendable, Equatable, Hashable, Identifiable {
+    @Defaulted var name: String
+    @Defaulted var path: String
+    @Defaulted var git: Bool
+    var id: String { path }
+}
+
+struct FsDirListing: Decodable, Sendable, Equatable {
+    @Defaulted var ok: Bool
+    var path: String?
+    var parent: String?
+    @Defaulted var entries: [FsDirEntry]
+    @Defaulted var truncated: Bool
+    @Defaulted var msg: String
+}
+
 struct ActionRef: Decodable, Sendable, Equatable {
     var chat_id: String?
     var task_id: String?
@@ -199,6 +217,9 @@ struct RecentSession: Decodable, Sendable, Equatable, Identifiable {
     @Defaulted var msgs: Int
     @Defaulted var userMsgs: Int
     @Defaulted var last: String
+    // 跨引擎接力后 mode 不再反映真实引擎：新 daemon 下发 backend/providerId，老 daemon 缺省回退 mode
+    var backend: String?
+    var providerId: String?
 }
 
 struct DevMsg: Decodable, Sendable, Equatable, Hashable {

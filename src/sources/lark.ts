@@ -150,10 +150,14 @@ export async function drainLarkIngress(connector:ConnectorContext,store=defaultI
 // ---- user 身份「夜间收割」：每晚 24:00 拉过去一天跟我有关的消息，落盘（默认纳入日报，可勾掉排除）----
 // 替代原来每几分钟一轮的未读轮询：不再实时轰炸，一天结算一次。
 function isoLocal(d: Date): string {
-  return `${fmt(d, "date")}T${new Intl.DateTimeFormat("sv-SE", { timeZone: cfg.timezone, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(d)}+08:00`;
+  // +08:00 是飞书域的时区(北京时间)，不是用户的显示时区——飞书 messages-search 的时间窗按北京时间算，
+  // 与 lark-state.ts parseLarkTs 的反向解析成对。所以这里固定 +08:00，不跟 cfg.timezone 走。
+  // 注意：日期部分仍用 cfg.timezone 的 fmt，若用户把 timezone 改到非 +08 区，这两半会不自洽——
+  // 届时应整体改用北京时间的日期，而不是把偏移改成 cfg.timezone。
+  return `${fmt(d, "date")}T${new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(d)}+08:00`;
 }
 
-/** 本地某天 00:00 的 epoch ms（Asia/Shanghai，+08:00 固定偏移） */
+/** 北京时间某天 00:00 的 epoch ms（飞书域时区，+08:00 固定偏移；同 isoLocal 的理由，不跟 cfg.timezone） */
 function midnightMs(d: Date): number {
   return new Date(`${fmt(d, "date")}T00:00:00+08:00`).getTime();
 }

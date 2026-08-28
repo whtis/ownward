@@ -46,14 +46,20 @@ class OwnwardClientChatTest {
         assertEquals(listOf(ChatEvent.Error("boom")), collect())
     }
 
-    @Test fun malformedJsonThrows() = assertFailsWithMessage("对话流格式错误") {
-        enqueue("not-json")
-        collect()
+    @Test fun malformedJsonIsSkipped() {
+        // 坏行跳过、不杀流（前向兼容，对齐 web）：坏行后面的 done 仍能正常收到
+        enqueue("not-json", doneJson())
+        val events = collect()
+        assertEquals(1, events.size)
+        assertTrue(events[0] is ChatEvent.Done)
     }
 
-    @Test fun unknownEventThrows() = assertFailsWithMessage("对话流包含未知事件") {
-        enqueue("""{"type":"mystery"}""")
-        collect()
+    @Test fun unknownEventIsSkipped() {
+        // 未知帧跳过：服务端加新事件类型不该杀掉老客户端的流
+        enqueue("""{"type":"mystery"}""", doneJson())
+        val events = collect()
+        assertEquals(1, events.size)
+        assertTrue(events[0] is ChatEvent.Done)
     }
 
     @Test fun doneWithoutChatThrows() = assertFailsWithMessage("对话完成帧缺少会话数据") {

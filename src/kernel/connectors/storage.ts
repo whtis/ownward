@@ -59,7 +59,14 @@ export class ConnectorStore {
   }
   saveCheckpoint(value: ConnectorCheckpoint): void {
     ConnectorStore.validateCheckpoint(value);
-    let previous:ConnectorCheckpoint|null=null;try{previous=this.checkpoint();}catch{}
+    let previous:ConnectorCheckpoint|null=null;
+    try{previous=this.checkpoint();}
+    catch(e){
+      // checkpoint.json 损坏时不能静默盖写(previous=null 会绕过 mergeCheckpoint 的单调游标保护，
+      // 可能把游标写回退、触发上游重拉)。隔离损坏文件并轮换 generation，对齐其它损坏路径的纪律。
+      if(e instanceof ConnectorDataError && e.code==="CONNECTOR_CHECKPOINT_CORRUPT")this.quarantineCheckpoint();
+      else throw e;
+    }
     atomicJson(join(this.root, "checkpoint.json"),mergeCheckpoint(previous,value));
   }
   static validateCheckpoint(value:unknown):asserts value is ConnectorCheckpoint{const v=value as any;if(v?.version!==1||typeof v.cursor!=="string"||!Number.isFinite(Date.parse(v.updatedAt)))throw new ConnectorDataError("CONNECTOR_CHECKPOINT_INVALID","checkpoint 非法");}

@@ -46,8 +46,7 @@ describe("Runner installer transactional failures", () => {
   });
   test("invalid health schema fails before mutation", async () => { const r = await run("schema"); expect(r.code).toBe(65); expect(r.plist).toBe("OLD\n"); expect(r.output).toContain("schema"); });
   test("enable failure restores and health-checks the previous definition", async () => { const r = await run("enable"); expect(r.code).not.toBe(0); expect(r.plist).toBe("OLD\n"); expect(r.output).toContain("restoring previous"); });
-  // 这两条故障路径会刻意走多次 retry；机器繁忙时默认 5s 会把正确的恢复流程误判为超时。
-  test("bootstrap exhaustion restores the previous definition", async () => { const r = await run("bootstrap"); expect(r.code).not.toBe(0); expect(r.plist).toBe("OLD\n"); expect(r.output).toContain("restoring previous"); }, 10_000);
+  test("bootstrap exhaustion restores the previous definition", async () => { const r = await run("bootstrap"); expect(r.code).not.toBe(0); expect(r.plist).toBe("OLD\n"); expect(r.output).toContain("restoring previous"); });
   test("new health deadline failure restores a healthy previous definition", async () => { const r = await run("health"); expect(r.code).not.toBe(0); expect(r.plist).toBe("OLD\n"); expect(r.output).toContain("restoring previous"); }, 10_000);
   test("quiesce TOCTOU gate refuses a late active command before plist mutation", async () => { const r = await run("toctou"); expect(r.code).toBe(75); expect(r.plist).toBe("OLD\n"); expect(r.output).toContain("重新出现 active run"); });
   test("drain timeout resumes the old Runner before returning", async () => { const r = await run("timeout"); expect(r.code).toBe(75); expect(r.plist).toBe("OLD\n"); expect(readFileSync(join(r.root, "health-args"), "utf8")).toContain("--resume"); },10_000);

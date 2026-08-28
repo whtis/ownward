@@ -102,6 +102,34 @@ describe("外部 Host 的 actions/scheduler capability（B-lite ADR 批次 A）"
   });
 });
 
+test("外部 Host 的 sources capability 只拿到 Kernel 标准化的文档快照", async () => {
+  const entry = `let context; export default {
+    activate(ctx) { context = ctx; },
+    async route({ url }) {
+      const op = url.searchParams.get("op");
+      const value = op === "status" ? await context.sources.status("lark") : op === "inspect" ? await context.sources.inspect({ provider: "lark", url: "https://acme.feishu.cn/wiki/wik1" }) : await context.sources.fetch({ provider: "lark", url: "https://acme.feishu.cn/wiki/wik1" });
+      return new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+    }
+  };`;
+  const calls: string[] = [];
+  const rt = new ExtensionRuntime({
+    dataRoot: root(), externalPaths: [pkg(["sources"], entry)],
+    config: { verticals: { deskcap: { enabled: true, trusted: true, grantedCapabilities: ["sources"] } } },
+    sourceFactory: () => ({
+      status: async () => { calls.push("status"); return { provider: "lark", available: true, authenticated: true, identity: "user" }; },
+      inspect: async () => { calls.push("inspect"); return { provider: "lark", identity: "user", canonicalId: "dox1", type: "docx", title: "带教复盘", url: "https://acme.feishu.cn/docx/dox1" }; },
+      fetch: async () => { calls.push("fetch"); return { provider: "lark", identity: "user", canonicalId: "dox1", type: "docx", title: "带教复盘", url: "https://acme.feishu.cn/docx/dox1", revision: "12", contentHash: "a".repeat(64), contentType: "text/markdown", content: "# 复盘", fetchedAt: "2026-08-26T00:00:00Z" }; },
+    }),
+  });
+  runtimes.add(rt); await rt.start();
+  const call = async (op: string) => { const url = new URL(`http://x/api/verticals/deskcap/probe?op=${op}`); return (await (await rt.route(new Request(url.toString()), url))!.json()) as any; };
+  expect(await call("status")).toMatchObject({ available: true, authenticated: true, identity: "user" });
+  expect(await call("inspect")).toMatchObject({ canonicalId: "dox1", title: "带教复盘" });
+  expect(await call("fetch")).toMatchObject({ canonicalId: "dox1", revision: "12", content: "# 复盘" });
+  expect(calls).toEqual(["status", "inspect", "fetch"]);
+  await rt.stop();
+});
+
 describe("受信路由授权（B-lite ADR 批次 B）：deadline/body 上限/二进制透传 + frame 协商", () => {
   const BIG_ENTRY = `let context;
 export default {
@@ -174,7 +202,7 @@ test("activate 与 migrate 的 grants 必须带齐所有能力位（漏一处能
   const grantBlocks = [...src.matchAll(/grants:\s*\{[^}]*\}/g)].map((m) => m[0]);
   expect(grantBlocks.length).toBeGreaterThanOrEqual(2);   // activate + migrate
   for (const block of grantBlocks) {
-    for (const key of ["storage", "leaseId", "actions", "actionsLeaseId", "llm", "llmLeaseId"]) {
+    for (const key of ["storage", "leaseId", "actions", "actionsLeaseId", "llm", "llmLeaseId", "sources", "sourcesLeaseId"]) {
       expect(block).toContain(key);
     }
   }

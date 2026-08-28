@@ -20,6 +20,11 @@ function hashFiles(root: string, files: string[]): string {
   return hash.digest("hex");
 }
 
+export function sourceBuildIdentity(root: string): string {
+  root = resolve(root);
+  return hashFiles(root, trackedFiles(root));
+}
+
 export function trackedFiles(root: string): string[] {
   const proc = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: root });
   if (proc.exitCode !== 0) throw new Error(`git ls-files failed: ${proc.stderr.toString().trim()}`);

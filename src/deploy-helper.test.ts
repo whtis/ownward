@@ -42,4 +42,13 @@ describe("deploy helper", () => {
     expect(sh).toContain("install-release.sh");
     expect(sh).not.toContain("git reset --hard");
   });
+
+  test("settings helper 只从 argv 接收 operation id，不传配置内容", () => {
+    const sh = readFileSync(join(import.meta.dir, "..", "scripts", "deploy-helper.sh"), "utf8");
+    const block = sh.slice(sh.indexOf("settings-apply)"), sh.indexOf("settings-recover)"));
+    expect(block).toContain('src/settings/helper-cli.ts apply "$OPERATION_ID"');
+    expect(block).not.toContain("config.json");
+    expect(block).not.toContain("patches");
+    expect(block).not.toMatch(/(^|\s)bun\s/);
+  });
 });

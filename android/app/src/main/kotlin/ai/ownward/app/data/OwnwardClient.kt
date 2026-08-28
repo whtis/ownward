@@ -241,10 +241,12 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
             while (true) {
                 val line = source.readUtf8Line() ?: break
                 if (line.isBlank()) continue
+                // 坏行跳过（对齐 web/chat.js）：daemon 是唯一写入方且写的是干净 JSON，坏行多为
+                // 未来新增的帧格式；杀掉整条流会把用户消息回滚，前向兼容代价太大
                 val obj = try {
                     AppJson.parseToJsonElement(line).jsonObject
                 } catch (e: Exception) {
-                    throw IOException("对话流格式错误", e)
+                    continue
                 }
                 when (obj.str("type")) {
                     "delta" -> emit(ChatEvent.Delta(obj.str("text")))
@@ -262,7 +264,7 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
                         }
                         emit(ChatEvent.Done(chat))
                     }
-                    else -> throw IOException("对话流包含未知事件")
+                    else -> {}   // 未知帧跳过：服务端加新事件类型不该杀掉老客户端的整条流（前向兼容）
                 }
             }
         }

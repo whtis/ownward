@@ -95,7 +95,6 @@ struct MainShell: View {
                 NavigationStack(path: $agentPath) {
                     AgentListView(client: client,
                                   openTask: { agentPath.append(.task($0)) },
-                                  openObserve: { agentPath.append(.observe(ccId: $0, taskId: nil)) },
                                   openTerminal: { agentPath.append(.observe(ccId: $1, taskId: $0)) },
                                   openDispatch: { agentPath.append(.dispatch) })
                         .navigationDestination(for: Route.self) { destination($0, path: $agentPath) }
@@ -148,7 +147,6 @@ struct MainShell: View {
         case .settings: tab = .inbox; inboxPath = [.settings]
         case .task(let id): tab = .agent; agentPath = [.task(id)]
         case .chat(let id): tab = .chat; chatPath = [.chat(id)]
-        case .observe(let id): tab = .agent; agentPath = [.observe(ccId: id, taskId: nil)]
         case .terminal(let taskId, let ccId): tab = .agent; agentPath = [.observe(ccId: ccId, taskId: taskId)]
         }
     }

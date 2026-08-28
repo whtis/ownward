@@ -708,6 +708,57 @@ describe("Extension runtime lifecycle and recovery", () => {
     }
     expect(alive).toBeFalse();
   });
+  test("有 scheduler job 的外部 vertical 崩溃后无需 HTTP 流量也自动重启", async () => {
+    const dir = join(root(), "sched"),
+      data = join(dir, "data-root");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "ownward.vertical.json"),
+      JSON.stringify({
+        id: "sched",
+        name: "Sched",
+        version: "1.0.0",
+        kernelApiVersion: 1,
+        entry: "index.ts",
+        capabilities: ["storage", "scheduler"],
+        routes: ["/api/verticals/sched/view"],
+      }),
+    );
+    writeFileSync(
+      join(dir, "index.ts"),
+      `export default { async activate(ctx){ ctx.scheduler.every("tick", 60000, async()=>{}); const b=await ctx.storage.readJson("boot.json"); await ctx.storage.writeJson("boot.json",{count:(b?.count||0)+1}); }, route(){ return new Response("{}"); } }`,
+    );
+    const rt = runtime({
+      dataRoot: data,
+      externalPaths: [dir],
+      config: {
+        verticals: {
+          sched: {
+            enabled: true,
+            trusted: true,
+            grantedCapabilities: ["storage", "scheduler"],
+          },
+        },
+      },
+      restartBaseMs: 5,
+    });
+    await rt.start();
+    const boot = () =>
+      JSON.parse(
+        readFileSync(join(data, "verticals/sched/boot.json"), "utf8"),
+      ).count;
+    expect(boot()).toBe(1);
+    const item = (rt as any).loaded.get("sched");
+    item.host.socket.close(); // 崩溃：host-exit → scheduleRestart（有 scheduler → 设退避定时器）
+    // 关键：全程不发任何 route()，只靠退避定时器把它重新拉起来（否则纯 scheduler vertical 会静默停摆）
+    for (let i = 0; i < 300 && boot() < 2; i++) await Bun.sleep(10);
+    expect(boot()).toBeGreaterThanOrEqual(2); // 无 HTTP 流量也自动重启了
+    const status = rt.statuses()[0];
+    // 恢复态是 degraded（外部 vertical 恢复后要靠一次成功路由才转 ready；纯 scheduler 没路由，维持 degraded），
+    // 但绝不能停在 failed；关键是 scheduler job 已重新挂上，定时任务恢复运行。
+    expect(["degraded", "ready"]).toContain(status.state);
+    expect((rt as any).loaded.get("sched").scheduler).toBeTruthy();
+  });
   test("Host stderr diagnostics are bounded and redact secret-like values", async () => {
     const f = fixture("stderr"),
       rt = runtime({

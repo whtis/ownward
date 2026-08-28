@@ -275,7 +275,18 @@ const ComposerDrafts = (() => {
       trim(); persist();
     },
     getAttachments(key) { return key ? (attachments.get(key) || []) : []; },
-    setAttachments(key, items) { if (!key) return; items?.length ? attachments.set(key, items) : attachments.delete(key); },
+    setAttachments(key, items) {
+      if (!key) return;
+      const next = items || [];
+      // 释放被丢弃的 blob URL（旧条目里、新条目里已不在的）——草稿是这些图的所有者，
+      // 清空/发送后置空/替换时若不 revoke，blob 会一直占内存(切走再切回是同一数组，不会误伤重现)。
+      for (const old of attachments.get(key) || []) {
+        if (old && typeof old.url === "string" && old.url.startsWith("blob:") && !next.includes(old)) {
+          try { URL.revokeObjectURL(old.url); } catch { /* 已释放/无效 URL 忽略 */ }
+        }
+      }
+      next.length ? attachments.set(key, next) : attachments.delete(key);
+    },
     moveAttachments(from, to) {
       if (!from || !to || from === to) return;
       const items = attachments.get(from);
@@ -288,7 +299,7 @@ globalThis.ComposerDrafts = ComposerDrafts;
 
 /* ============ 全局状态 ============ */
 const S = {
-  tab: localStorage.getItem("ownward-tab") || "today",
+  tab: new URLSearchParams(location.search).get("tab") || localStorage.getItem("ownward-tab") || "today",
   feed: [], feedError: "", tasks: [], state: null,
   fKind: "all", fSources: new Set(), buffered: [],
   retries: 0, collapsedDone: true,
@@ -440,6 +451,7 @@ function connectSSE() {
   es.addEventListener("feed", (ev) => pushFeed(JSON.parse(ev.data)));
   es.addEventListener("tasks", (ev) => {
     S.tasks = JSON.parse(ev.data);
+    S.tasksSeq = (S.tasksSeq || 0) + 1;   // 标记 SSE 刚推过新鲜数据；定时轮询据此判断是否已过时
     if (typeof Tasks !== "undefined") Tasks.tasksError = "";
     TABS._onTasks?.();
   });
@@ -454,8 +466,15 @@ function renderTopbar() {
   if (!S.state) return;
   renderSysStatus();
   renderHeartbeatPill();
+  applyFeatureVisibility();
   const running = S.tasks.filter((t) => t.status === "running" && t.kind !== "routine").length;
   $("#b-tasks").textContent = running || "";
+}
+/** 关闭的功能不占 tab：邮件（gmail 源）未启用时，隐藏其导航入口；正停在该 tab 就回退今日。 */
+function applyFeatureVisibility() {
+  const mailOn = !!S.state?.sources?.gmail;
+  $$('[data-feature="mail"]').forEach((el) => { el.style.display = mailOn ? "" : "none"; });
+  if (!mailOn && S.tab === "mail") switchTab("today");
 }
 /** 顶栏心跳倒计时（主仓 web 就有，网页化时掉了）：mm:ss 到下次心跳，点击立即触发 */
 function renderHeartbeatPill() {
@@ -492,25 +511,26 @@ function bindTopbar() {
     S.projects = await getJSON("/api/projects").catch(() => S.projects);
     const options = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
     $("#w-dir-list").innerHTML = options;
-    $("#w-extra-list").innerHTML = options;
     $("#add-dir-list").innerHTML = options;
   };
   const renderWorkExtraDirs = () => {
-    $("#w-extra-chips").innerHTML = workExtraDirs.map((dir, i) =>
-      `<span class="dir-chip" title="${esc(dir)}"><span>${esc(dir.split("/").filter(Boolean).at(-1) || dir)}</span><button type="button" data-i="${i}" title="移除">✕</button></span>`).join("");
+    $("#w-extra-chips").innerHTML = workExtraDirs.map((dir, i) => {
+      const name = dir.split("/").filter(Boolean).at(-1) || dir;
+      const removeLabel = `移除附加目录：${name}`;
+      return `<span class="dir-chip" title="${esc(dir)}"><span>${esc(name)}</span><button type="button" data-i="${i}" title="${esc(removeLabel)}" aria-label="${esc(removeLabel)}">✕</button></span>`;
+    }).join("");
     $$("#w-extra-chips button").forEach((b) => b.addEventListener("click", () => { workExtraDirs.splice(+b.dataset.i, 1); renderWorkExtraDirs(); }));
   };
   const addWorkExtraDir = (value) => {
-    const dir = String(value || $("#w-extra-input").value).trim();
+    const dir = String(value || "").trim();
     if (!dir) return;
     if (dir === $("#w-dir").value.trim()) { toast("附加目录不能和主目录相同"); return; }
     if (!workExtraDirs.includes(dir)) workExtraDirs.push(dir);
-    $("#w-extra-input").value = "";
     renderWorkExtraDirs();
   };
   const syncWorkMode = () => {
     const enabled = $("#w-bg").checked;
-    for (const el of [$("#w-extra-input"), $("#w-extra-browse"), $("#w-extra-add")]) el.disabled = !enabled;
+    $("#w-extra-browse").disabled = !enabled;
     $("#w-extra-disabled").hidden = enabled;
     if (!enabled && workExtraDirs.length) { workExtraDirs = []; renderWorkExtraDirs(); toast("terminal 模式已清除附加目录"); }
   };
@@ -525,7 +545,6 @@ function bindTopbar() {
     if (d.model && !$("#w-model").value) { $("#w-engine").dispatchEvent(new Event("change")); $("#w-model").value = d.model; }
     const options = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
     $("#w-dir-list").innerHTML = options;
-    $("#w-extra-list").innerHTML = options;
     const bypass=$("#w-perm option[value=bypass]");if(bypass){bypass.disabled=S.state?.allowFullAccess!==true;bypass.hidden=S.state?.allowFullAccess!==true;if(bypass.disabled&&$("#w-perm").value==="bypass")$("#w-perm").value="";}
     if (d.permission && !$("#w-perm").value && !(d.permission === "bypass" && S.state?.allowFullAccess !== true)) $("#w-perm").value = d.permission;
     ($("#w-dir").value ? $("#w-task") : $("#w-dir")).focus();
@@ -541,9 +560,7 @@ function bindTopbar() {
   $("#w-browse").addEventListener("click", () =>
     openDirPicker((dir) => { $("#w-dir").value = dir; $("#w-task").focus(); }, $("#w-dir").value.trim() || null));
   $("#w-extra-browse").addEventListener("click", () =>
-    openDirPicker((dir) => addWorkExtraDir(dir), $("#w-extra-input").value.trim() || null));
-  $("#w-extra-add").addEventListener("click", () => addWorkExtraDir());
-  $("#w-extra-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addWorkExtraDir(); } });
+    openDirPicker((dir) => addWorkExtraDir(dir), $("#w-dir").value.trim() || null));
   $("#w-bg").addEventListener("change", syncWorkMode);
   syncWorkMode();
 
@@ -586,7 +603,7 @@ function bindTopbar() {
   });
 
   // 模型选单随引擎切换：claude 走别名，codex 走 gpt-5.x 型号，codebuddy 走腾讯网关型号（值原样透传 --model / -m）
-  const CLAUDE_MODELS = ["opus", "sonnet", "haiku"];
+  const CLAUDE_MODELS = ["fable", "opus", "sonnet", "haiku"];
   const CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-5.5-pro"];
   const CODEBUDDY_MODELS = ["hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"];
   const fillModels = () => {
@@ -635,12 +652,15 @@ function bindTopbar() {
     if (!dir || !task) { toast(dir ? "terminal 模式必须写任务描述" : "先选项目目录"); return; }
     if (workImgs.length && !$("#w-bg").checked) { toast("terminal 模式不支持图片——勾选「后台运行」"); return; }
     if (workExtraDirs.length && !$("#w-bg").checked) { toast("terminal 模式不支持附加目录——勾选「后台运行」"); return; }
+    // 附加目录去重只在「添加时」挡过主目录，之后主目录可能被改成某个附加目录——提交前再滤一次，
+    // 别把主目录当附加目录重复下发（后端也会拒，但这里先把用户能改的重复挡掉）。
+    const submitExtraDirs = [...new Set(workExtraDirs)].filter((d) => d !== dir);
     $("#w-submit").disabled = true;
     const res = await post("/api/work", {
       dir, task,
       bg: $("#w-bg").checked, provider: $("#w-engine").value || undefined, worktree: $("#w-worktree").checked,
       model: $("#w-model").value || undefined, permission: $("#w-perm").value || undefined,
-      extraDirs: workExtraDirs.length ? [...workExtraDirs] : undefined,
+      extraDirs: submitExtraDirs.length ? submitExtraDirs : undefined,
       images: workImgs.length ? workImgs : undefined,
     });
     $("#w-submit").disabled = false;
@@ -738,7 +758,7 @@ function bindDirPicker() {
  *  精简版：tab 跳转 + 快捷动作 + 任务/对话/笔记三个域的标题搜索；选中即跳。 */
 const PAL = { items: [], filtered: [], sel: 0, open: false };
 function palStatic() {
-  const tabs = [["today", "今日"], ["tasks", "任务"], ["chat", "对话"], ["lark", "飞书"], ["mail", "邮件"], ["pr", "PR"], ["roles", "角色"], ["notes", "笔记"], ["feed", "通知流"], ["system", "系统"]];
+  const tabs = [["today", "今日"], ["tasks", "任务"], ["chat", "对话"], ["lark", "飞书"], ["mail", "邮件"], ["pr", "PR"], ["roles", "角色"], ["notes", "笔记"], ["feed", "通知流"], ["system", "系统"], ["settings", "设置"]];
   return [
     ...tabs.map(([id, n]) => ({ label: `去 · ${n}`, hint: "tab", go: () => switchTab(id) })),
     { label: "派新任务", hint: "动作", go: () => window.openWork?.() },
@@ -809,14 +829,20 @@ function bindPalette() {
 
 /* ============ 初始化 ============ */
 async function refreshTasks() {
+  const seq = S.tasksSeq || 0;
+  let data;
   try {
-    S.tasks = await getJSON("/api/tasks");
-    if (typeof Tasks !== "undefined") Tasks.tasksError = "";
+    data = await getJSON("/api/tasks");
   } catch {
     if (typeof Tasks !== "undefined") Tasks.tasksError = "任务列表暂时无法载入";
     TABS._onTasks?.();
     return;
   }
+  // 定时轮询的响应是发请求那一刻的快照；若这期间 SSE 已推过更新的任务列表(seq 变了)，
+  // 别拿过时快照盖回去——否则任务状态会闪回旧值，直到下一次 SSE/轮询才自愈
+  if ((S.tasksSeq || 0) !== seq) return;
+  S.tasks = data;
+  if (typeof Tasks !== "undefined") Tasks.tasksError = "";
   renderTopbar();
   TABS._onTasks?.();
 }

@@ -14,9 +14,13 @@ describe("narrow directory controls", () => {
     writeFileSync(html, `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="file://${css}">
       <div class="modal" style="width:296px">
         <div class="row dir-input-row"><input type="text"><button class="icon-btn">目录</button></div>
-        <div class="row dir-input-row"><input type="text"><button class="icon-btn">目录</button><button class="button ghost sm">添加</button></div>
+        <div class="extra-dir-row">
+          <span class="label-hint">附加目录（可选）</span>
+          <div class="dir-chips"><span class="dir-chip"><span>this-is-an-extremely-long-additional-project-directory-name</span><button>✕</button></span></div>
+          <button class="icon-btn extra-dir-add">＋</button>
+        </div>
       </div>
-      <script>const rows=[...document.querySelectorAll('.dir-input-row')],modal=document.querySelector('.modal');document.body.dataset.geometry=JSON.stringify({modal:[modal.clientWidth,modal.scrollWidth],rows:rows.map(row=>[row.clientWidth,row.scrollWidth]),inputs:rows.map(row=>row.querySelector('input').getBoundingClientRect().width)});</script>`);
+      <script>const rows=[...document.querySelectorAll('.dir-input-row,.extra-dir-row')],modal=document.querySelector('.modal');document.body.dataset.geometry=JSON.stringify({modal:[modal.clientWidth,modal.scrollWidth],rows:rows.map(row=>[row.clientWidth,row.scrollWidth]),inputs:[...document.querySelectorAll('.dir-input-row input')].map(input=>input.getBoundingClientRect().width)});</script>`);
     const proc = Bun.spawn([chrome, "--headless=new", "--disable-gpu", "--no-sandbox", "--allow-file-access-from-files", "--window-size=320,800", "--dump-dom", `file://${html}`], { stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     expect(code, err).toBe(0);

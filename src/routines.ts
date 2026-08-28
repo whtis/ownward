@@ -37,6 +37,25 @@ export function listRoutines(): Routine[] {
   return DEFAULTS;
 }
 
+/** 从设置页结构化编辑 routine 规则（时间/星期/窗口/启用/提前量/名称/文档）。逐字段校验后写回 routines.json。 */
+export function updateRoutineRule(id: string, patch: Partial<Routine>): Routine[] {
+  const rules = listRoutines();
+  const r = rules.find((x) => x.id === id);
+  if (!r) throw new Error("找不到该 routine");
+  if (patch.time !== undefined) { if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(String(patch.time))) throw new Error("时间格式应为 HH:MM"); r.time = String(patch.time); }
+  if (patch.days !== undefined) { const d = patch.days as number[]; if (!Array.isArray(d) || d.some((x) => !Number.isInteger(x) || x < 0 || x > 6)) throw new Error("星期应为 0–6 的数组"); r.days = [...new Set(d)].sort((a, b) => a - b); }
+  if (patch.window !== undefined) { if (patch.window !== "yesterday" && patch.window !== "week") throw new Error("取材窗口只能是 yesterday 或 week"); r.window = patch.window; }
+  if (patch.enabled !== undefined) r.enabled = !!patch.enabled;
+  if (patch.aheadMin !== undefined) { const a = Number(patch.aheadMin); if (!Number.isFinite(a) || a < 0 || a > 1440) throw new Error("提前量分钟数无效"); r.aheadMin = Math.round(a); }
+  if (patch.name !== undefined) r.name = String(patch.name).slice(0, 100);
+  if (patch.docUrl !== undefined) r.docUrl = String(patch.docUrl).slice(0, 500);
+  if (patch.guide !== undefined) r.guide = String(patch.guide).slice(0, 4000);
+  ensureDir(DATA);
+  writeFileSync(CONF_FILE, JSON.stringify(rules, null, 2));
+  log(`routine rule updated: ${id}`);
+  return rules;
+}
+
 interface OccState {
   status: "draft" | "writing" | "written" | "skipped";
   draft: string;
@@ -132,7 +151,10 @@ export function todayRoutines() {
 /** 取材窗口覆盖的日期列表（gatherMaterial 与 materialSig 必须用同一份，否则指纹对不上素材） */
 function materialDays(window: "yesterday" | "week"): string[] {
   const days: string[] = [];
-  const now = new Date();
+  // 以 cfg.timezone 下的「今天」为基准锚点：getDay()/setDate 与 fmt() 产出的日期必须同源，
+  // 否则系统时区 ≠ cfg.timezone 时会跨零点错位（对齐 daily-digest.ts 从 fmt 日期派生 dow 的做法）。
+  // 取正午避免任意时区偏移把锚点推到相邻日。
+  const now = new Date(`${fmt(new Date(), "date")}T12:00:00`);
   if (window === "yesterday") {
     // 上一个工作日（周一的昨天=上周五）
     const d = new Date(now);

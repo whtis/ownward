@@ -35,6 +35,7 @@ struct DispatchView: View {
     @State private var permission = "safe"   // safe | bypass
     @State private var worktree = true
     @State private var defaultsApplied = false
+    @State private var browsing = false
     @State private var pendingImages: [PendingImage] = []
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var submitting = false
@@ -54,6 +55,8 @@ struct DispatchView: View {
             Section("项目目录") {
                 TextField("~/workspace/项目", text: $dir)
                     .font(.owBody).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("浏览远程目录") { Haptics.tap(); browsing = true }
+                    .font(.owLabel)
                 if !projects.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
@@ -145,6 +148,12 @@ struct DispatchView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .task { await load() }
+        .sheet(isPresented: $browsing) {
+            DirectoryPicker(client: client, startPath: dir.trimmingCharacters(in: .whitespaces).isEmpty ? nil : dir.trimmingCharacters(in: .whitespaces)) { picked in
+                dir = picked
+                browsing = false
+            }
+        }
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
             Task {
@@ -232,5 +241,107 @@ struct DispatchView: View {
         } catch {
             self.error = error.userMessage; Haptics.error()
         }
+    }
+}
+
+
+/// 目录选择器的导航状态（android DispatchScreen.DirPickerNav 同款，纯逻辑可单测）：
+/// 手输的起点路径载入失败时，第一次自动退回授权根视图；之后的失败如实报错。
+struct DirPickerNav: Equatable {
+    var requestedPath: String?
+    var canFallbackToRoots = true
+
+    func loaded() -> DirPickerNav { DirPickerNav(requestedPath: requestedPath, canFallbackToRoots: false) }
+    func failed() -> DirPickerNav? {
+        canFallbackToRoots && requestedPath != nil ? DirPickerNav(requestedPath: nil, canFallbackToRoots: false) : nil
+    }
+    func go(_ path: String?) -> DirPickerNav { DirPickerNav(requestedPath: path, canFallbackToRoots: false) }
+}
+
+/// 与网页/android 目录选择器共用 /api/fs/dirs：根视图（path=null）不能选，进入授权根后可选当前目录。
+private struct DirectoryPicker: View {
+    let client: OwnwardClient
+    let startPath: String?
+    let onPick: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var listing: FsDirListing?
+    @State private var loading = true
+    @State private var error: String?
+    @State private var nav: DirPickerNav
+
+    init(client: OwnwardClient, startPath: String?, onPick: @escaping (String) -> Void) {
+        self.client = client; self.startPath = startPath; self.onPick = onPick
+        _nav = State(initialValue: DirPickerNav(requestedPath: startPath))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if loading {
+                        HStack { Spacer(); ProgressView(); Spacer() }.padding(.vertical, 24)
+                    } else if let error {
+                        Text(error).font(.owBodyS).foregroundStyle(OW.danger)
+                    } else {
+                        let entries = listing?.entries ?? []
+                        if entries.isEmpty {
+                            Text("没有子目录，可选择当前目录").font(.owBodyS).foregroundStyle(OW.textDim)
+                        }
+                        ForEach(entries) { entry in
+                            HStack(spacing: 8) {
+                                Text("📁")
+                                Text(entry.name).font(.owBody).foregroundStyle(OW.text).lineLimit(1)
+                                if entry.git { Text("git").font(.owLabelS).foregroundStyle(OW.accent) }
+                                Spacer(minLength: 8)
+                                Button("选择") { Haptics.selection(); onPick(entry.path) }
+                                    .font(.owLabel).buttonStyle(.borderless)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { Haptics.tap(); nav = nav.go(entry.path) }
+                        }
+                        if listing?.truncated == true {
+                            Text("目录太多，只显示前 300 个；可继续下钻或手输路径")
+                                .font(.owLabelS).foregroundStyle(OW.danger)
+                        }
+                    }
+                } header: {
+                    Text(listing?.path ?? "授权根目录").textCase(nil).lineLimit(2)
+                }
+            }
+            .navigationTitle("选择项目目录")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("选择此目录") {
+                        Haptics.selection()
+                        if let p = listing?.path { onPick(p) }
+                    }
+                    .disabled(loading || error != nil || listing?.path == nil)
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    // 根视图（path=null）没有上级；授权根的 parent 为 null → 回根视图
+                    Button("返回上级") { Haptics.tap(); nav = nav.go(listing?.parent) }
+                        .disabled(loading || error != nil || listing?.path == nil)
+                }
+            }
+            .task(id: nav.requestedPath) { await load() }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func load() async {
+        loading = true
+        error = nil
+        do {
+            listing = try await client.fsDirs(path: nav.requestedPath)
+            nav = nav.loaded()
+        } catch {
+            // 手输值可能含 ~ 或已失效：首次打开与网页一致，自动退回授权根视图
+            if let retry = nav.failed() { nav = retry; return }
+            self.error = error.userMessage
+        }
+        loading = false
     }
 }

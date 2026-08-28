@@ -1,17 +1,7 @@
-// 斜杠命令补全 + 外部会话归并：两段纯逻辑，都是「三端必须同一口径」的东西，
-// 各写各的迟早漂成三种行为，所以逐条钉住。
+// 斜杠命令补全：纯逻辑，「三端必须同一口径」的东西，各写各的迟早漂成三种行为，所以逐条钉住。
 import Foundation
 import Testing
 @testable import Ownward
-
-private func task(_ id: String, _ text: String, cc: String? = nil) -> WorkTask {
-    WorkTask(id: id, project: "", projectDir: nil, cwd: "", task: text, title: nil, mode: "",
-             engine: nil, model: nil, status: "running", startedAt: "", endedAt: nil, exitCode: nil, ccSessionId: cc)
-}
-
-private func cc(_ id: String, firstUser: String = "", active: Bool = false, mtime: Int64 = 0) -> ObservedSession {
-    ObservedSession(id: id, cwd: "", project: "", title: "", firstUser: firstUser, mtime: mtime, active: active, kind: nil)
-}
 
 struct SlashTests {
     @Test func 整条是斜杠开头的词才提示_打了空格就不弹了() {
@@ -55,35 +45,6 @@ struct SlashTests {
     @Test func 最多40条_不把菜单撑到看不完() {
         let many = (0..<200).map { "cmd\($0)" }
         #expect(Slash.matches(input: "/cmd", commands: many).count == 40)
-    }
-}
-
-struct SessionListTests {
-    @Test func terminal已认领的会话不再重复列进本机会话() {
-        let tasks = [task("t1", "跑测试", cc: "abc-uuid")]
-        let list = externalSessions(tasks: tasks, ccList: [cc("hash/abc-uuid"), cc("hash/other")])
-        #expect(list.map(\.id) == ["hash/other"])   // 认领的按末段 id 认出来
-    }
-
-    @Test func 首条user消息与任务原文同头的_其实就是ownward派的_不重复列() {
-        let tasks = [task("t1", "  把安卓的功能   同步到 ios 上 ")]
-        let list = externalSessions(tasks: tasks, ccList: [
-            cc("s1", firstUser: "把安卓的功能 同步到 ios 上"),   // 空白归一后同头
-            cc("s2", firstUser: "别的活"),
-        ])
-        #expect(list.map(\.id) == ["s2"])
-    }
-
-    @Test func 活跃优先_其次按最近写入排() {
-        let list = externalSessions(tasks: [], ccList: [
-            cc("old", mtime: 100), cc("new", mtime: 300), cc("live", active: true, mtime: 1),
-        ])
-        #expect(list.map(\.id) == ["live", "new", "old"])
-    }
-
-    @Test func 同一个id只留一条() {
-        let list = externalSessions(tasks: [], ccList: [cc("dup", mtime: 2), cc("dup", mtime: 1)])
-        #expect(list.count == 1)
     }
 }
 

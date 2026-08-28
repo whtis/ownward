@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
-import { log, run } from "./util.ts";
+import { log, run, SOURCE_ROOT } from "./util.ts";
 
 export interface ScheduleItem {
   label: string;
@@ -16,6 +16,20 @@ export interface ScheduleItem {
   lastExit?: number;
   disabled?: boolean;    // launchctl disable 的持久停用态（仅 user 域）
   editable?: boolean;    // 用户自己的 LaunchAgent，允许 run/toggle/改调度
+  // ── 归属与人话呈现（系统状态收敛用）──
+  owner?: "ownward";                              // 由 ownward 安装/管理，否则视为外部
+  group?: "core" | "connection";                 // core=核心组件；connection=连接与维护
+  role?: string;                                  // 人话名称
+  purpose?: string;                               // 一句话用途
+  health?: ScheduleHealth;                        // 收敛后的健康结论
+}
+
+export type HealthLevel = "ok" | "attention" | "down" | "paused" | "unknown";
+export interface ScheduleHealth {
+  level: HealthLevel;
+  label: string;        // 状态词：正常/需要处理/已暂停/不可用/未知
+  reason?: string;      // 结论下的原因（人话，已翻译退出码）
+  hint?: string;        // 下一步提示
 }
 
 const SCAN_DIRS: [string, ScheduleItem["scope"]][] = [
@@ -67,8 +81,62 @@ const PROTECTED_SCHEDULE_LABELS = new Set(["ai.ownward.runner"]);
 export const isProtectedSchedule = (label: string) => PROTECTED_SCHEDULE_LABELS.has(label);
 function assertScheduleNotProtected(label: string) { if (PROTECTED_SCHEDULE_LABELS.has(label)) throw new Error(`受保护的系统任务不可从工作台操作: ${label}`); }
 
-export async function listSchedules(includeSystem = false): Promise<ScheduleItem[]> {
-  if (cache && Date.now() - cache.at < 60_000 && !includeSystem) return cache.items;
+// ── 归属登记：ownward 自己安装/管理的 launchd 任务白名单 ──
+// 只显示这些 + ai.ownward.* 前缀 + 程序指向 ownward 源码根的任务；其余（第三方/用户别的项目/系统服务）默认隐身。
+// 绝不再枚举全机 launchd 服务当健康清单（见 listSchedules 的 ownward 过滤）。
+const OWNWARD_REGISTRY: Record<string, { group: "core" | "connection"; role: string; purpose: string }> = {
+  "ai.ownward.daemon": { group: "core", role: "主守护", purpose: "事件处理与工作台" },
+  "ai.ownward.runner": { group: "core", role: "任务执行器", purpose: "运行 agent 会话" },
+  "com.cloudflare.cloudflared.ownward": { group: "connection", role: "外网隧道", purpose: "手机 / 远程访问工作台" },
+};
+
+/** 判定并标注归属：返回 ownward 登记信息，非 ownward 返回 null（不进健康清单）。 */
+export function classifyOwnwardSchedule(item: Pick<ScheduleItem, "label" | "program">): { group: "core" | "connection"; role: string; purpose: string } | null {
+  const reg = OWNWARD_REGISTRY[item.label];
+  if (reg) return reg;
+  if (item.label.startsWith("ai.ownward.")) {
+    const tail = item.label.split(".").slice(2).join(".") || item.label;
+    return { group: "core", role: tail, purpose: "ownward 组件" };
+  }
+  // 兜底：程序/工作目录指向 ownward 源码根（覆盖 label 漂移的情况）
+  if (SOURCE_ROOT && SOURCE_ROOT.length > 3 && item.program.includes(SOURCE_ROOT)) {
+    return { group: "core", role: item.label.split(".").pop() || item.label, purpose: "ownward 组件" };
+  }
+  return null;
+}
+
+/** 退出码翻译：把 launchd 的裸退出码变成「人话原因 + 下一步」。 */
+export function explainExit(code: number): { reason: string; hint: string } {
+  const T: Record<number, { reason: string; hint: string }> = {
+    127: { reason: "找不到要执行的命令或路径（错误 127）", hint: "常见原因：bun/git 路径变化、脚本被移动或依赖未安装" },
+    126: { reason: "命令没有执行权限（错误 126）", hint: "检查脚本的可执行权限（chmod +x）" },
+    2: { reason: "命令用法或参数有误（错误 2）", hint: "查看日志确认脚本报错" },
+    1: { reason: "命令执行时报错（错误 1）", hint: "查看日志了解具体报错" },
+  };
+  return T[code] || { reason: `上次异常退出（退出码 ${code}）`, hint: "查看日志了解详情" };
+}
+
+/** 收敛健康结论：核心组件要求常驻 running；连接/维护类是一次性任务，非 running 也算就绪。 */
+export function scheduleHealth(item: ScheduleItem): ScheduleHealth {
+  if (item.disabled) return { level: "paused", label: "已暂停", hint: "已停用，不会自动运行" };
+  const failed = item.lastExit !== undefined && item.lastExit !== 0;
+  if (item.group === "core") {
+    if (item.state === "running") return { level: "ok", label: "正常运行" };
+    if (failed) { const e = explainExit(item.lastExit!); return { level: "down", label: "不可用", reason: e.reason, hint: e.hint }; }
+    return { level: "down", label: "未运行", reason: "核心组件当前未在运行", hint: "尝试重启该组件" };
+  }
+  // connection / 维护类（一次性运行后退出属正常）
+  if (failed) { const e = explainExit(item.lastExit!); return { level: "attention", label: "需要处理", reason: e.reason, hint: e.hint }; }
+  if (item.state === "running") return { level: "ok", label: "运行中" };
+  return { level: "ok", label: "已就绪" };
+}
+
+/** all=false（默认）只返回 ownward 自己管理的任务（核心/连接），供收敛后的系统状态用；
+ *  all=true 返回全机任务，仅供「高级诊断 > 未纳管服务」只读查看。 */
+const filterOwn = (items: ScheduleItem[], all: boolean) => (all ? items : items.filter((i) => i.owner === "ownward"));
+
+export async function listSchedules(includeSystem = false, all = false): Promise<ScheduleItem[]> {
+  if (cache && Date.now() - cache.at < 60_000 && !includeSystem) return filterOwn(cache.items, all);
 
   // 运行态：label → {pid, lastExit}（gui 域，daemons 看不到属预期）
   const rt = new Map<string, { pid?: number; lastExit?: number }>();
@@ -102,7 +170,7 @@ export async function listSchedules(includeSystem = false): Promise<ScheduleItem
       if (!p) continue;
       const label = p.Label || f.replace(/\.plist$/, "");
       const r = rt.get(label);
-      items.push({
+      const item: ScheduleItem = {
         label,
         scope,
         schedule: humanizeSchedule(p),
@@ -113,7 +181,10 @@ export async function listSchedules(includeSystem = false): Promise<ScheduleItem
         lastExit: r?.lastExit,
         disabled: scope === "user" ? disabledSet.has(label) : undefined,
         editable: scope === "user" && !isProtectedSchedule(label),
-      });
+      };
+      const reg = classifyOwnwardSchedule(item);
+      if (reg) { item.owner = "ownward"; item.group = reg.group; item.role = reg.role; item.purpose = reg.purpose; item.health = scheduleHealth(item); }
+      items.push(item);
     }
   }
 
@@ -138,8 +209,9 @@ export async function listSchedules(includeSystem = false): Promise<ScheduleItem
 
   items.sort((a, b) => (a.scope === b.scope ? a.label.localeCompare(b.label) : a.scope.localeCompare(b.scope)));
   if (!includeSystem) cache = { at: Date.now(), items };
-  log(`schedules: ${items.length} item(s)`);
-  return items;
+  const owned = items.filter((i) => i.owner === "ownward").length;
+  log(`schedules: ${items.length} item(s), ${owned} ownward`);
+  return filterOwn(items, all);
 }
 
 // ---- 控制操作（只允许用户自己的 LaunchAgents） ----

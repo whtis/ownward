@@ -155,10 +155,12 @@ export function readCodexMessages(path: string, after = 0): { messages: CcMessag
   if (from >= size) return { messages: [], offset: size, truncated: false };
 
   let text = readBytes(path, from, size - from);
-  if (truncated) text = text.slice(text.indexOf("\n") + 1);
+  // skip 必须在切片「之前」量，切片后 text.indexOf 会指到第二个换行、算错 offset
+  let skip = 0;
+  if (truncated) { skip = text.indexOf("\n") + 1; text = text.slice(skip); }
   const lastNl = text.lastIndexOf("\n");
   const consumed = lastNl === -1 ? 0 : lastNl + 1;
-  const offset = from + (truncated ? text.indexOf("\n") + 1 : 0) + consumed;
+  const offset = from + skip + consumed;
 
   const messages: CcMessage[] = [];
   let plan: { text: string; status: string }[] | undefined;

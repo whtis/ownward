@@ -4,17 +4,32 @@ import Testing
 
 struct ProtocolTests {
     @Test func ndjsonFrames() throws {
-        #expect(OwnwardClient.parseChatEvent(#"{"type":"delta","text":"你好"}"#) == .delta("你好"))
-        #expect(OwnwardClient.parseChatEvent(#"{"type":"tool","text":"联网搜索：x"}"#) == .tool("联网搜索：x"))
-        #expect(OwnwardClient.parseChatEvent(#"{"type":"error","msg":"限流"}"#) == .error("限流"))
-        let done = OwnwardClient.parseChatEvent(#"{"type":"done","chat":{"id":"c1","title":"T","provider":"codex","model":"m","messages":[{"role":"user","text":"hi"}]}}"#)
+        #expect(try OwnwardClient.parseChatEvent(#"{"type":"delta","text":"你好"}"#) == .delta("你好"))
+        #expect(try OwnwardClient.parseChatEvent(#"{"type":"tool","text":"联网搜索：x"}"#) == .tool("联网搜索：x"))
+        #expect(try OwnwardClient.parseChatEvent(#"{"type":"error","msg":"限流"}"#) == .error("限流"))
+        #expect(try OwnwardClient.parseChatEvent(#"{"type":"error","msg":""}"#) == .error("对话服务返回错误"))
+        let done = try OwnwardClient.parseChatEvent(#"{"type":"done","chat":{"id":"c1","title":"T","provider":"codex","model":"m","messages":[{"role":"user","text":"hi"}]}}"#)
         guard case .done(let chat)? = done else { Issue.record("expected done"); return }
         #expect(chat.id == "c1")
         #expect(chat.messages.first?.text == "hi")
         #expect(chat.messages.first?.images.isEmpty == true)   // 缺字段落默认
-        #expect(OwnwardClient.parseChatEvent("") == nil)
-        #expect(OwnwardClient.parseChatEvent("not json") == nil)
-        #expect(OwnwardClient.parseChatEvent(#"{"type":"unknown"}"#) == nil)
+        #expect(try OwnwardClient.parseChatEvent("") == nil)   // 空行跳过
+    }
+
+    // 坏行 / 未知帧跳过（前向兼容，对齐 web 与 android）：服务端加新事件类型不杀流
+    @Test func ndjsonUnknownAndBadFramesSkip() throws {
+        #expect(try OwnwardClient.parseChatEvent("not json") == nil)
+        #expect(try OwnwardClient.parseChatEvent(#"{"type":"mystery"}"#) == nil)
+    }
+
+    // 但 done 是终帧，缺/坏会话体属协议完整性问题，仍抛错让调用方回滚乐观气泡
+    @Test func ndjsonDoneIntegrityThrows() {
+        #expect { try OwnwardClient.parseChatEvent(#"{"type":"done"}"#) } throws: {
+            ($0 as? ApiError)?.message == "对话完成帧缺少会话数据"
+        }
+        #expect { try OwnwardClient.parseChatEvent(#"{"type":"done","chat":"oops"}"#) } throws: {
+            ($0 as? ApiError)?.message == "对话完成帧格式错误"
+        }
     }
 
     @Test func defaultsTolerateMissingAndNull() throws {

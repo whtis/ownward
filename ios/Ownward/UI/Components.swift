@@ -63,7 +63,14 @@ func searchHit(_ query: String, _ fields: String?...) -> Bool {
 }
 
 /// 会话引擎标签：RecentSession.mode 形如 codex-bg / claude-bg
-func engineLabel(_ mode: String) -> String { mode.hasPrefix("codex") ? "codex" : "claude" }
+/// 新 daemon 给真实 provider（接力后 mode 不再可信）；老 daemon 回退到 mode（android ui/Components.kt 同款）
+func engineLabel(_ mode: String, backend: String? = nil, providerId: String? = nil) -> String {
+    if let p = providerId, !p.isEmpty { return p }
+    if let b = backend, !b.isEmpty { return b }
+    if mode.hasPrefix("codex") { return "codex" }
+    if mode.hasPrefix("codebuddy") { return "codebuddy" }
+    return "claude"
+}
 
 /// 列表行副标题：「项目 · 引擎 · 时间」，空段自动省略
 func sessionSub(_ parts: String?...) -> String {

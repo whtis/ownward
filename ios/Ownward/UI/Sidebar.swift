@@ -1,5 +1,5 @@
 // ChatGPT 式侧边栏（对齐 android ui/Sidebar.kt）：任意页面点顶栏 ☰ 拉出，带搜索，
-// 任务 / 本机会话 / 对话一处选、一步切。抽屉挂在 MainShell（盖在 TabView 之上），
+// 任务 / 对话一处选、一步切。抽屉挂在 MainShell（盖在 TabView 之上），
 // 各页只通过 environment 的 openDrawer 开它。
 //
 // 与 android 的差异：那边左滑边缘也能拉出抽屉，iOS 不做——左边缘是系统返回手势的地盘，
@@ -11,7 +11,6 @@ enum DrawerDest: Hashable, Sendable {
     case inbox, newChat, newTask, settings
     case task(String)
     case chat(String)
-    case observe(String)                       // 外部会话 id
     case terminal(taskId: String, ccId: String?)
 
     /// 与 MainShell 算出的「当前页键」同一套字符串，用来高亮当前项 / 点到当前项时不重载
@@ -23,7 +22,6 @@ enum DrawerDest: Hashable, Sendable {
         case .settings: "settings"
         case .task(let id): "task:\(id)"
         case .chat(let id): "chat:\(id)"
-        case .observe(let id): "observe:\(id)"
         case .terminal(let taskId, _): "terminal:\(taskId)"
         }
     }
@@ -45,30 +43,27 @@ struct DrawerMenuButton: View {
     }
 }
 
-/// 抽屉四张表，各自 try? ——一张失败不拖累其他；抽屉常驻视图树，关了再开先显旧的再刷新
+/// 抽屉三张表，各自 try? ——一张失败不拖累其他；抽屉常驻视图树，关了再开先显旧的再刷新
 @MainActor @Observable
 final class DrawerData {
     var sessions: [RecentSession] = []
     var tasks: [WorkTask] = []
-    var ccList: [ObservedSession] = []
     var chats: [AiChat] = []
     var loaded = false
 
     func refresh(_ client: OwnwardClient) async {
         async let s = try? client.recentSessions()
         async let t = try? client.tasks()
-        async let c = try? client.ccSessions()
         async let ch = try? client.chatList()
         if let v = await s { sessions = v }
         if let v = await t { tasks = v }
-        if let v = await c { ccList = v }
         if let v = await ch { chats = v }
         loaded = true
     }
 }
 
 /// 抽屉内容。isOpen 关上即停轮询、清搜索——不能常开轮询：抽屉常驻视图树，
-/// 那会在后台一直轮四张表（其中 ccSessions 要扫 ~/.claude/projects，很贵）。
+/// 那会在后台一直轮三张表。
 struct AppDrawer: View {
     let client: OwnwardClient
     let isOpen: Bool
@@ -87,15 +82,12 @@ struct AppDrawer: View {
             $0.status == "running" && $0.mode == "terminal" && searchHit(q, $0.title, $0.project, $0.task)
         }
         let restAll = data.sessions.filter { $0.status != "running" && searchHit(q, $0.title, $0.project, $0.last) }
-        let externalAll = externalSessions(tasks: data.tasks, ccList: data.ccList)
-            .filter { searchHit(q, $0.title, $0.firstUser, $0.project) }
         let chatsAll = data.chats.filter { searchHit(q, $0.title, $0.provider, $0.model) }
-        // 不搜索时每段只放最近几条：历史任务 40+、本机会话 100+，全铺出来底下的「对话」永远滚不到。
+        // 不搜索时每段只放最近几条：历史任务多时，全铺出来底下的「对话」永远滚不到。
         // 截断必须说出来（下面的 drawerMore 行），否则看起来像「就这些」。搜索时全展开。
         let rest = q.isEmpty ? Array(restAll.prefix(12)) : restAll
-        let external = q.isEmpty ? Array(externalAll.prefix(8)) : externalAll
         let chats = q.isEmpty ? Array(chatsAll.prefix(12)) : chatsAll
-        let nothing = running.isEmpty && terminal.isEmpty && rest.isEmpty && external.isEmpty && chats.isEmpty
+        let nothing = running.isEmpty && terminal.isEmpty && rest.isEmpty && chats.isEmpty
 
         VStack(spacing: 0) {
             header
@@ -110,7 +102,7 @@ struct AppDrawer: View {
                         ForEach(running) { s in
                             EntityRow(
                                 title: rowTitle(s.title, s.last, "会话"),
-                                sub: sessionSub(s.project, engineLabel(s.mode), TimeFormat.ago(epochMs: s.lastAt)),
+                                sub: sessionSub(s.project, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
                                 dot: OW.success, selected: selectedKey == "task:\(s.id)"
                             ) { onGo(.task(s.id)) }
                         }
@@ -127,24 +119,12 @@ struct AppDrawer: View {
                         ForEach(rest) { s in
                             EntityRow(
                                 title: rowTitle(s.title, s.last, "会话"),
-                                sub: sessionSub(s.project, engineLabel(s.mode), TimeFormat.ago(epochMs: s.lastAt)),
+                                sub: sessionSub(s.project, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
                                 dot: s.status == "done" ? OW.accent : OW.textDim,
                                 selected: selectedKey == "task:\(s.id)"
                             ) { onGo(.task(s.id)) }
                         }
                         drawerMore(restAll.count - rest.count)
-                    }
-                    if !external.isEmpty {
-                        section("本机会话")
-                        ForEach(external) { s in
-                            EntityRow(
-                                title: rowTitle(s.title, s.firstUser, "会话"),
-                                sub: sessionSub(s.project, s.isCodex ? "codex" : "claude", TimeFormat.ago(epochMs: s.mtime)),
-                                dot: s.active ? OW.success : OW.textDim,
-                                selected: selectedKey == "observe:\(s.id)"
-                            ) { onGo(.observe(s.id)) }
-                        }
-                        drawerMore(externalAll.count - external.count)
                     }
                     if !chats.isEmpty {
                         section("对话")

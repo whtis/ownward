@@ -3,6 +3,7 @@
 import { isStrictlyWithin, isWithin } from "./path-within.ts";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "fs";
 import { basename, isAbsolute, join, normalize, resolve, sep } from "path";
+import { lookup } from "dns/promises";
 import { listActions, resolveAction, setActionState } from "./actions.ts";
 import { chatBinding, deleteChat, getChat, listChats, providers, renameChat, resolveChatBinding, saveChatCandidate, streamChat } from "./chat.ts";
 import { loadTasks } from "./dispatch.ts";
@@ -129,7 +130,11 @@ function isPrivateHost(host: string): boolean {
 async function saveResearch(url: string, note?: string): Promise<string> {
   let title = url, excerpt = "";
   try {
-    if (isPrivateHost(new URL(url).hostname)) throw new Error("拒绝抓取本机/私网地址");
+    const researchHost = new URL(url).hostname;
+    if (isPrivateHost(researchHost)) throw new Error("拒绝抓取本机/私网地址");
+    // DNS rebinding：域名可能解析到私网/云 metadata IP。isPrivateHost 只看字面 host，这里按解析结果再挡一层。
+    const resolved = await lookup(researchHost, { all: true }).catch(() => [] as { address: string }[]);
+    if (resolved.some((a) => isPrivateHost(a.address))) throw new Error("拒绝抓取解析到私网的地址");
     const res = await fetch(url, { signal: AbortSignal.timeout(15_000), headers: { "User-Agent": "Mozilla/5.0" }, redirect: "manual" });
     const html = (await res.text()).slice(0, 200_000);
     title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim().slice(0, 100) || url;
@@ -417,7 +422,10 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   // ---- macOS 定时任务 ----
   if (p === "/api/schedules") {
     const { listSchedules } = await import("./schedules.ts");
-    return json(await listSchedules(url.searchParams.get("system") === "1"));
+    // 默认只返回 ownward 自己管理的任务（收敛后的系统状态）；all=1 返回用户/全局/守护域全部任务
+    // （高级诊断，只读）；system=1 才另加 /System/Library 的 Apple 系统 agent
+    const all = url.searchParams.get("all") === "1";
+    return json(await listSchedules(url.searchParams.get("system") === "1", all));
   }
   if (req.method === "POST" && p === "/api/schedules/run") {
     const body = await req.json() as { label: string };
@@ -556,6 +564,17 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     const { todayRoutines } = await import("./routines.ts");
     return json(todayRoutines());
   }
+  // 设置页可编辑的 routine 规则（日报/周报等周期职责的时间/星期/窗口/启用）
+  if (req.method === "GET" && p === "/api/routines/rules") {
+    const { listRoutines } = await import("./routines.ts");
+    return json(listRoutines());
+  }
+  if (req.method === "POST" && p === "/api/routines/rules") {
+    const body = await req.json() as { id: string; patch: any };
+    const { updateRoutineRule } = await import("./routines.ts");
+    try { return json({ ok: true, msg: "规则已更新", rules: updateRoutineRule(body.id, body.patch || {}) }); }
+    catch (e) { return json({ ok: false, msg: String(e instanceof Error ? e.message : e) }, 400); }
+  }
   if (req.method === "GET" && p === "/api/routines/draft") {
     // 必须限定 GET：否则会抢先吃掉下面的 POST 保存请求（读空 query→占坑返回「没有草稿」，
     // saveDraft 永远调不到）——这正是「编辑草稿不生效」的真凶。
@@ -667,8 +686,14 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   }
   if (req.method === "POST" && p === "/api/projects/open") {
     const body = await req.json() as { dir: string; app: "code" | "terminal" | "finder" };
-    const dir = expandHome(body.dir);
-    if (!existsSync(dir)) return json({ ok: false, msg: "目录不存在" }, 400);
+    let dir: string;
+    try { dir = realpathSync(resolve(expandHome(body.dir))); if (!statSync(dir).isDirectory()) return json({ ok: false, msg: "目录不存在" }, 400); }
+    catch { return json({ ok: false, msg: "目录不存在" }, 400); }
+    // 只允许打开授权根内的目录（与 /api/fs/dirs、/api/work 同口径）；不给随手用系统 open 打开任意路径
+    const openRoots = (cfg.architecture?.allowedRoots ?? []).flatMap((root) => {
+      try { const a = realpathSync(resolve(expandHome(root))); return statSync(a).isDirectory() ? [a] : []; } catch { return []; }
+    });
+    if (!openRoots.some((root) => isWithin(root, dir))) return json({ ok: false, msg: "目录不在授权范围（architecture.allowedRoots）内" }, 403);
     if (body.app === "code") Bun.spawn(["open", "-a", "Visual Studio Code", dir]);
     else if (body.app === "terminal") Bun.spawn(["open", "-a", "Terminal", dir]);
     else Bun.spawn(["open", dir]);

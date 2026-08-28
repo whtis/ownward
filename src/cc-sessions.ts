@@ -202,11 +202,13 @@ export function readCcMessages(path: string, after = 0): { messages: CcMessage[]
   if (from >= size) return { messages: [], offset: size, truncated: false };
 
   let text = readBytes(path, from, size - from);
-  if (truncated) text = text.slice(text.indexOf("\n") + 1); // 掐掉半截首行
+  // 掐掉半截首行——skip 必须在切片「之前」量，切片后 text.indexOf 会指到第二个换行、算错 offset
+  let skip = 0;
+  if (truncated) { skip = text.indexOf("\n") + 1; text = text.slice(skip); }
   // 尾部可能是写了一半的行：留到下一轮
   const lastNl = text.lastIndexOf("\n");
   const consumed = lastNl === -1 ? 0 : lastNl + 1;
-  const offset = from + (truncated ? text.indexOf("\n") + 1 : 0) + consumed;
+  const offset = from + skip + consumed;
 
   const messages: CcMessage[] = [];
   // 图片仓的 key：transcript 文件名（session uuid）——meta.id 带 "<hashDir>/" 前缀不能进 URL 段

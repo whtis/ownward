@@ -14,8 +14,14 @@ import { OWNWARD_DIR, VAULT_ROOT } from "./paths.ts";
 import { DATA, ROOT, cfg, fmt, loadState, log, run } from "./util.ts";
 import { handleWorkbench } from "./workbench.ts";
 import { connectorSourceSnapshot } from "./connector-config.ts";
+import { routeSettings } from "./settings/routes.ts";
+import { routeSkills } from "./skills/routes.ts";
+import { ApprovalStore } from "./control-plane/approval.ts";
+import { SettingsOperationStore } from "./settings/operations.ts";
+import { dispatchDeployHelper } from "./deploy-helper.ts";
 
 const INDEX = join(ROOT, "web", "index.html");
+const UI_SESSION_COOKIE = "ownward_ui_session";
 const sseClients = new Set<ReadableStreamDefaultController>();
 export const CORE_API_PATHS = ["/api/state", "/api/feed", "/api/tasks", "/api/events"] as const;
 export const SSE_EVENT_NAMES = ["state", "feed", "tasks"] as const;
@@ -111,8 +117,14 @@ function authBlocked(ip: string): boolean {
   return !!e && Date.now() < e.until;
 }
 function authFail(ip: string) {
-  if (authFails.size > 2000) authFails.clear();  // 攻击面兜底,别让 Map 无限长
   const now = Date.now();
+  if (authFails.size > 2000) {
+    // 只清「过期且未封禁」的项，不整表清空——整表清空会把正在被封的攻击者一起解封，
+    // 可被 IP 轮换（灌 2001+ 个 IP）利用来重置自己主 IP 的失败计数。
+    for (const [k, v] of authFails) { if (now - v.winAt > 600_000 && v.until < now) authFails.delete(k); }
+    // 仍超限就丢最旧一条（Map 按插入序迭代），保住近期的封禁记录
+    if (authFails.size > 2000) { const oldest = authFails.keys().next().value; if (oldest !== undefined) authFails.delete(oldest); }
+  }
   const e = authFails.get(ip);
   if (!e || now - e.winAt > 600_000) { authFails.set(ip, { n: 1, winAt: now, until: 0 }); return; }
   e.n++;
@@ -161,10 +173,35 @@ export function isTrustedLocalDirectRequest(req: Request, ip: string, port: numb
   return localHost && localSocket && !proxied;
 }
 
+export function browserControlSession(req: Request): string | null {
+  const raw = (req.headers.get("cookie") || "").match(/(?:^|;\s*)ownward_ui_session=([A-Za-z0-9]{32,128})/)?.[1];
+  return raw ? new Bun.CryptoHasher("sha256").update(raw).digest("hex") : null;
+}
+
+/** 人工审批能力只在实际 dashboard 页面会话的 same-origin fetch 中成立。 */
+export function isBrowserApprovalRequest(req: Request): boolean {
+  const session = browserControlSession(req), origin = req.headers.get("origin"), fetchSite = req.headers.get("sec-fetch-site");
+  if (!session || !origin || fetchSite !== "same-origin") return false;
+  try { return new URL(origin).origin === new URL(req.url).origin; } catch { return false; }
+}
+
+/** HTTP 同源只能证明请求来自 dashboard，不能证明人真的看过计划。macOS v1 再加一层
+ * 系统模态确认；agent 分析进程没有这项 GUI capability。 */
+export async function confirmNativeUserPresence(kind: "settings" | "skills"): Promise<boolean> {
+  if (process.platform !== "darwin") return false;
+  const subject = kind === "settings" ? "设置变更并重启 Ownward" : "执行 Skill 文件系统变更";
+  const script = `display dialog ${JSON.stringify(`Ownward 请求批准：${subject}\n\n请回到浏览器核对差异或操作计划后，再点击“批准”。`)} with title "Ownward 人工审批" buttons {"取消", "批准"} default button "批准" cancel button "取消" with icon caution`;
+  const result = await run(["/usr/bin/osascript", "-e", script], { timeoutMs: 120_000 });
+  return result.code === 0 && result.stdout.includes("button returned:批准");
+}
+
 export function startServer() {
   const port = cfg.dashboard?.port || 4517;
   const listenAll = cfg.dashboard?.listen === "all";
   const apiToken = listenAll ? loadApiToken() : "";
+  const controlPlaneApprovals = new ApprovalStore();
+  const settingsOperations = new SettingsOperationStore(join(DATA, "settings", "operations"));
+  const settingsRecoveryDispatchAt = new Map<string, number>();
   watchFeed();
   setInterval(() => broadcast("state", stateSnapshot()), 15_000);
 
@@ -263,7 +300,12 @@ export function startServer() {
 
       // no-cache：响应本身没带校验器，浏览器启发式缓存会让 PWA 长期跑旧 JS——本地小文件，每次取最新
       if (p === "/") {
-        return new Response(readFileSync(INDEX), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" } });
+        const headers = new Headers({ "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+        if (!browserControlSession(req)) {
+          const secureCookie = (req.headers.get("x-forwarded-proto") || "").includes("https") ? "; Secure" : "";
+          headers.set("Set-Cookie", `${UI_SESSION_COOKIE}=${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}; Path=/; HttpOnly; SameSite=Strict${secureCookie}; Max-Age=86400`);
+        }
+        return new Response(readFileSync(INDEX), { headers });
       }
       // web/ 静态资源：单段文件名白名单后缀——正则本身排除 / 和 ..，无路径穿越面
       if (req.method === "GET" && /^\/[\w.-]+\.(js|css|html|svg|png|ico|woff2|webmanifest)$/.test(p)) {
@@ -324,7 +366,39 @@ export function startServer() {
         });
       }
       if (p === "/api/state") return json(stateSnapshot());
-    if (p === "/api/system/verticals") return json(await verticalDiagnostics());
+      const browserSessionId = browserControlSession(req) || "";
+      const settingsResponse = await routeSettings(req, url, undefined, {
+        browserSession: { id: browserSessionId, interactive: isBrowserApprovalRequest(req) },
+        confirmUserPresence: () => confirmNativeUserPresence("settings"),
+        runtimeBuildIdentity: process.env.OWNWARD_BUILD_IDENTITY || "dev",
+        requestOrigin: req.headers.get("origin") || new URL(req.url).origin,
+        proxied: PROXY_HEADERS.some((header) => req.headers.has(header)),
+        approvals: controlPlaneApprovals,
+        operations: settingsOperations,
+        dispatchApply: async (operationId) => {
+          const { launchdManaged } = await import("./restart.ts");
+          if (!await launchdManaged()) throw Object.assign(new Error("当前实例不是生产 launchd daemon，拒绝应用设置"), { code: "SETTINGS_PRODUCTION_REQUIRED", status: 409 });
+          await dispatchDeployHelper("settings-apply", [operationId], `settings-${operationId}`);
+        },
+        allowRecoveryDispatch: (operationId) => {
+          const now = Date.now(), previous = settingsRecoveryDispatchAt.get(operationId) || 0;
+          if (now - previous < 15_000) return false;
+          settingsRecoveryDispatchAt.set(operationId, now); return true;
+        },
+        dispatchRecovery: async (operationId) => {
+          const { launchdManaged } = await import("./restart.ts");
+          if (!await launchdManaged()) throw Object.assign(new Error("当前实例不是生产 launchd daemon，拒绝恢复设置事务"), { code: "SETTINGS_PRODUCTION_REQUIRED", status: 409 });
+          await dispatchDeployHelper("settings-recover", [], `settings-recover-${operationId.slice(0, 8)}-${Date.now()}`);
+        },
+      });
+      if (settingsResponse) return settingsResponse;
+      const skillsResponse = await routeSkills(req, url, undefined, {
+        browserSession: { id: browserSessionId, interactive: isBrowserApprovalRequest(req) },
+        confirmUserPresence: () => confirmNativeUserPresence("skills"),
+        approvals: controlPlaneApprovals,
+      });
+      if (skillsResponse) return skillsResponse;
+      if (p === "/api/system/verticals") return json(await verticalDiagnostics());
     if (req.method === "POST" && p === "/api/system/verticals/reload") {
       const body = (await req.json().catch(() => ({}))) as { id?: string };
       const id = String(body.id || "");

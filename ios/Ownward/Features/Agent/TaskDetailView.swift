@@ -67,6 +67,23 @@ final class TaskSessionStore {
         if let failure { notice = failure }
     }
 
+    enum HandoffOutcome: Equatable { case ok, needsConfirm, failed(String) }
+
+    /// 跨引擎接力（android TaskDetailScreen 同款流程）：策略性「结果未知」错误转确认弹窗，其余如实报错
+    func handoff(to providerId: String, confirmUnknownOutcome: Bool) async -> HandoffOutcome {
+        do {
+            _ = try await client.devHandoff(id: taskId, providerId: providerId, confirmUnknownOutcome: confirmUnknownOutcome)
+            Haptics.success()
+            await refresh()
+            return .ok
+        } catch {
+            if needsUnknownHandoffConfirmation(error) { return .needsConfirm }
+            Haptics.error()
+            await refresh()
+            return .failed(error.userMessage)
+        }
+    }
+
     /// 接管租约：take 取回输入权 / release 交还只旁观（web「接管输入 / 释放输入权」同款）
     func setControl(_ action: String) async {
         do {
@@ -170,11 +187,11 @@ struct TaskDetailView: View {
         }
         .sheet(isPresented: $showInfo) {
             if let s = state {
-                InfoSheet(state: s, setControl: { action in
+                InfoSheet(state: s, store: store, setControl: { action in
                     showInfo = false
                     Task { await store.setControl(action) }
-                })
-                .presentationDetents([.medium])
+                }, dismissInfo: { showInfo = false })
+                .presentationDetents([.medium, .large])
             }
         }
         // 运行中 2.5s，空闲 8s；仅前台可见时轮询
@@ -246,7 +263,15 @@ struct TaskDetailView: View {
 
 private struct InfoSheet: View {
     let state: AgentState
+    let store: TaskSessionStore
     let setControl: (String) -> Void
+    let dismissInfo: () -> Void
+
+    @State private var handoffTarget: String?
+    @State private var confirmUnknown = false
+    @State private var switching = false
+    @State private var alertShown = false
+    @State private var handoffError: String?
 
     var body: some View {
         let s = state
@@ -259,6 +284,28 @@ private struct InfoSheet: View {
             }
             if let c = s.ctxTokens { InfoRow(label: "上下文", value: String(format: "%.1fk", Double(c) / 1000)) }
             InfoRow(label: "最近活动", value: TimeFormat.ago(epochMs: s.lastActivityAt))
+            // 跨引擎接力（android TaskDetailScreen 同款）：当前会话保留，新引擎接力续跑
+            Text("切换引擎").font(.owLabel).foregroundStyle(OW.textDim).padding(.top, 16)
+            let block = handoffBlockReason(s)
+            HStack(spacing: 8) {
+                ForEach(["claude", "codex", "codebuddy"].filter { $0 != s.backend }, id: \.self) { provider in
+                    Button(provider) {
+                        Haptics.tap()
+                        confirmUnknown = false; handoffError = nil
+                        handoffTarget = provider; alertShown = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .font(.owLabel)
+            .disabled(block != nil || switching)
+            .padding(.top, 8)
+            if let block {
+                Text(block).font(.owBodyS).foregroundStyle(OW.textDim).padding(.top, 4)
+            }
+            if let handoffError {
+                Text(handoffError).font(.owBodyS).foregroundStyle(OW.danger).padding(.top, 4)
+            }
             // 接管租约切换（web detailHead 同款）：ownward → 可释放给桌面终端；observing → 接管回手机
             if s.operability != "read-only" {
                 HStack(spacing: 8) {
@@ -286,5 +333,46 @@ private struct InfoSheet: View {
         }
         .padding(.horizontal, 24).padding(.top, 28)
         .presentationBackground(OW.bg)
+        .alert(confirmUnknown ? "确认未知副作用后切换？" : "切换到 \(handoffTarget ?? "")？", isPresented: $alertShown) {
+            Button("取消", role: .cancel) { handoffTarget = nil; confirmUnknown = false }
+            Button(confirmUnknown ? "理解风险，继续" : "确认切换") { Task { await confirmHandoff() } }
+        } message: {
+            Text(confirmUnknown
+                ? "旧 Run 的执行结果未知，可能已经产生文件或命令副作用。继续接力不会重放旧命令，请先核对工作区状态。"
+                : "当前会话会保留，新引擎将接力继续这个任务。")
+        }
     }
+
+    private func confirmHandoff() async {
+        guard let target = handoffTarget, !switching else { return }
+        switching = true
+        let outcome = await store.handoff(to: target, confirmUnknownOutcome: confirmUnknown)
+        switching = false
+        switch outcome {
+        case .ok:
+            handoffTarget = nil; confirmUnknown = false
+            dismissInfo()
+        case .needsConfirm:
+            // 换成确认文案重新弹（服务端 SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED）
+            confirmUnknown = true; alertShown = true
+        case .failed(let msg):
+            handoffTarget = nil; confirmUnknown = false
+            handoffError = msg
+        }
+    }
+}
+
+/// 只有「旧 Run 结果未知」这一个策略错误值得二次确认；其他错误如实展示（android 同款）
+func needsUnknownHandoffConfirmation(_ error: Error) -> Bool {
+    (error as? ApiError)?.errorCode == "SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED"
+}
+
+/// 会话当前不能接力的原因；nil = 可以切（android TaskDetailScreen.handoffBlockReason 同款口径）
+func handoffBlockReason(_ s: AgentState) -> String? {
+    if s.control != "ownward" { return "仅 ownward 持有输入权时可切换" }
+    if s.turn == "running" { return "当前轮次运行中，请等待结束或先中断" }
+    if !s.pending.isEmpty { return "有待处理的审批，请先确认" }
+    if !s.queued.isEmpty { return "有排队消息，请先等待发送或撤回" }
+    if s.operability == "read-only" { return "会话已归档，不能切换" }
+    return nil
 }

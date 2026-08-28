@@ -11,7 +11,9 @@
 // EPERM 视为「该句柄类型不支持 flush」并跳过。内容本身已经由 writeFileSync /
 // writeSync 的写句柄落到文件系统缓存，rename 仍是原子的；失去的只是
 // Windows 断电场景下的 durability 保证——POSIX 路径的行为一个字节没变。
-import { fsyncSync as nodeFsyncSync } from "fs";
+import { fsyncSync as nodeFsyncSync, closeSync, openSync, renameSync, writeFileSync } from "fs";
+import { dirname } from "path";
+import { randomUUID } from "crypto";
 
 const WINDOWS = process.platform === "win32";
 
@@ -22,4 +24,15 @@ export function fsyncSync(fd: number): void {
     if (WINDOWS && (error as NodeJS.ErrnoException)?.code === "EPERM") return;
     throw error;
   }
+}
+
+/** 原子落盘：写 tmp → fsync 内容 → rename → fsync 父目录（本仓统一写法）。
+ *  直接 writeFileSync 崩在半途会留下截断文件，下次读解析失败→整份数据静默丢失。
+ *  调用方目录必须已存在。 */
+export function writeFileAtomic(file: string, data: string | Uint8Array, opts: { mode?: number } = {}): void {
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temp, data, opts.mode !== undefined ? { mode: opts.mode } : undefined);
+  const fd = openSync(temp, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(temp, file);
+  const dfd = openSync(dirname(file), "r"); try { fsyncSync(dfd); } finally { closeSync(dfd); }
 }

@@ -11,7 +11,7 @@ const MAX_OUTGOING_BYTES = Math.max(2 * 1024 * 1024, FRAME_MAX + 1024 * 1024);
 type Conn = { socket: Bun.Socket<Conn>; decoder: HostFrameDecoder; pending: Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>; outgoing: Uint8Array[]; outgoingOffset: number; queuedBytes: number; module?: any; context?: any; jobs?: Map<string, { intervalMs: number; fn: (signal: AbortSignal) => Promise<void> | void }>; activated?: boolean };
 function flush(c: Conn) { while (c.outgoing.length) { const frame = c.outgoing[0]!, written = c.socket.write(frame, c.outgoingOffset, frame.byteLength - c.outgoingOffset); if (written < 0) { c.socket.close(); return; } if (written === 0) return; c.outgoingOffset += written; c.queuedBytes -= written; if (c.outgoingOffset < frame.byteLength) return; c.outgoing.shift(); c.outgoingOffset = 0; } }
 function send(c: Conn, env: HostEnvelope) { const frame = encodeHostFrame(env, FRAME_MAX); if (c.queuedBytes + frame.byteLength > MAX_OUTGOING_BYTES) { c.socket.close(); throw Object.assign(new Error("Host outgoing queue overflow"), { code: "EXTENSION_HOST_BACKPRESSURE" }); } c.outgoing.push(frame); c.queuedBytes += frame.byteLength; flush(c); }
-function request(c: Conn, method: string, body: Record<string, unknown>, timeoutMs = 2_000) { const id = `host-${crypto.randomUUID()}`; return new Promise<any>((resolvePromise, reject) => { const timer = setTimeout(() => { c.pending.delete(id); reject(Object.assign(new Error("Kernel RPC timeout"), { code: "EXTENSION_KERNEL_TIMEOUT" })); }, timeoutMs); c.pending.set(id, { resolve: resolvePromise, reject, timer }); send(c, { version: 1, type: "request", id, capability, method, body }); }); }
+function request(c: Conn, method: string, body: Record<string, unknown>, timeoutMs = 2_000) { const id = `host-${crypto.randomUUID()}`; return new Promise<any>((resolvePromise, reject) => { const timer = setTimeout(() => { c.pending.delete(id); reject(Object.assign(new Error("Kernel RPC timeout"), { code: "EXTENSION_KERNEL_TIMEOUT" })); }, timeoutMs); c.pending.set(id, { resolve: resolvePromise, reject, timer }); try { send(c, { version: 1, type: "request", id, capability, method, body }); } catch (e) { clearTimeout(timer); c.pending.delete(id); reject(e as Error); } }); }
 function deepFreeze<T>(v: T): T { if (v && typeof v === "object") { Object.freeze(v); for (const child of Object.values(v as any)) deepFreeze(child); } return v; }
 function capEqual(a: string, b: string) { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); }
 function exact(body: Record<string, unknown>, keys: string[]) { if (JSON.stringify(Object.keys(body).sort()) !== JSON.stringify([...keys].sort())) throw Object.assign(new Error("body schema invalid"), { code: "EXTENSION_REQUEST_INVALID" }); }
@@ -44,11 +44,18 @@ async function handle(c: Conn, env: HostEnvelope) {
       // LLM 一跑几分钟,RPC 超时给足(上限由 Kernel 侧钳制,这里只是别让传输层先超时)
       const llmLeaseId=String(grants.llmLeaseId||""),llm = grants.llm ? Object.freeze({
         complete: async (inp: any) => (await request(c, "llm.complete", { input: inp, leaseId: llmLeaseId }, Math.min(660_000, Number(inp?.timeoutMs) > 0 ? Number(inp.timeoutMs) + 60_000 : 300_000))).value ?? null,
-        engines: async () => (await request(c, "llm.engines", { leaseId: llmLeaseId }, 5_000)).value ?? [],
+        // 传输超时必须高于内核侧 codex 认证探针预算(10s)，否则慢探针会让本调用先超时、
+        // 外部 vertical 拿到空引擎列表并误诊成「底座没下发引擎」。给到 15s 与 sources.status 对齐。
+        engines: async () => (await request(c, "llm.engines", { leaseId: llmLeaseId }, 15_000)).value ?? [],
+      }) : undefined;
+      const sourcesLeaseId=String(grants.sourcesLeaseId||""),sources = grants.sources ? Object.freeze({
+        status: async (provider: "lark") => (await request(c, "sources.status", { provider, leaseId: sourcesLeaseId }, 15_000)).value,
+        inspect: async (input: any) => (await request(c, "sources.inspect", { input, leaseId: sourcesLeaseId }, 40_000)).value,
+        fetch: async (input: any) => (await request(c, "sources.fetch", { input, leaseId: sourcesLeaseId }, 110_000)).value,
       }) : undefined;
       const mod = c.module?null:await import(pathToFileURL(entry).href); c.module = c.module??mod!.default;
       if (!c.module || typeof c.module.activate !== "function") throw Object.assign(new Error("module invalid"), { code: "EXTENSION_MODULE_INVALID" });
-      c.context = deepFreeze({ id: env.body.id, config, storage, actions, scheduler, llm, log: (operation: string, message: string) => request(c, "log", { operation, message: String(message).slice(0, 500) }).catch(() => {}) }); await c.module.activate(c.context); c.activated = true; body = { ready: true, manifest: c.module.manifest ?? null, jobs: [...c.jobs].map(([id, j]) => ({ id, intervalMs: j.intervalMs })) };
+      c.context = deepFreeze({ id: env.body.id, config, storage, actions, scheduler, llm, sources, log: (operation: string, message: string) => request(c, "log", { operation, message: String(message).slice(0, 500) }).catch(() => {}) }); await c.module.activate(c.context); c.activated = true; body = { ready: true, manifest: c.module.manifest ?? null, jobs: [...c.jobs].map(([id, j]) => ({ id, intervalMs: j.intervalMs })) };
     } else if (env.method === "route") {
       exact(env.body, ["method", "url", "headers", "body", "timeoutMs", "maxResponseBytes"]); if (typeof env.body.method !== "string" || typeof env.body.url !== "string" || typeof env.body.body !== "string" || !Number.isInteger(env.body.timeoutMs) || !Number.isInteger(env.body.maxResponseBytes)) throw Object.assign(new Error(), { code: "EXTENSION_REQUEST_INVALID" });
       if (!c.module?.route) body = { handled: false };

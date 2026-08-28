@@ -1,8 +1,9 @@
 // 飞书「夜间收割」存储：每晚 24:00 把当天跟我有关的消息落盘，默认全部纳入当日工作总结
 // （daily-digest，AI 自行判相关性）；飞书 tab 取消勾选 = 排除某条。按日期分桶：{ "YYYY-MM-DD": LarkDailyMsg[] }。
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync } from "fs";
 import { join } from "path";
-import { DATA, ensureDir, fmt } from "./util.ts";
+import { DATA, ensureDir, fmt, log } from "./util.ts";
+import { writeFileAtomic } from "./fs-durable.ts";
 
 export interface LarkDailyMsg {
   id: string;          // message_id
@@ -20,14 +21,19 @@ let cache: Record<string, LarkDailyMsg[]> | null = null;
 
 function load(): Record<string, LarkDailyMsg[]> {
   if (!cache) {
-    try { cache = JSON.parse(readFileSync(FILE, "utf8")); } catch { cache = {}; }
+    try { cache = JSON.parse(readFileSync(FILE, "utf8")); }
+    catch (e) {
+      // 文件不存在是正常首次；能读到却解析失败 = 数据损坏，必须可观测（不然下一次 save 会静默覆盖丢光）
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") log(`[lark-digest] ${FILE} 解析失败，按空桶重建：${e}`);
+      cache = {};
+    }
   }
   return cache!;
 }
 
 function save() {
   ensureDir(DATA);
-  writeFileSync(FILE, JSON.stringify(cache, null, 2));
+  writeFileAtomic(FILE, JSON.stringify(cache, null, 2));
 }
 
 /** 落盘某天的收割结果：按 message_id 去重合并，保留已有勾选状态；只保留最近 14 天分桶。 */

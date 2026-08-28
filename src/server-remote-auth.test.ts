@@ -4,6 +4,24 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 describe("listen=all remote authentication", () => {
+  test("browser session boundary rejects cross-origin CSRF before native user presence", async () => {
+    const { browserControlSession, isBrowserApprovalRequest } = await import("./server.ts");
+    const headers = { cookie: "ownward_ui_session=" + "a".repeat(64), origin: "http://127.0.0.1:4517", "sec-fetch-site": "same-origin" };
+    const request = new Request("http://127.0.0.1:4517/api/skills/approvals", { method: "POST", headers });
+    expect(browserControlSession(request)).toMatch(/^[a-f0-9]{64}$/);
+    expect(isBrowserApprovalRequest(request)).toBe(true);
+    expect(isBrowserApprovalRequest(new Request(request.url, { method: "POST", headers: { ...headers, origin: "https://attacker.example" } }))).toBe(false);
+    expect(isBrowserApprovalRequest(new Request(request.url, { method: "POST", headers: { cookie: headers.cookie } }))).toBe(false);
+  });
+
+  test("settings deployment is gated to the production launchd daemon and native presence", () => {
+    const source = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
+    const block = source.slice(source.indexOf("const settingsResponse"), source.indexOf("const skillsResponse"));
+    expect(block).toContain("launchdManaged");
+    expect(block.indexOf("launchdManaged")).toBeLessThan(block.indexOf('dispatchDeployHelper("settings-apply"'));
+    expect(block).toContain('confirmNativeUserPresence("settings")');
+  });
+
   test("rate-limit keys trust XFF only from an exact loopback peer", async () => {
     const { remoteRateLimitKey } = await import("./server.ts");
     expect(remoteRateLimitKey("127.0.0.1", "198.51.100.1, 203.0.113.2")).toBe("203.0.113.2");

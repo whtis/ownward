@@ -314,10 +314,12 @@ export function startCodexTask(taskId: string, cwd: string, task: string, logFil
     s.firstTurnDone = true;
     refreshFlightRecord(taskId);
     if (s.queued.length && s.control === "ownward") {
-      const merged = mergeQueued(s.queued);
+      const batch = s.queued;
+      const merged = mergeQueued(batch);
       s.queued = [];
       if (merged.text.trim() || merged.images.length) {
-        try { codexFollowUp(taskId, merged.text, merged.images); } catch (e) { log(`codex task [${taskId}] flush queue failed: ${e}`); }
+        // 续发失败原样放回队列（对齐 kernel flushQueue）：清空要在确认发出之后，否则抛异常就把用户消息吞了
+        try { codexFollowUp(taskId, merged.text, merged.images); } catch (e) { s.queued = batch.concat(s.queued); log(`codex task [${taskId}] flush queue failed: ${e}`); }
       }
     }
   });
@@ -395,10 +397,11 @@ export function codexFollowUp(taskId: string, text: string, images: DevImage[] =
     refreshFlightRecord(taskId);
     // 本轮收尾：忙时队列非空且仍持有输入权就合并续发（observing 时不自动发，留着等重新接管）
     if (s.turn === "idle" && s.queued.length && s.control === "ownward") {
-      const merged = mergeQueued(s.queued);
+      const batch = s.queued;
+      const merged = mergeQueued(batch);
       s.queued = [];
       if (merged.text.trim() || merged.images.length) {
-        try { codexFollowUp(taskId, merged.text, merged.images); } catch (e) { log(`codex takeover [${taskId}] flush queue failed: ${e}`); }
+        try { codexFollowUp(taskId, merged.text, merged.images); } catch (e) { s.queued = batch.concat(s.queued); log(`codex takeover [${taskId}] flush queue failed: ${e}`); }
       }
     }
   });

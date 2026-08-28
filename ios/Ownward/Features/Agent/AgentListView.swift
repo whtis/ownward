@@ -1,4 +1,5 @@
-// Agent tab：运行中 / 任务 / 本机会话 三段（分区名与侧边栏对齐，同一批数据不该有两个叫法）。
+// Agent tab：运行中 / 任务 两段（分区名与侧边栏对齐，同一批数据不该有两个叫法）。
+// 只展示 Ownward 任务；terminal 任务仍可进入旁观/接管页（android 8acdae6 同口径）。
 // 搜索走 iOS 原生 .searchable，过滤口径与侧边栏共用 searchHit——同一个关键字两处得到同一批结果。
 // 右上角「+」派新任务。
 import SwiftUI
@@ -6,13 +7,11 @@ import SwiftUI
 struct AgentListView: View {
     let client: OwnwardClient
     let openTask: (String) -> Void
-    let openObserve: (String) -> Void                       // 外部会话 id
     let openTerminal: (_ taskId: String, _ ccId: String?) -> Void
     let openDispatch: () -> Void
 
     @State private var sessions: [RecentSession] = []
     @State private var tasks: [WorkTask] = []
-    @State private var ccList: [ObservedSession] = []
     @State private var error: String?
     @State private var loaded = false
     @State private var query = ""
@@ -22,8 +21,6 @@ struct AgentListView: View {
     var body: some View {
         let running = sessions.filter { $0.status == "running" && searchHit(q, $0.title, $0.project, $0.last) }
         let rest = sessions.filter { $0.status != "running" && searchHit(q, $0.title, $0.project, $0.last) }
-        let external = externalSessions(tasks: tasks, ccList: ccList)
-            .filter { searchHit(q, $0.title, $0.firstUser, $0.project) }
         let terminalRunning = tasks.filter {
             $0.status == "running" && $0.mode == "terminal" && searchHit(q, $0.title, $0.project, $0.task)
         }
@@ -35,7 +32,7 @@ struct AgentListView: View {
                     ForEach(running) { s in
                         EntityRow(
                             title: rowTitle(s.title, s.last, "会话"),
-                            sub: sessionSub(s.project, engineLabel(s.mode), TimeFormat.ago(epochMs: s.lastAt)),
+                            sub: sessionSub(s.project, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
                             dot: OW.success
                         ) { openTask(s.id) }
                     }
@@ -53,22 +50,12 @@ struct AgentListView: View {
                     ForEach(rest) { s in
                         EntityRow(
                             title: rowTitle(s.title, s.last, "会话"),
-                            sub: sessionSub(s.project, engineLabel(s.mode), TimeFormat.ago(epochMs: s.lastAt)),
+                            sub: sessionSub(s.project, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
                             dot: s.status == "done" ? OW.accent : OW.textDim
                         ) { openTask(s.id) }
                     }
                 }
-                if !external.isEmpty {
-                    SectionHeader(text: "本机会话")
-                    ForEach(external) { s in
-                        EntityRow(
-                            title: rowTitle(s.title, s.firstUser, "会话"),
-                            sub: sessionSub(s.project, s.isCodex ? "codex" : "claude", TimeFormat.ago(epochMs: s.mtime)),
-                            dot: s.active ? OW.success : OW.textDim
-                        ) { openObserve(s.id) }
-                    }
-                }
-                if loaded, running.isEmpty, rest.isEmpty, external.isEmpty, terminalRunning.isEmpty, error == nil {
+                if loaded, running.isEmpty, rest.isEmpty, terminalRunning.isEmpty, error == nil {
                     EmptyHint(text: q.isEmpty ? "还没有 agent 会话，点右上角派一个" : "没有匹配「\(q)」的任务或会话")
                 }
                 Spacer(minLength: 24)
@@ -88,8 +75,7 @@ struct AgentListView: View {
         }
         .refreshable { Haptics.tap(); await refresh(); await refreshAux() }
         .poll(id: "agent-list") { await refresh(); return .seconds(30) }
-        // 任务表 + 本机外部会话是慢数据（扫 ~/.claude/projects、~/.codex/sessions），60s 一轮；
-        // 失败不打扰主列表
+        // terminal 任务表是慢数据，60s 一轮；失败不打扰主列表
         .poll(id: "agent-aux") { await refreshAux(); return .seconds(60) }
     }
 
@@ -106,6 +92,5 @@ struct AgentListView: View {
 
     private func refreshAux() async {
         if let t = try? await client.tasks() { tasks = t }
-        if let c = try? await client.ccSessions() { ccList = c }
     }
 }

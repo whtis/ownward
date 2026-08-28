@@ -4,7 +4,7 @@
  * 语义色/来源色/中性色由 CSS 按 mode 两轨固定，皮肤永远不碰。
  * 皮肤库存 daemon（多设备共享），当前选择按设备存 localStorage。 */
 
-const Skin = { customs: [], activeId: localStorage.getItem("ownward-skin") || "native-dark", intensity: localStorage.getItem("ownward-skin-intensity") || "normal" };
+const Skin = { customs: [], activeId: localStorage.getItem("ownward-skin") || "native-light", intensity: localStorage.getItem("ownward-skin-intensity") || "normal" };
 
 /* 内置皮肤：原生两款（无壁纸）+ 四款渐变氛围款（零资产，gradient 常量即壁纸） */
 const SKIN_GRADIENTS = {
@@ -258,7 +258,7 @@ async function createSkinFromFile(file) {
     else loadCustomSkins().then(() => {  // 自定义皮肤要等 daemon 列表（boot 缓存已先顶上，无闪色）
       const s = findSkin(Skin.activeId);
       if (s) applySkin(s, Skin.intensity);
-      else applySkin(BUILTIN_SKINS[0], Skin.intensity);
+      else applySkin(BUILTIN_SKINS.find((skin) => skin.id === "native-light"), Skin.intensity);
     });
   });
 })();

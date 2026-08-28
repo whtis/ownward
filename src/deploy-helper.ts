@@ -3,7 +3,7 @@ import { dirname, join } from "path";
 import { DATA, SOURCE_ROOT, ensureDir, run } from "./util.ts";
 import { writeRestartIntent } from "./restart.ts";
 
-export type DeployAction = "restart" | "apply" | "rollback";
+export type DeployAction = "restart" | "apply" | "rollback" | "settings-apply" | "settings-recover";
 
 export function helperLabel(id: string): string {
   const safe = id.toLowerCase().replace(/[^a-z0-9.-]/g, "-").replace(/-+/g, "-").slice(0, 48);

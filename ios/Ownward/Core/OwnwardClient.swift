@@ -8,6 +8,8 @@ import Foundation
 struct ApiError: LocalizedError, Sendable, Equatable {
     let code: Int
     let message: String
+    /// 服务端失败体可带 errorCode（如 SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED），策略性错误按它分流
+    var errorCode: String? = nil
     var errorDescription: String? { message }
 }
 
@@ -89,10 +91,13 @@ final class OwnwardClient: Sendable {
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw ApiError(code: -1, message: "无效响应") }
         guard (200..<300).contains(http.statusCode) else {
-            throw ApiError(code: http.statusCode, message: failMessage(code: http.statusCode, body: data))
+            let errorCode = (try? JSONDecoder().decode(ErrorCodeBody.self, from: data))?.errorCode
+            throw ApiError(code: http.statusCode, message: failMessage(code: http.statusCode, body: data), errorCode: errorCode)
         }
         return data
     }
+
+    private struct ErrorCodeBody: Decodable { var errorCode: String? }
 
     private func decode<T: Decodable>(_ data: Data) throws -> T {
         do { return try JSONDecoder().decode(T.self, from: data) }
@@ -151,6 +156,16 @@ final class OwnwardClient: Sendable {
         return try await post("/api/dev/send", body)
     }
     func devInterrupt(id: String) async throws -> OkMsg { try await post("/api/dev/interrupt", ["id": .string(id)]) }
+
+    /// 跨引擎接力：当前会话保留，新引擎接力续跑（POST /api/dev/handoff，reason 固定 manual）。
+    /// 旧 Run 结果未知时服务端回 errorCode=SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED，
+    /// 用户确认后带 confirmUnknownOutcome=true 重发（android data/OwnwardClient.kt 同款）。
+    func devHandoff(id: String, providerId: String, confirmUnknownOutcome: Bool = false) async throws -> OkMsg {
+        try await post("/api/dev/handoff", [
+            "id": .string(id), "providerId": .string(providerId),
+            "reason": .string("manual"), "confirmUnknownOutcome": .bool(confirmUnknownOutcome),
+        ])
+    }
 
     /// 接管租约：take = 取得输入权（ownward），release = 交还只旁观（observing）。
     /// Run 执行中 take 会被拒（SESSION_CONTROL_BUSY），msg 可直接展示。
@@ -218,6 +233,13 @@ final class OwnwardClient: Sendable {
 
     func projects() async throws -> [ProjectDir] { try await get("/api/projects") }
 
+    /// /api/fs/dirs 的 query 拼接（android fsDirsPath 同款，可单测）：空/空白路径 = 授权根视图
+    static func fsDirsPath(_ path: String?) -> String {
+        guard let p = path, !p.trimmingCharacters(in: .whitespaces).isEmpty else { return "/api/fs/dirs" }
+        return "/api/fs/dirs?path=" + enc(p)
+    }
+    func fsDirs(path: String? = nil) async throws -> FsDirListing { try await get(Self.fsDirsPath(path)) }
+
     // MARK: - 对话
 
     func chatList() async throws -> [AiChat] { try await get("/api/chat/list") }
@@ -253,8 +275,10 @@ final class OwnwardClient: Sendable {
                     }
                     for try await line in bytes.lines {
                         if Task.isCancelled { break }
-                        guard let ev = Self.parseChatEvent(line) else { continue }
+                        guard let ev = try Self.parseChatEvent(line) else { continue }
                         continuation.yield(ev)
+                        // 错误帧即终帧（android chatSend 同款）：服务端出错后不会再有有效帧
+                        if case .error = ev { break }
                     }
                     continuation.finish()
                 } catch {
@@ -269,20 +293,35 @@ final class OwnwardClient: Sendable {
         var type: String
         var text: String?
         var msg: String?
-        var chat: AiChat?
+        var chat: JSONValue?      // done 帧的会话体单独二次解码，区分「缺数据」和「格式错」
     }
 
-    /// 一行 NDJSON → 事件；空行/坏行跳过
-    static func parseChatEvent(_ line: String) -> ChatEvent? {
+    /// 一行 NDJSON → 事件；空行跳过（nil）。坏行/未知帧/缺数据的 done 帧不再静默吞——
+    /// 直接抛错让调用方回滚乐观气泡（android OwnwardClient.chatSend 同款严格口径）
+    static func parseChatEvent(_ line: String) throws -> ChatEvent? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
-              let f = try? JSONDecoder().decode(ChatFrame.self, from: data) else { return nil }
+        guard !trimmed.isEmpty else { return nil }
+        // 坏行跳过（对齐 web/chat.js 与 android）：daemon 是唯一写入方且写干净 JSON，坏行多为
+        // 未来新增的帧格式；杀掉整条流会回滚用户消息，前向兼容代价太大
+        guard let f = try? JSONDecoder().decode(ChatFrame.self, from: Data(trimmed.utf8)) else { return nil }
         switch f.type {
         case "delta": return .delta(f.text ?? "")
         case "tool": return .tool(f.text ?? "")
-        case "error": return .error(f.msg ?? "")
-        case "done": return f.chat.map { .done($0) }
-        default: return nil
+        case "error":
+            let m = f.msg ?? ""
+            return .error(m.isEmpty ? "对话服务返回错误" : m)
+        case "done":
+            // done 是终帧，必须带会话体——缺/坏则抛错回滚（这不是前向兼容问题，是协议完整性）
+            guard let chatJSON = f.chat, chatJSON != .null else {
+                throw ApiError(code: -2, message: "对话完成帧缺少会话数据")
+            }
+            guard let data = try? JSONEncoder().encode(chatJSON),
+                  let chat = try? JSONDecoder().decode(AiChat.self, from: data) else {
+                throw ApiError(code: -2, message: "对话完成帧格式错误")
+            }
+            return .done(chat)
+        default:
+            return nil   // 未知帧跳过：服务端加新事件类型不该杀掉老客户端的整条流（前向兼容）
         }
     }
 

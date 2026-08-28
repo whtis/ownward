@@ -8,16 +8,20 @@ const html = readFileSync(join(import.meta.dir, "index.html"), "utf8");
 
 describe("multi-directory UI contract", () => {
   test("new work keeps explicit removable extra directory chips and sends them only for this dispatch", () => {
-    expect(html).toContain('id="w-extra-input"');
+    expect(html).toContain('id="w-extra-browse" title="添加附加目录" aria-label="添加附加目录"');
+    expect(html).not.toContain('id="w-extra-input"');
+    expect(html).not.toContain('id="w-extra-add"');
     expect(html).toContain('id="w-extra-chips"');
     expect(app).toContain("let workExtraDirs = []");
     expect(app).toContain("workExtraDirs.splice(+b.dataset.i, 1)");
+    expect(app).toContain('const removeLabel = `移除附加目录：${name}`');
+    expect(app).toContain('aria-label="${esc(removeLabel)}"');
     expect(app).toContain("extraDirs: workExtraDirs.length ? [...workExtraDirs] : undefined");
     expect(app).toContain('const closeWork = () => { overlay.dataset.open = "false"; workExtraDirs = []; renderWorkExtraDirs(); }');
   });
 
   test("terminal disables and clears extra directories, while successful additions refresh reusable candidates", () => {
-    expect(app).toContain('el.disabled = !enabled');
+    expect(app).toContain('$("#w-extra-browse").disabled = !enabled');
     expect(app).toContain('terminal 模式已清除附加目录');
     expect(app).toContain('await refreshProjectCandidates()');
     expect(app).toContain('status.insertAdjacentHTML("beforeend"');

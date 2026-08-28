@@ -107,7 +107,8 @@ TABS.lark = {
     // 8 秒轮询：刷会话列表 + 当前会话消息
     Lark.timer = setInterval(() => {
       loadLarkChats();
-      if (Lark.sel && !Lark.digestOpen) loadLarkMsgs();
+      // 发送在途时不轮询消息：loadLarkMsgs 会整体替换 Lark.msgs，服务端还没落到列表里就会把乐观气泡抹掉
+      if (Lark.sel && !Lark.digestOpen && !Lark.sending) loadLarkMsgs();
     }, 8000);
   },
 
@@ -340,10 +341,16 @@ async function sendLarkMsg() {
   // 乐观追加气泡：让用户立刻看到自己的消息（不用等服务端回包）
   Lark.msgs.push({ id: `opt-${Date.now()}`, sender: "我", ts: String(Date.now()), text, mine: true });
   renderLarkMsgArea();
-  const r = await post("/api/lark/send", { chat_id: chatId, text });
-  if (!r.ok) toast(r.msg || "发送失败");
-  // 无论成功与否都重拉，用服务端真实消息 id 覆盖乐观气泡
-  if (Lark.sel === chatId) await loadLarkMsgs();
+  // 计数(而非布尔)保护并发发送：期间 8s 轮询不重拉消息，避免乐观气泡被整体替换抹掉
+  Lark.sending = (Lark.sending || 0) + 1;
+  try {
+    const r = await post("/api/lark/send", { chat_id: chatId, text });
+    if (!r.ok) toast(r.msg || "发送失败");
+    // 无论成功与否都重拉，用服务端真实消息 id 覆盖乐观气泡
+    if (Lark.sel === chatId) await loadLarkMsgs();
+  } finally {
+    Lark.sending--;
+  }
 }
 
 /* ---- 今日总结面板 ---- */

@@ -289,10 +289,33 @@ async function main() {
     setInterval(() => runHeartbeat(), hbMs);
   }, 60_000); // 启动 1 分钟后开始第一次心跳
 
+  // Skill saga 必须在开放 mutation API 前完成恢复；失败时保留 manual-repair 冻结，
+  // daemon 仍启动以便用户读取 inventory 与恢复说明。
+  try { const { recoverDefaultSkillTransactions } = await import("./skills/routes.ts"); recoverDefaultSkillTransactions(); }
+  catch (error) { log(`skill transaction recovery: ${error instanceof Error ? error.message : error}`); }
+
   startServer();
   if (!crashGuard.markHealthy(boot.state.generation)) {
     throw new Error("crash guard refused healthy marker for current generation");
   }
+
+  // settings helper 属于独立 launchd job；若机器/进程在事务中断电，下一代健康 daemon
+  // 只负责重新派发幂等 recovery，不在自身进程里改 config 或重启自己。
+  const recoverSettings = async () => {
+    try {
+      const { SettingsOperationStore } = await import("./settings/operations.ts");
+      const { dispatchDeployHelper } = await import("./deploy-helper.ts");
+      const store = new SettingsOperationStore(join(DATA, "settings", "operations"));
+      const active = store.list().some((op) => !["committed", "restored", "manual-repair"].includes(op.phase));
+      if (active) {
+        const { launchdManaged } = await import("./restart.ts");
+        if (!await launchdManaged()) { log("settings recovery skipped: current daemon is not production launchd job"); return; }
+        await dispatchDeployHelper("settings-recover", [], `settings-recover-${boot.state.generation.slice(0, 8)}-${Date.now()}`);
+      }
+    } catch (error) { log(`settings recovery dispatch: ${error instanceof Error ? error.message : error}`); }
+  };
+  setTimeout(recoverSettings, 15_000);
+  setInterval(recoverSettings, 30_000); // 原 helper 仍持锁时会 busy；持续补派直到事务进入终态
 
   log(`ready: triage every ${triageMs / 60000}m, heartbeat every ${hbMs / 60000}m`);
 }

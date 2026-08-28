@@ -1,11 +1,11 @@
 // Vertical Runtime compatibility facade. Core server/daemon only depend on this stable seam.
 import { isWithin } from "./path-within.ts";
 import { cfg, DATA, expandHome, fmt, log } from "./util.ts";
-import { DecisionEngine, decisionEngines, runDecision } from "./kernel/decisions/service.ts";
+import { DecisionEngine, decisionEngineStatuses, runDecision } from "./kernel/decisions/service.ts";
 import { ExtensionRuntime, type BuiltinVertical } from "./kernel/extensions/runtime.ts";
 import { KernelSessionService } from "./kernel/sessions/service.ts";
 import { parseSessionMigrationMode } from "./kernel/sessions/contracts.ts";
-import type { ScopedActions, ScopedLlm, ScopedSessions } from "./kernel/extensions/contracts.ts";
+import type { ScopedActions, ScopedLlm, ScopedSessions, ScopedSources } from "./kernel/extensions/contracts.ts";
 import type { ScopedTasks } from "./kernel/extensions/contracts.ts";
 import { addTask, applyEvolve, loadTasks, removeTask, startEvolve, startWork, updateTask } from "./dispatch.ts";
 import { listActions, openAction, resolveActionExact, setActionState } from "./actions.ts";
@@ -25,8 +25,12 @@ import { devSessionCandidates, type ConsumedCandidate } from "./kernel/sessions/
 export { isDevDomainRoute } from "./verticals/dev.ts";
 import { manifest as strategyManifest } from "./verticals/strategy.ts";
 import { strategyVerticalConfig } from "./verticals/strategy.ts";
+import { LarkDocumentSources } from "./kernel/sources/lark-documents.ts";
 
-const allowedRoots = Array.isArray(cfg.architecture?.allowedRoots) ? cfg.architecture.allowedRoots.filter((x: unknown): x is string => typeof x === "string") : [];
+// expandHome 展开 ~：manifest.roots 要求绝对路径（parseVerticalManifest 校验 isAbsolute），
+// scopedTasks.grant 也用 expandHome。不展开的话，config 里一个 "~/workspace" 就会让整个 dev builtin
+// 在发现阶段抛 VERTICAL_MANIFEST_INVALID，任务/PR/evolve 页全挂——而错误提示恰恰叫用户往这里加目录。
+const allowedRoots = Array.isArray(cfg.architecture?.allowedRoots) ? cfg.architecture.allowedRoots.filter((x: unknown): x is string => typeof x === "string").map((r) => expandHome(r)) : [];
 export function devVerticalManifest(roots:string[]):typeof devManifest{return roots.length ? { ...devManifest, roots } : { ...devManifest, roots: [], capabilities: ["actions"], routes: [], commands: [], navigation: devManifest.navigation };}
 export function devLegacyRoutes(roots:string[]):string[]{return DEV_DOMAIN_ROUTES.filter((route)=>roots.length || route!=="/api/work");}
 const configuredDevManifest = devVerticalManifest(allowedRoots);
@@ -113,9 +117,18 @@ export function scopedActions(verticalId: string): ScopedActions {
 /** Decision Model Service 的 Vertical 门面:引擎链与命令来自 config，Vertical 只管给 prompt。
  *  cfg.llm.engines 可改序（如 ["codebuddy","claude"]）；未配置时按 codex→codebuddy→claude 依次降级。 */
 export function scopedLlm(verticalId: string): ScopedLlm {
-  const engines = Array.isArray(cfg.llm?.engines) && cfg.llm.engines.length
-    ? (cfg.llm.engines as string[]).filter((e): e is DecisionEngine => ["codex", "codebuddy", "claude"].includes(e))
-    : undefined;
+  // cfg.llm.engines 语义按「原始配置」判定，不看过滤结果：
+  //  - 未配置(undefined) → 走默认链 codex→codebuddy→claude
+  //  - 显式配成 [] → 有意禁用全部
+  //  - 配了名字但全是无效名（多半是 typo，如 "gpt5"/"Codex"）→ 回退默认链，绝不静默全禁
+  const rawEngines = cfg.llm?.engines;
+  let engines: DecisionEngine[] | undefined;
+  if (Array.isArray(rawEngines)) {
+    const valid = (rawEngines as unknown[]).filter((e): e is DecisionEngine => ["codex", "codebuddy", "claude"].includes(e as string));
+    const dropped = (rawEngines as unknown[]).filter((e) => !["codex", "codebuddy", "claude"].includes(e as string));
+    if (dropped.length) log(`[verticals] 忽略 cfg.llm.engines 中的无效引擎名: ${dropped.map((e) => String(e)).join(", ")}`);
+    engines = rawEngines.length === 0 ? [] : (valid.length ? valid : undefined);
+  }
   // 模型白名单:cfg.llm.models 优先;没配就退回 chat 那份供应商模型表(同一台机器上能用的模型是同一批,
   // 让 Vertical 的模型选择与 chat 保持一致，不必两处维护。
   const chatModels = (cfg.chat?.providers ?? {}) as Record<string, string[]>;
@@ -124,16 +137,28 @@ export function scopedLlm(verticalId: string): ScopedLlm {
     codebuddy: (cfg.llm?.models?.codebuddy ?? chatModels.codebuddy ?? []) as string[],
     claude: (cfg.llm?.models?.claude ?? chatModels.claude ?? []) as string[],
   };
+  const providerCommand = (id: "claude-code" | "codex" | "codebuddy", legacy: unknown, fallback: string) => {
+    const command = cfg.providers?.[id]?.command;
+    if (Array.isArray(command) && command.length && command.every((part: unknown) => typeof part === "string" && !!part.trim())) return command as string[];
+    return typeof legacy === "string" && legacy.trim() ? legacy : fallback;
+  };
   const opts = () => ({
     engines,
-    bins: { codex: cfg.llm?.codexBin || "codex", codebuddy: cfg.llm?.codebuddyBin || "codebuddy", claude: cfg.llm?.claudeBin || "claude" },
+    bins: {
+      codex: providerCommand("codex", cfg.llm?.codexBin, "codex"),
+      codebuddy: providerCommand("codebuddy", cfg.llm?.codebuddyBin, "codebuddy"),
+      claude: providerCommand("claude-code", cfg.llm?.claudeBin, "claude"),
+    },
     models: { codex: cfg.llm?.codexModel, codebuddy: cfg.llm?.codebuddyModel, claude: cfg.llm?.claudeModel },
     modelChoices,
   });
   return Object.freeze({
     complete: (input) => runDecision(input, verticalId, opts()),
-    engines: async () => decisionEngines(opts()),
+    engines: async () => decisionEngineStatuses(opts()),
   });
+}
+export function scopedSources(_verticalId: string): ScopedSources {
+  return Object.freeze(new LarkDocumentSources());
 }
 
 export function scopedTasks(roots: string[], capabilities: readonly string[]=[]): ScopedTasks {
@@ -165,7 +190,7 @@ export function canonicalTaskExtraDirs(input: string[] | undefined, primary: str
 export const verticalRuntime = new ExtensionRuntime({
   dataRoot: DATA, config: { ...cfg, verticals: { ...cfg.verticals, strategy: strategyVerticalConfig(cfg.strategy, cfg.verticals?.strategy, cfg.timezone) } }, builtins,
   externalPaths: Array.isArray(cfg.verticals?.externalPaths) ? cfg.verticals.externalPaths : [],
-  sessionFactory: scopedSessions, taskFactory: scopedTasks, actionFactory: scopedActions, llmFactory: scopedLlm, log,
+  sessionFactory: scopedSessions, taskFactory: scopedTasks, actionFactory: scopedActions, llmFactory: scopedLlm, sourceFactory: scopedSources, log,
 });
 let startPromise: Promise<void> | null = null;
 export function startVerticals(): Promise<void> { if (!startPromise) { const attempt = verticalRuntime.start(); const guarded = attempt.catch((error) => { log(`verticals start unavailable: ${error instanceof Error ? error.name : "unknown"}`); if (startPromise === guarded) startPromise = null; }); startPromise = guarded; } return startPromise; }

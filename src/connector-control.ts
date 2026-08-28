@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync } from "fs";
+import { writeFileAtomic } from "./fs-durable.ts";
 import { connectorConfig, setConnectorConfig } from "./connector-config.ts";
 
 export interface StockConnectorPatch { enabled?: boolean; watchlist?: unknown[] }
@@ -21,7 +22,7 @@ export async function saveStockConnectorConfig(options: {
       .filter(Boolean);
   }
   setConnectorConfig(conf, "stock", stock);
-  writeFileSync(options.file, JSON.stringify(conf, null, 2) + "\n", { mode: 0o600 });
+  writeFileAtomic(options.file, JSON.stringify(conf, null, 2) + "\n", { mode: 0o600 });
   setConnectorConfig(options.liveConfig, "stock", structuredClone(stock));
   await options.restart("stock");
   return stock;

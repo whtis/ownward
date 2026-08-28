@@ -1,8 +1,9 @@
 # Ownward iOS
 
 iPhone 端（iOS 26+，SwiftUI + Liquid Glass），与 `android/` 同一套 daemon API、同一套色板与交互语法：
-收件箱（审批/回答/行动卡）、Agent 会话续聊（连续工具调用折叠、排队消息可撤回、斜杠命令补全、接管租约）、
-派新任务、旁观并接管本机 Claude/Codex 会话、AI 对话（流式）、侧边栏一步切会话。零第三方依赖。
+收件箱（审批/回答/行动卡）、Agent 会话续聊（连续工具调用折叠、排队消息可撤回、斜杠命令补全、接管租约、
+跨引擎接力）、派新任务（含远程目录浏览）、旁观 terminal 任务的底层会话并接管到引擎、AI 对话（流式）、
+侧边栏一步切会话。零第三方依赖。
 
 ## 构建
 
@@ -28,15 +29,16 @@ cd ios && ./build.sh           # 生成 Ownward.xcodeproj + 模拟器 Debug 构�
 ```
 Ownward/App        入口 + 三 tab 壳（每 tab 一条 NavigationStack；返回有触感）+ 侧边栏路由
 Ownward/Core       Models（@Defaulted 缺省解码）/ OwnwardClient（Bearer、NDJSON 流）/ Keychain 配置 /
-                   轮询 / 触感 / 图片编码 / SessionLists（本机会话归并口径）
+                   轮询 / 触感 / 图片编码
 Ownward/UI         色板排版 / Markdown 解析+渲染 / 打字机流式文本 / 玻璃 composer / 权限卡 /
                    Feed（工具调用折叠规则）/ Slash（斜杠补全规则）/ Sidebar（抽屉）
 Ownward/Features   Setup / Inbox / Agent(列表+会话详情+派任务+旁观接管) / Chat(列表+对话) / Settings
 OwnwardTests       Swift Testing 单测
 ```
 
-纯逻辑单独成文件（`Feed.swift` / `Slash.swift` / `SessionLists.swift`）是刻意的：这三处是
-**三端必须同口径**的规则（web / android / ios），各写各的迟早漂成三种行为，所以都不碰 SwiftUI，
+纯逻辑单独成文件/成函数（`Feed.swift` / `Slash.swift`，以及 `selectChatProvider` /
+`DirPickerNav` / `handoffBlockReason`）是刻意的：这些是**多端必须同口径**的规则
+（web / android / ios），各写各的迟早漂成几种行为，所以都不碰 SwiftUI，
 且有与 android 逐条配对的单测。
 
 ## 调试直达（DEBUG only，截图/自动化用；Release 不编译）

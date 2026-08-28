@@ -167,6 +167,7 @@ interface Loaded {
   drainFailures?: number;
   writeTail?: Promise<void>;
   priorityWriteTail?: Promise<void>;
+  startTail?: Promise<void>;
 }
 
 function deadline<T>(
@@ -242,6 +243,15 @@ export class ConnectorRuntime {
     return run.finally(() => {
       if (item[key] === tail) item[key] = undefined;
     });
+  }
+  /** 把同一 connector 的 startOne 串起来：重启定时器触发的 start 与 restartConnector 的 start 不再并发，
+   *  否则败者的 catch 会 revoke 胜者刚装好的 lifecycle/abort，把健康实例 wedge 住(见评审 minor)。
+   *  排队的 start 靠 startOne 内部的 generation 检查自然作废。 */
+  private serializeStart(item: Loaded, work: () => Promise<void>): Promise<void> {
+    const run = (item.startTail ?? Promise.resolve()).then(work, work);
+    const tail = run.then(() => {}, () => {});
+    item.startTail = tail;
+    return run.finally(() => { if (item.startTail === tail) item.startTail = undefined; });
   }
   discover(): ConnectorStatus[] {
     this.loaded.clear();
@@ -333,7 +343,7 @@ export class ConnectorRuntime {
     for (const item of this.loaded.values()) {
       if (!this.current(generation)) break;
       item.stopPromise = undefined;
-      await this.trackStart(this.startOne(item, generation));
+      await this.trackStart(this.serializeStart(item, () => this.startOne(item, generation)));
     }
   }
   private current(generation: number) {
@@ -575,10 +585,16 @@ export class ConnectorRuntime {
       if (
         item.status.state !== "migration_failed" &&
         item.status.consecutiveFailures <= 5
-      )
+      ) {
+        // 还会重启：下一次 startOne 顶部会 disposeInstance，这里不必清（清了反而多做一次 host.stop）
         this.scheduleRestart(item);
-      else if (item.status.state !== "migration_failed")
-        this.options.onAlert?.(item.manifest.id, "CONNECTOR_START_TERMINAL");
+      } else {
+        // 终态（迁移失败 / 连续失败超限）不再重启：必须主动 dispose，否则 external host 子进程 +
+        // socket 目录会一直挂着（没有后续 startOne 来清），随崩溃循环累积。dispose 后 restartConnector 仍可手动恢复。
+        if (item.status.state !== "migration_failed")
+          this.options.onAlert?.(item.manifest.id, "CONNECTOR_START_TERMINAL");
+        try { await this.disposeInstance(item); } catch {}
+      }
     }
   }
 
@@ -592,7 +608,7 @@ export class ConnectorRuntime {
     if (retry) clearTimeout(retry);
     this.restartTimers.delete(id);
     item.stopPromise = undefined;
-    await this.trackStart(this.startOne(item, this.startGeneration));
+    await this.trackStart(this.serializeStart(item, () => this.startOne(item, this.startGeneration)));
   }
   private scheduleRestart(item: Loaded) {
     if (this.stopped || this.restartTimers.has(item.manifest.id)) return;
@@ -605,7 +621,7 @@ export class ConnectorRuntime {
     const timer = setTimeout(() => {
       this.restartTimers.delete(item.manifest.id);
       if (this.current(generation))
-        void this.trackStart(this.startOne(item, generation));
+        void this.trackStart(this.serializeStart(item, () => this.startOne(item, generation)));
     }, delay);
     (timer as any).unref?.();
     this.restartTimers.set(item.manifest.id, timer);

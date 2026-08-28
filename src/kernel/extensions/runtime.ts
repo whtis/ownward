@@ -62,10 +62,14 @@ const CAPABILITIES = new Set<VerticalCapability>([
   "notify",
   "vault",
   "llm",
+  "sources",
 ]);
 const FORBIDDEN_IMPORT =
   /(?:^|\/)(?:kernel|runner|providers)(?:\/|$)|(?:^|\/)(?:paths|util|actions|dispatch)\.ts$/;
 const SOURCE_EXT = new Set([".ts", ".tsx", ".js", ".mjs", ".json"]);
+// builtin/no-root vertical 没有 host 崩溃清理路径，失败即终态是刻意设计；这里给「请求失败」型
+// 熔断加有界自恢复：最多重激活这么多次，超了维持 failed，避免持续失败时热重启循环。
+const MAX_BUILTIN_RESTARTS = 5;
 // Compatibility lint only: trusted external code is not sandboxed and may use bare dependencies.
 const EXTERNAL_IMPORT_ALLOWLIST = new Set([
   "assert",
@@ -100,6 +104,7 @@ export interface ExtensionRuntimeOptions {
   taskFactory?: Parameters<typeof buildVerticalContext>[0]["taskFactory"];
   actionFactory?: Parameters<typeof buildVerticalContext>[0]["actionFactory"];
   llmFactory?: Parameters<typeof buildVerticalContext>[0]["llmFactory"];
+  sourceFactory?: Parameters<typeof buildVerticalContext>[0]["sourceFactory"];
   log?: (message: string) => void;
 }
 interface Loaded {
@@ -114,6 +119,8 @@ interface Loaded {
   root?: string;
   crashCount?: number;
   nextRestartAt?: number;
+  restartTimer?: ReturnType<typeof setTimeout>;
+  hasScheduler?: boolean;
   startingPromise?: Promise<void>;
   routeGrants?: { timeoutMs: number; maxBodyBytes: number; binary: boolean; frameMaxBytes: number };
 }
@@ -518,8 +525,17 @@ export class ExtensionRuntime {
     if (
       item.status.state === "failed" &&
       (item.source === "builtin" || !item.root)
-    )
-      return;
+    ) {
+      // 只有「请求失败」型熔断(fail() 设了 nextRestartAt)且未超上限才有界恢复；fatal 启动失败维持终态。
+      if (!item.nextRestartAt || (item.crashCount ?? 0) > MAX_BUILTIN_RESTARTS) return;
+      // 这类没有 host 崩溃清理路径，重激活前手动清理旧实例：停旧 scheduler、deactivate 旧 module，
+      // 否则旧 scheduler 定时器会泄漏、模块可能重复注册。lifecycle 已在 fail() 里 revoke。
+      item.scheduler?.stop();
+      item.scheduler = undefined;
+      try { await item.module?.deactivate?.(); }
+      catch (e) { this.audit("vertical-recover-deactivate-failed", item.manifest.id, "stop", "recover deactivate failed", safeCode(e)); }
+      item.module = undefined;
+    }
     const configured = this.options.config?.verticals?.[item.manifest.id];
     if (item.source === "external") {
       if (configured?.enabled === false) {
@@ -634,6 +650,10 @@ export class ExtensionRuntime {
           const raw = this.options.llmFactory(item.manifest.id);
           host.setLlm(Object.freeze({ complete: ((inp: any) => { lifecycle.assertWrite(); return raw.complete(inp); }) as typeof raw.complete, engines: raw.engines.bind(raw) }));
         } else host.setLlm(undefined);
+        if (grantedManifest.capabilities?.includes("sources")) {
+          if (!this.options.sourceFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Source Service 不可用");
+          host.setSources(this.options.sourceFactory(item.manifest.id));
+        } else host.setSources(undefined);
         const activated = await host.activate(
           domainConfig,
           this.options.activateTimeoutMs ?? 5_000,
@@ -662,6 +682,7 @@ export class ExtensionRuntime {
             scope.every(job.id, job.intervalMs, async () => { await item.host!.request("job", { id: job.id, timeoutMs: jobTimeoutMs }, jobTimeoutMs, false); });
           }
           item.scheduler = scope;
+          item.hasScheduler = true;
         } else if (jobs.length) throw new ExtensionPolicyError("VERTICAL_CAPABILITY_NOT_GRANTED", "scheduler capability 未授权却注册了 job");
         const recovering = item.status.consecutiveFailures > 0;
         item.status.state = recovering ? "degraded" : "ready";
@@ -731,6 +752,7 @@ export class ExtensionRuntime {
         taskFactory: this.options.taskFactory,
         actionFactory: this.options.actionFactory,
         llmFactory: this.options.llmFactory,
+        sourceFactory: this.options.sourceFactory,
         scheduler,
         lifecycle,
         logger: (op, msg) => this.audit("vertical-module-log", item.manifest.id, op, msg),
@@ -799,12 +821,12 @@ export class ExtensionRuntime {
       );
     if (
       (item.manifest.capabilities ?? []).some(
-        (cap) => !["storage", "actions", "scheduler", "llm"].includes(cap),
+        (cap) => !["storage", "actions", "scheduler", "llm", "sources"].includes(cap),
       )
     )
       throw new ExtensionPolicyError(
         "VERTICAL_CAPABILITY_UNAVAILABLE",
-        "外部 Host 目前开放 storage/actions/scheduler/llm",
+        "外部 Host 目前开放 storage/actions/scheduler/llm/sources",
       );
     const grantedRoots = uniqueStrings(config.grantedRoots, "grantedRoots").map(
         (root) => resolve(root),
@@ -831,12 +853,22 @@ export class ExtensionRuntime {
   }
   private scheduleRestart(item: Loaded) {
     item.crashCount = (item.crashCount ?? 0) + 1;
-    item.nextRestartAt =
-      Date.now() +
-      Math.min(
-        30_000,
-        (this.options.restartBaseMs ?? 250) * 2 ** item.crashCount,
-      );
+    const delay = Math.min(
+      30_000,
+      (this.options.restartBaseMs ?? 250) * 2 ** item.crashCount,
+    );
+    item.nextRestartAt = Date.now() + delay;
+    // 主动定时驱动重启：route() 只在有 HTTP 流量时驱动 nextRestartAt，纯 scheduler 的外部 vertical
+    // 崩溃后没请求就永远不重启，夜里的定时任务会静默停摆。builtin 失败即终态(startOneImpl 拒绝重启)，不设。
+    if (item.source !== "external" || !item.hasScheduler) return;
+    if (item.restartTimer) clearTimeout(item.restartTimer);
+    const timer = setTimeout(() => {
+      item.restartTimer = undefined;
+      if (!this.started || item.host || item.startingPromise) return;
+      void this.startOne(item);
+    }, delay);
+    (timer as { unref?: () => void }).unref?.();
+    item.restartTimer = timer;
   }
   private hostSuccess(item: Loaded) {
     item.status.state = "ready";
@@ -845,6 +877,7 @@ export class ExtensionRuntime {
     item.status.lastSuccessAt = new Date().toISOString();
     item.crashCount = 0;
     item.nextRestartAt = 0;
+    if (item.restartTimer) { clearTimeout(item.restartTimer); item.restartTimer = undefined; }
   }
   private revokeHost(item: Loaded, error: unknown) {
     item.lifecycle?.revoke();
@@ -866,7 +899,11 @@ export class ExtensionRuntime {
           : safeCode(error);
     item.status.state =
       fatal || item.status.consecutiveFailures >= 3 ? "failed" : "degraded";
-    if (item.status.state === "failed") item.lifecycle?.revoke();
+    if (item.status.state === "failed") {
+      item.lifecycle?.revoke();
+      // 非 fatal 的 builtin/no-root 失败安排退避重启：它们没有 host 崩溃驱动，靠 route 半开据 nextRestartAt 拉起
+      if (!fatal && (item.source === "builtin" || !item.root)) this.scheduleRestart(item);
+    }
     this.audit("vertical-lifecycle-failed", item.manifest.id, "lifecycle", "vertical lifecycle failed", item.status.errorCode);
   }
   async route(req: Request, url: URL): Promise<Response | null> {
@@ -881,6 +918,18 @@ export class ExtensionRuntime {
           );
       if (!namespaced && !legacy) continue;
       if (item.startingPromise) return unavailable(item);
+      // builtin/no-root 熔断半开：请求失败型 failed 且冷却期过、未超上限，就重激活一次(startOneImpl 会先清理旧实例)。
+      // 恢复后本次请求继续走到路由；成功则 hostSuccess 关熔断，仍失败则重新退避，超上限维持 failed(不热重启)。
+      if (
+        (item.source === "builtin" || !item.root) &&
+        item.status.state === "failed" &&
+        !!item.nextRestartAt &&
+        Date.now() >= item.nextRestartAt &&
+        (item.crashCount ?? 0) <= MAX_BUILTIN_RESTARTS
+      ) {
+        await this.startOne(item);
+        if (item.startingPromise) return unavailable(item);
+      }
       if (legacy && item.status.state === "disabled")
         return new Response(
           JSON.stringify({
@@ -1200,6 +1249,10 @@ export class ExtensionRuntime {
       .map((x) => structuredClone(x.manifest));
   }
   async stop(): Promise<void> {
+    // 先清掉所有待重启定时器：崩溃项(host/module 都空)会被下面的循环 continue 跳过，必须单独清，
+    // 否则 unref 的定时器会在后续测试/运行里 startOne 造成串扰
+    for (const item of this.loaded.values())
+      if (item.restartTimer) { clearTimeout(item.restartTimer); item.restartTimer = undefined; }
     for (const item of [...this.loaded.values()].reverse()) {
       if (!item.module && !item.host) continue;
       item.status.state = "stopping";

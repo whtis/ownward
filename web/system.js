@@ -40,8 +40,9 @@ TABS.system = {
           </div>
         </div>
         <div class="col-scroll">
-          <div class="section-title">定时任务（launchd / cron）</div>
-          <div class="panel" style="overflow-x:auto"><table class="table" id="sy-schedules"></table></div>
+          <div class="section-title">运行状态</div>
+          <div class="panel" id="sy-schedules" style="padding:6px"></div>
+          <details class="sys-advanced"><summary>高级诊断 · 全部后台任务（含系统/第三方，只读）</summary><div class="panel" style="overflow-x:auto;margin-top:6px"><table class="table" id="sy-schedules-all"></table></div></details>
           <div class="section-title">股票自选（watchlist）</div>
           <div class="panel" id="sy-stock" style="padding:10px 12px"></div>
           <div class="section-title">自动批准规则（「总是批准」的记忆）</div>
@@ -71,6 +72,8 @@ TABS.system = {
     $("#sy-restart").addEventListener("click", restartDaemon);
     $("#sy-refresh").addEventListener("click", loadSystem);
     $("#sy-autolog").addEventListener("change", (e) => (Sys.autoLog = e.target.checked));
+    // 高级诊断（全机任务）只在展开时按需拉一次，避免默认就糊一脸
+    root.querySelector(".sys-advanced")?.addEventListener("toggle", function () { if (this.open && !Sys.allLoaded) { Sys.allLoaded = true; loadAllSchedules(); } });
     loadSystem();
   },
   show() {
@@ -121,20 +124,11 @@ async function loadSystem() {
   renderVerticals(verticals);
   const u = usage?.usage;
   // 额度 70%/90% 变色（主仓 SwiftUI 的 usageColor 语义）：接近额度顶要肉眼可见
-  const pctHtml = (v) => `<b${v >= 90 ? ` style="color:var(--danger)"` : v >= 70 ? ` style="color:var(--warning)"` : ""}>${v}%</b>`;
+  const pctHtml = (v) => { const n = Number(v); return `<b${n >= 90 ? ` style="color:var(--danger)"` : n >= 70 ? ` style="color:var(--warning)"` : ""}>${Number.isFinite(n) ? n : "?"}%</b>`; };
   $("#sy-usage").innerHTML = u
     ? `<span>5h 窗口 ${pctHtml(u.fiveHourPercent)}${u.weeklyPercent != null ? ` · 周 ${pctHtml(u.weeklyPercent)}` : ""}</span>`
     : `<span style="color:var(--text-tertiary)">拿不到额度数据</span>`;
-  $("#sy-schedules").innerHTML = `<tr><th>任务</th><th>调度</th><th>状态</th><th></th></tr>` +
-    (schedules || []).map((s) => `<tr>
-      <td class="mono" title="${esc(s.label)}">${esc(s.label.split(".").slice(-1)[0] || s.label)}</td>
-      <td class="mono">${esc(s.schedule)}</td>
-      <td><span class="tag" data-tone="${s.state === "running" ? "ok" : s.disabled ? "bad" : ""}">${esc(s.state)}${s.disabled ? "·停用" : ""}</span></td>
-      <td style="white-space:nowrap">${s.editable ? `
-        <button class="button sm ghost" onclick="runSchedule('${jsq(s.label)}')">跑一次</button>
-        <button class="button sm ghost" onclick="toggleScheduleUi('${jsq(s.label)}','${jsq(s.path)}',${s.disabled ? "true" : "false"})">${s.disabled ? "启用" : "停用"}</button>
-        <button class="button sm ghost" onclick="editScheduleUi('${jsq(s.label)}','${jsq(s.path)}')">改调度</button>` : ""}</td>
-    </tr>`).join("") + (schedules === null ? `<tr><td colspan="4">${stateBox("定时任务暂时无法载入", "error")}</td></tr>` : schedules.length ? "" : `<tr><td colspan="4">${stateBox("没有发现定时任务")}</td></tr>`);
+  renderSchedules(schedules);
   renderStockPanel(stock);
   $("#sy-approvals").innerHTML = rules === null ? stateBox("批准规则暂时无法载入", "error") : rules.length ? rules.map((r) => `
     <div class="kv" style="padding:6px 12px"><span class="mono">${esc(r.pattern || r.tool || r.id)}</span>
@@ -162,6 +156,96 @@ async function restartDaemon() {
   }
   btn.disabled = false;
   toast("等了 30 秒没等到新 daemon，去看 daemon 日志");
+}
+/** 收敛后的运行状态：只展示 ownward 自己管理的任务，分核心/连接两组，退出码翻译成人话。 */
+const SCHED_DOT = { ok: "ok", attention: "warn", down: "bad", paused: "hollow", unknown: "hollow" };
+/** 纯函数：把收敛后的任务列表渲染成「一句话总览 + 分组卡片」HTML（系统 tab 与设置页共用）。 */
+function schedulesPanelHtml(schedules) {
+  const core = schedules.filter((s) => s.group === "core"), conn = schedules.filter((s) => s.group === "connection");
+  const coreDown = core.filter((s) => s.health?.level === "down").length;
+  const attention = schedules.filter((s) => s.health?.level === "attention" || s.health?.level === "down");
+  let sum, tone;
+  if (coreDown) { sum = "ownward 核心组件未在运行，部分功能暂停"; tone = "bad"; }
+  else if (attention.length) { sum = `ownward 正常运行，${attention.length} 项需要处理`; tone = "warn"; }
+  else { sum = "ownward 正常运行，所有组件在线"; tone = "ok"; }
+  const groupHtml = (title, items) => items.length ? `<div class="sys-group"><div class="sys-group-h">${title}</div>${items.map(scheduleCard).join("")}</div>` : "";
+  return `<div class="sys-summary" data-tone="${tone}"><span class="dot ${SCHED_DOT[tone === "ok" ? "ok" : tone === "warn" ? "attention" : "down"]}"></span><span>${esc(sum)}</span></div>` +
+    groupHtml("核心组件", core) + groupHtml("连接与维护", conn) +
+    (schedules.length ? "" : stateBox("没有找到 ownward 管理的任务"));
+}
+function renderSchedules(schedules) {
+  const el = $("#sy-schedules"); if (!el) return;
+  if (schedules === null) { el.innerHTML = stateBox("运行状态暂时无法载入", "error"); return; }
+  Sys.schedules = schedules;
+  el.innerHTML = schedulesPanelHtml(schedules);
+}
+/** 设置页「系统与运行」分类：把收敛后的运行健康 + 事件源 + 计划提醒直接渲染进设置内容区。 */
+window.renderSystemInSettings = async function (el) {
+  if (!el) return;
+  el.innerHTML = stateBox("正在读取运行状态…", "loading");
+  const [schedules, routines] = await Promise.all([
+    getJSON("/api/schedules").catch(() => null),
+    getJSON("/api/routines").catch(() => null),
+  ]);
+  if (schedules) Sys.schedules = schedules;
+  const st = S.state;
+  const srcNames = { lark: "飞书", github: "GitHub", gmail: "Gmail", stock: "股票" };
+  const srcHtml = st ? Object.entries(srcNames).filter(([k]) => st.sources?.[k]).map(([k, n]) => {
+    const ts = st.health?.[k], authMissing = k === "gmail" && !st.gmailConfigured;
+    const age = ts ? (Date.now() - new Date(ts).getTime()) / 1000 : Infinity, slow = k === "lark" ? 7200 : 1800;
+    const dot = authMissing ? "bad" : age < slow ? "ok" : age < slow * 4 ? "warn" : "bad";
+    return `<div class="sys-card"><span class="dot ${dot}" style="margin-top:5px"></span><div class="sys-card-main"><div class="sys-card-title">${n}</div><div class="sys-card-sub">${authMissing ? "未授权，去 Gmail 授权后可用" : ts ? "最近同步 " + ageText(ts) : "已启用"}</div></div></div>`;
+  }).join("") : "";
+  const routineHtml = Array.isArray(routines) && routines.length ? routines.map((r) => {
+    const lvl = r.status === "written" ? "ok" : r.stale ? "attention" : "ok";
+    return `<div class="sys-card"><span class="dot ${SCHED_DOT[lvl]}" style="margin-top:5px"></span><div class="sys-card-main"><div class="sys-card-title">${esc(r.name || r.id)} <span class="sys-chip" data-level="${lvl}">${esc(r.status || "")}</span></div><div class="sys-card-sub">${esc(r.nextLabel ? "下次 " + r.nextLabel : "")}</div></div></div>`;
+  }).join("") : `<div class="settings-callout"><span>暂无计划提醒。规则可在「自动化」分类编辑。</span></div>`;
+  el.innerHTML =
+    (schedules ? schedulesPanelHtml(schedules) : stateBox("运行状态暂时无法载入", "error")) +
+    (srcHtml ? `<div class="sys-group"><div class="sys-group-h">事件源</div>${srcHtml}</div>` : "") +
+    `<div class="sys-group"><div class="sys-group-h">计划与提醒</div>${routineHtml}</div>` +
+    `<div style="margin-top:12px"><button class="button ghost sm" onclick="switchTab('system')">打开完整系统页（日志、订阅额度、演进、股票）→</button></div>`;
+};
+function scheduleCard(s) {
+  const h = s.health || { level: "unknown", label: "未知" };
+  const acts = [];
+  if (s.group === "core" && h.level === "down") acts.push(`<button class="button sm ghost" onclick="restartDaemon()">重启</button>`);
+  acts.push(`<button class="button sm ghost" onclick="showScheduleDetail('${jsq(s.label)}')">详情</button>`);
+  if (s.editable && h.level === "ok") acts.push(`<button class="button sm ghost" onclick="runSchedule('${jsq(s.label)}')">立即运行</button>`);
+  if (s.editable) acts.push(`<button class="button sm ghost" onclick="toggleScheduleUi('${jsq(s.label)}','${jsq(s.path)}',${s.disabled ? "true" : "false"})">${s.disabled ? "启用" : "暂停"}</button>`);
+  return `<div class="sys-card" data-level="${h.level}">
+    <span class="dot ${SCHED_DOT[h.level] || "hollow"}"></span>
+    <div class="sys-card-main">
+      <div class="sys-card-title">${esc(s.role || s.label)} <span class="sys-chip" data-level="${h.level}">${esc(h.label)}</span></div>
+      <div class="sys-card-sub">${esc(s.purpose || "")}${h.reason ? ` · <span class="sys-reason">${esc(h.reason)}</span>` : ""}</div>
+      ${h.hint ? `<div class="sys-card-hint">建议：${esc(h.hint)}</div>` : ""}
+    </div>
+    <div class="sys-card-acts">${acts.join("")}</div>
+  </div>`;
+}
+function showScheduleDetail(label) {
+  const s = (Sys.schedules || []).find((x) => x.label === label); if (!s) return;
+  const h = s.health || {};
+  showText(`${s.role || label} · 详情`, [
+    `状态：${h.label || s.state}${h.reason ? "（" + h.reason + "）" : ""}`,
+    h.hint ? `建议：${h.hint}` : "",
+    `调度：${s.schedule}`,
+    `任务标识：${s.label}`,
+    `程序：${s.program}`,
+    s.lastExit !== undefined ? `上次退出码：${s.lastExit}` : "",
+    s.path && s.path !== "crontab" ? `配置文件：${s.path}` : "",
+  ].filter(Boolean).join("\n"));
+}
+/** 高级诊断：全机任务只读表（含系统/第三方）——仅在展开 <details> 时按需拉一次。 */
+async function loadAllSchedules() {
+  const el = $("#sy-schedules-all"); if (!el) return;
+  el.innerHTML = `<tr><td>${stateBox("加载中…", "loading")}</td></tr>`;
+  const all = await getJSON("/api/schedules?all=1").catch(() => null);
+  if (!all) { el.innerHTML = `<tr><td>${stateBox("无法载入", "error")}</td></tr>`; return; }
+  el.innerHTML = `<tr><th>任务</th><th>调度</th><th>状态</th></tr>` + all.map((s) => `<tr>
+    <td class="mono" title="${esc(s.label)}">${esc(s.label.split(".").slice(-1)[0] || s.label)}${s.owner === "ownward" ? " ·ownward" : ""}</td>
+    <td class="mono">${esc(s.schedule)}</td>
+    <td><span class="tag" data-tone="${s.state === "running" ? "ok" : ""}">${esc(s.state)}${s.disabled ? "·停用" : ""}</span></td></tr>`).join("");
 }
 async function runSchedule(label) { toast((await post("/api/schedules/run", { label })).msg || "已触发"); }
 /** 启停 launchd 任务：停用 = bootout+disable（重启不再拉起），启用 = enable+bootstrap */

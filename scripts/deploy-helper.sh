@@ -42,5 +42,13 @@ case "$ACTION" in
   rollback)
     exec bash scripts/rollback.sh --helper
     ;;
+  settings-apply)
+    OPERATION_ID="${1:-}"
+    [ -n "$OPERATION_ID" ] || { echo "settings-apply requires operation id"; exit 64; }
+    exec "$OWNWARD_BUN" src/settings/helper-cli.ts apply "$OPERATION_ID"
+    ;;
+  settings-recover)
+    exec "$OWNWARD_BUN" src/settings/helper-cli.ts recover
+    ;;
   *) echo "unknown deploy action: $ACTION"; exit 64 ;;
 esac
