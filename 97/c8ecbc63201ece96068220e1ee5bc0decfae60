@@ -1,0 +1,42 @@
+docs/TODO.md
+  s_093ae9a852e755::t_d64efed2728881 44
+  s_093ae9a852e755::t_a9cd95048d5f3d 50
+  s_093ae9a852e755::t_98e83cfb8361a7 32-34
+  s_093ae9a852e755::t_8815b963a3d08d 96,100,102
+  s_093ae9a852e755::t_369e0900989a9b 135
+  s_093ae9a852e755::t_398a4579fa6bc0 84
+  s_093ae9a852e755::t_c678e226d4213c 154
+  s_093ae9a852e755::t_43a09465395d71 54
+  s_093ae9a852e755::t_d499f5b5e1b8bc 93
+  s_093ae9a852e755::t_223f8e4053d124 65
+  s_093ae9a852e755::t_3b547fff6dd4b4 20
+  s_093ae9a852e755::t_5ecc719d8caefc 109
+  s_093ae9a852e755::t_e26fa15e44cdee 40
+  s_093ae9a852e755::t_808edecc4c330f 38
+  s_093ae9a852e755::t_344db664e6dabb 21
+  s_093ae9a852e755::t_1d764d2123bc45 36
+  s_093ae9a852e755::t_54b6aefba30ea1 25
+  s_093ae9a852e755::t_8e828420c45823 74
+  s_093ae9a852e755::t_a5979c6b5807d7 108
+  s_093ae9a852e755::t_82f3a0cbd8a586 110-111
+  s_093ae9a852e755::t_8ced4aae27e5d9 162
+  s_093ae9a852e755::t_48b5ee3ccf5932 163
+  s_093ae9a852e755::t_63a5c24a3369b2 140-141
+  s_093ae9a852e755::t_2358e02fea6698 8,11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "97c8ecbc63201ece96068220e1ee5bc0decfae60",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "glm-5.3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}
