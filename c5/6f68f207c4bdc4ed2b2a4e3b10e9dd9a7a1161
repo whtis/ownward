@@ -1,0 +1,51 @@
+web/system.js
+  s_093ae9a852e755::t_f42be8dacecb25 103
+web/today.js
+  s_093ae9a852e755::t_301a060a1fde39 77
+  s_093ae9a852e755::t_30038de3151f26 78
+src/features.test.ts
+  s_093ae9a852e755::t_fba7a8c800a673 17,27
+docs/refactor-ownward-merge.md
+  s_093ae9a852e755::t_1ddbe15ba2a8f1 2-27,30-39,42-47,49,51-53,57-59,83-86,89-91,94,96,103-108
+  s_093ae9a852e755::t_7a11bf02f5ab06 28-29
+  s_093ae9a852e755::t_c2a31435c27d65 55
+  s_093ae9a852e755::t_6b819e53e346ec 95,98-102
+  s_093ae9a852e755::t_454e364b67285e 109-110
+  s_093ae9a852e755::t_343f10911d3c65 60-73,80-82
+  s_093ae9a852e755::t_dba5e14f9b63d2 40
+  s_093ae9a852e755::t_a55c5e27aa4b62 54,56
+  s_093ae9a852e755::t_b5012511f5c3dc 50
+  s_093ae9a852e755::t_287e39b8286828 1,48,88,92-93
+  s_093ae9a852e755::t_464831c5926e94 74-79
+  s_093ae9a852e755::t_6f4f01e824ebe9 41,87,97
+src/midday.test.ts
+  s_093ae9a852e755::t_36ee39c95f7206 1-2,6,12,18,23-26
+src/daemon.ts
+  s_093ae9a852e755::t_301a060a1fde39 266
+src/features.ts
+  s_093ae9a852e755::t_6558f6cdec1d52 9
+web/mail.js
+  s_093ae9a852e755::t_30038de3151f26 172,213,216,226,241,243,251,253,318
+src/server.ts
+  s_093ae9a852e755::t_36322dd2382014 351-356
+  s_093ae9a852e755::t_bcc645b6e11c38 369-370
+  s_093ae9a852e755::t_301a060a1fde39 372-373
+src/midday.ts
+  s_093ae9a852e755::t_cbe75784eeec5d 3-5,9,35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "c56f68f207c4bdc4ed2b2a4e3b10e9dd9a7a1161",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}
