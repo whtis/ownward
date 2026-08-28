@@ -1,0 +1,26 @@
+.gitignore
+  s_093ae9a852e755::t_45155b6798d011 14-16
+verify.sh
+  s_093ae9a852e755::t_c402985cb7a6e5 26,35,44,75,105
+  s_093ae9a852e755::t_d91d4909496b83 113
+  s_093ae9a852e755::t_01a73f57f5eddd 128-161
+scripts/upstream-align.txt
+  s_093ae9a852e755::t_fb1bf4eef63dbb 1-4
+  s_093ae9a852e755::t_3cd460f980faa3 5-454
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "b8a2ba9eb3dc299db6f7f2dfa747c276fab6a5de",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}
