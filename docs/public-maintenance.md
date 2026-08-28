@@ -11,11 +11,11 @@ out of the public Git object graph.
    `oss-sync` worktree.
 2. Bring across only changes suitable for the public source tree. Remove
    operational evidence, local paths, personal or customer identifiers, and
-   private documentation. Commit that reviewed candidate in the private repo.
-3. Run the exporter from that clean candidate:
+   private documentation. Prepare the release metadata before committing.
+3. Commit that reviewed candidate in the private repo, then run the exporter
+   from that clean candidate:
 
    ```bash
-   # Stored outside both repositories; one private marker per line.
    export OWNWARD_PUBLIC_DENYLIST="$HOME/.config/ownward/public-denylist.txt"
    cd /path/to/ownward-oss-sync
    bash scripts/export-public.sh \
@@ -27,23 +27,47 @@ out of the public Git object graph.
 The exporter refuses dirty source or target trees, requires an `oss-*` review
 worktree, requires the public target's `origin` to be `whtis/ownward`, verifies
 that `main` is current, scans the archived snapshot for known private markers,
-and runs `./verify.sh`. It first creates the public commit in a temporary Git
-worktree; only after that succeeds does it fast-forward public `main`. It
-exports with `git archive`, so private commits and Git objects are never copied.
-The public repository receives one ordinary new commit on `main`.
+checks release metadata and the version gate, and runs `./verify.sh`. It first
+creates the public commit in a temporary Git worktree; only after that succeeds
+does it fast-forward public `main`. It exports with `git archive`, so private
+commits and Git objects are never copied.
 
-Keep the denylist outside every Git repository and include any local account
-names, hostnames, IP addresses, product codenames, customer identifiers, and
-other organization-specific terms that must never be published. It is read at
-release time and is deliberately not part of the public source tree.
+## Release metadata and Desk lock
 
-To validate the candidate without changing the public checkout, use `--check`
-(or omit the mode, as it is the default). Use `--apply` without `--push` when a
-maintainer wants to inspect the new local public commit before running the
-printed `git push` command. Public commits default to the neutral author
-`Ownward contributors`; maintainers can set public-facing author values with
-`OWNWARD_PUBLIC_AUTHOR_NAME` and `OWNWARD_PUBLIC_AUTHOR_EMAIL`. Their values,
-as well as the commit message, are checked against the denylist.
+Every public content change is a release. Keep these three values identical in
+the reviewed source candidate:
+
+- `package.json` → `version`
+- `src/kernel/extensions/contracts.ts` → `KERNEL_VERSION`
+- the first release heading in `CHANGELOG.md` → `## [x.y.z]`
+
+Validate a candidate before exporting it:
+
+```bash
+bun scripts/release-metadata.ts check /path/to/ownward-oss-sync /path/to/ownward-public
+```
+
+The exporter repeats this check against the exact archived candidate and public
+baseline. A changed archive must have a strictly greater semver than the public
+target. If the archive and target tree are identical and versions are equal,
+the exporter reports that it already matches and exits successfully, so retries
+remain idempotent. An equal-version archive with any content difference is
+rejected.
+
+Use patch releases for compatible fixes and documentation, minor releases for
+additive Kernel capabilities, and a major release only for a breaking contract.
+Increment `KERNEL_API_VERSION` only when an existing extension contract becomes
+incompatible.
+
+After a successful public snapshot push, create the matching `vX.Y.Z` tag in
+`whtis/ownward`. Update Desk's `ownward.lock.json` with the public repository,
+the public commit containing the release, and the same version. Keep Desk's
+`minKernelVersion` unchanged unless Desk actually uses an API introduced in the
+new kernel; a compatible Kernel release does not require a Desk manifest change.
+
+Keep the denylist outside every Git repository and include local account names,
+hostnames, IP addresses, product codenames, customer identifiers, and other
+organization-specific terms that must never be published.
 
 ## Bring public contributions back
 

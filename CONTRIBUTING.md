@@ -12,6 +12,9 @@ Thanks for helping make AI-assisted work more durable and user-controlled.
   providers, connectors, or deployment behavior.
 - Maintainers releasing a private change to this repository should follow
   [the public maintenance guide](docs/public-maintenance.md).
+- Maintainers publishing a reviewed public snapshot should follow the
+  [public release maintenance guide](docs/public-maintenance.md), including
+  the Ownward version, changelog, and Desk lock checks.
 
 ## Development setup
 

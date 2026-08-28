@@ -25,6 +25,97 @@ TARGET=""
 MESSAGE=""
 APPLY=0
 PUSH=0
+SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+read_package_version() {
+  local file=$1 value
+  [ -f "$file" ] || { echo "Release metadata is missing: $file" >&2; return 1; }
+  if ! value=$(bun -e 'let parsed; try { parsed = JSON.parse(await Bun.file(Bun.argv[1]).text()); } catch { process.exit(2); } if (!parsed || typeof parsed.version !== "string") process.exit(3); console.log(parsed.version);' "$file" 2>/dev/null); then
+    echo "Could not read package version from $file." >&2
+    return 1
+  fi
+  if [[ ! "$value" =~ $SEMVER_RE ]]; then
+    echo "Invalid package version in $file: ${value:-<empty>} (expected x.y.z)." >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+read_release_field() {
+  local json=$1 field=$2 value
+  if ! value=$(bun -e 'let parsed; try { parsed = JSON.parse(Bun.argv[1]); } catch { process.exit(2); } const value = parsed?.[Bun.argv[2]]; if (typeof value !== "string") process.exit(3); console.log(value);' "$json" "$field" 2>/dev/null); then
+    echo "Release metadata checker returned invalid JSON ($field)." >&2
+    return 1
+  fi
+  if [[ ! "$value" =~ $SEMVER_RE ]]; then
+    echo "Release metadata checker returned invalid $field: $value." >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+read_kernel_version() {
+  local root=$1 file lines count value
+  file="$root/src/kernel/extensions/contracts.ts"
+  [ -f "$file" ] || { echo "Release metadata is missing: $file" >&2; return 1; }
+  lines=$(rg -n --no-heading '^[[:space:]]*export const KERNEL_VERSION[[:space:]]*=[[:space:]]*"[^"]+"[[:space:]]*;' "$file" || true)
+  count=$(printf '%s\n' "$lines" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+  if [ "$count" != 1 ]; then
+    echo "Expected exactly one KERNEL_VERSION declaration in $file." >&2
+    return 1
+  fi
+  value=$(printf '%s\n' "$lines" | sed -E 's/.*KERNEL_VERSION[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+  if [[ ! "$value" =~ $SEMVER_RE ]]; then
+    echo "Invalid KERNEL_VERSION in $file: ${value:-<empty>} (expected x.y.z)." >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+read_changelog_version() {
+  local file=$1 header value
+  [ -f "$file" ] || { echo "Release metadata is missing: $file" >&2; return 1; }
+  header=$(awk '/^##[[:space:]]+/{ print; exit }' "$file")
+  if [[ ! "$header" =~ ^##[[:space:]]+\[([0-9]+\.[0-9]+\.[0-9]+)\]([[:space:]]|$) ]]; then
+    echo "CHANGELOG.md must start with a ## [x.y.z] release heading." >&2
+    return 1
+  fi
+  value=${BASH_REMATCH[1]}
+  if [[ ! "$value" =~ $SEMVER_RE ]]; then
+    echo "Invalid first CHANGELOG release version: $value (expected x.y.z)." >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+version_component_gt() {
+  local left=$1 right=$2
+  if [ "${#left}" -ne "${#right}" ]; then
+    [ "${#left}" -gt "${#right}" ]
+  else
+    [[ "$left" > "$right" ]]
+  fi
+}
+
+version_gt() {
+  local LC_ALL=C left=$1 right=$2 left_major left_minor left_patch right_major right_minor right_patch
+  IFS=. read -r left_major left_minor left_patch <<< "$left"
+  IFS=. read -r right_major right_minor right_patch <<< "$right"
+  if [ "$left_major" != "$right_major" ]; then
+    version_component_gt "$left_major" "$right_major"
+    return
+  fi
+  if [ "$left_minor" != "$right_minor" ]; then
+    version_component_gt "$left_minor" "$right_minor"
+    return
+  fi
+  if [ "$left_patch" != "$right_patch" ]; then
+    version_component_gt "$left_patch" "$right_patch"
+    return
+  fi
+  return 1
+}
+
 while (($#)); do
   case "$1" in
     --target) TARGET=${2:-}; shift 2 ;;
@@ -116,6 +207,51 @@ while IFS= read -r marker || [ -n "$marker" ]; do
 done < "$OWNWARD_PUBLIC_DENYLIST"
 
 git -C "$STAGE" init --quiet
+git -C "$STAGE" add -A --force
+CANDIDATE_TREE=$(git -C "$STAGE" write-tree)
+TARGET_TREE=$(git -C "$TARGET" rev-parse 'HEAD^{tree}')
+RELEASE_CHECKER=""
+if [ -f "$STAGE/scripts/release-metadata.ts" ]; then
+  RELEASE_CHECKER="$STAGE/scripts/release-metadata.ts"
+  if ! RELEASE_JSON=$(bun "$RELEASE_CHECKER" check "$STAGE" 2>&1); then
+    echo "Release metadata check failed: $RELEASE_JSON" >&2
+    exit 65
+  fi
+  SOURCE_VERSION=$(read_release_field "$RELEASE_JSON" version) || exit 65
+  KERNEL_VERSION=$(read_release_field "$RELEASE_JSON" kernelVersion) || exit 65
+  CHANGELOG_VERSION=$(read_release_field "$RELEASE_JSON" changelogVersion) || exit 65
+else
+  SOURCE_VERSION=$(read_package_version "$STAGE/package.json") || exit 65
+  KERNEL_VERSION=$(read_kernel_version "$STAGE") || exit 65
+  CHANGELOG_VERSION=$(read_changelog_version "$STAGE/CHANGELOG.md") || exit 65
+fi
+if [ "$SOURCE_VERSION" != "$KERNEL_VERSION" ] || [ "$SOURCE_VERSION" != "$CHANGELOG_VERSION" ]; then
+  echo "Release metadata mismatch: package.json=$SOURCE_VERSION, KERNEL_VERSION=$KERNEL_VERSION, CHANGELOG=$CHANGELOG_VERSION." >&2
+  exit 65
+fi
+TARGET_VERSION=$(read_package_version "$TARGET/package.json") || exit 65
+if [ "$CANDIDATE_TREE" = "$TARGET_TREE" ]; then
+  if [ "$SOURCE_VERSION" = "$TARGET_VERSION" ]; then
+    echo "Public target already matches this candidate; nothing to publish."
+    exit 0
+  fi
+  echo "Release metadata disagrees with an identical public tree: source=$SOURCE_VERSION, target=$TARGET_VERSION." >&2
+  exit 65
+fi
+if [ "$SOURCE_VERSION" = "$TARGET_VERSION" ]; then
+  echo "Version gate failed: source version $SOURCE_VERSION equals target version $TARGET_VERSION but the archive differs; bump the release version." >&2
+  exit 65
+fi
+if ! version_gt "$SOURCE_VERSION" "$TARGET_VERSION"; then
+  echo "Version gate failed: source version $SOURCE_VERSION must be greater than target version $TARGET_VERSION." >&2
+  exit 65
+fi
+if [ -n "$RELEASE_CHECKER" ]; then
+  if ! RELEASE_BASELINE_RESULT=$(bun "$RELEASE_CHECKER" check "$STAGE" "$TARGET" 2>&1); then
+    echo "Version gate failed: $RELEASE_BASELINE_RESULT" >&2
+    exit 65
+  fi
+fi
 echo "Running the verification gate against the exact archived public artifact…"
 (cd "$STAGE" && ./verify.sh)
 
@@ -131,7 +267,7 @@ git -C "$PUBLISH_WORKTREE" rm -r --ignore-unmatch . >/dev/null
 # Reuse the exact Git archive verified above. Never copy STAGE/.git into the
 # publish worktree: its .git file points at the public repository's history.
 tar -xf "$ARCHIVE" -C "$PUBLISH_WORKTREE"
-git -C "$PUBLISH_WORKTREE" add -A
+git -C "$PUBLISH_WORKTREE" add -A --force
 if git -C "$PUBLISH_WORKTREE" diff --cached --quiet; then
   echo "Public target already matches this candidate; nothing to publish."
   exit 0
