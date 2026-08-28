@@ -190,7 +190,7 @@ launch id、Claude session id 与 transcript，成功后原子 single-use claim 
 fallback，作为迁移窗口。
 
 `src/kernel/sessions/terminal-adopt.test.ts` 从 launcher record 一直打到真实 `/api/cc-hook` handler 和
-Session repository，并验证只 adopt 一次。`docs/phase1-runner-cutover-audit.md` 记录完整边界与剩余切流面。
+Session repository，并验证只 adopt 一次。
 
 ### 生命周期故障演练已落地
 
