@@ -4,7 +4,6 @@ import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "f
 import { join } from "path";
 import { openAction, sweepActions } from "./actions.ts";
 import { reapExited, updateTask } from "./dispatch.ts";
-import { harvestTask } from "./harvest.ts";
 import { runHeartbeat } from "./heartbeat.ts";
 import { notify } from "./notify.ts";
 import { takeRestartIntent } from "./restart.ts";
@@ -126,7 +125,7 @@ async function verifyEvolve(t: { id: string; cwd: string }) {
   });
   await notify(
     pass
-      ? `🧬 Ownward 演进就绪 [${t.id}]\n${stat}\nverify PASS → 上线: own apply ${t.id}（或使用任务卡按钮）`
+      ? `🧬 Ownward 演进就绪 [${t.id}]\n${stat}\nverify PASS → 上线: ownward apply ${t.id}（或使用任务卡按钮）`
       : `🧬❌ 演进验证失败 [${t.id}]\n${(r.stdout.match(/❌.*/g) || []).slice(0, 3).join("\n")}`,
     { source: "dispatch" },
   );
@@ -221,7 +220,8 @@ async function main() {
   // 没有它，Runner 审批只活在会话视图里：人不在屏幕前不知道任务卡住，且永不超时收敛。
   if (sessionMode !== "off") void import("./kernel/sessions/approval-sweep.ts").then(m=>{setInterval(()=>void m.sweepRunnerApprovals().catch(e=>log(`approval sweep: ${e instanceof Error?e.name:"unknown"}`)),60_000);}).catch(e=>log(`approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
 
-  // 编码任务看护：bg 任务退出 → 通知 + 自动收割；演进任务额外跑验证门；routine 任务回写状态
+  // 编码任务看护：bg 任务退出 → 飞行记录 + 通知；演进任务额外跑验证门；routine 任务回写状态。
+  // 收割统一走 sweepCapture（2h 一轮）里的 sweepHarvest，reap 不即时收割。
   setInterval(async () => {
     for (const t of reapExited()) {
       // 结构化飞行记录：任务退出后第一步先冻结 git 快照（晚了 worktree 可能被用户清理→误报无 git），
@@ -255,33 +255,24 @@ async function main() {
           ref: { task_id: t.id },
         });
       }
-      try {
-        const note = await harvestTask(t);
-        // harvestedAt 是重收的判据：只有首轮走到这里，后面的追问轮靠 sweepHarvest 按日志 mtime 补
-        if (note) updateTask(t.id, { harvested: true, harvestedAt: new Date().toISOString() });
-      } catch (e) {
-        log(`auto-harvest [${t.id}] failed: ${e}`);
-      }
+      // 收割不在 reap 里做：统一由 sweepCapture（2h 一轮）里的 sweepHarvest 按沉寂补收
     }
   }, (cfg.dispatch?.watchSec || 60) * 1000);
   setInterval(() => { import("./flight-record.ts").then((m) => m.sweepFlights().catch((e) => log(`flight sweep: ${e}`))); }, 300_000); // 飞行记录写失败的 durable 重试
   setInterval(() => { import("./routines.ts").then((m) => m.sweepRoutines()).catch((e) => log(`routines sweep: ${e}`)); }, 60_000); // 职责草稿自动生成
   setInterval(() => { import("./memory.ts").then((m) => m.sweepMemoryChores().catch((e) => log(`memory chores: ${e}`))); }, 600_000); // 记忆杂务浮到首页
-  setInterval(() => { import("./capture.ts").then((m) => m.sweepCapture().catch((e) => log(`capture: ${e}`))); }, 1200_000); // 会话自动收割（替代 session wrap）
-  setInterval(() => { import("./harvest.ts").then((m) => m.sweepHarvest().catch((e) => log(`harvest sweep: ${e}`))); }, 600_000); // 多轮任务收割补收（追问轮不走 reap，见 sweepHarvest 注释）
+  setInterval(() => { import("./capture.ts").then((m) => m.sweepCapture().catch((e) => log(`capture: ${e}`))); }, 7200_000); // 自动收割 2h 一轮：会话 + 引擎任务 + 飞书消息（feature 开关 capture）
   setInterval(() => { import("./vault-sync.ts").then((m) => m.syncVault()).catch((e) => log(`vault sync: ${e}`)); }, 1800_000); // vault git 同步（接管 wrap 时代的 commit+push）
+  // iDev2 即将提测已迁至 external vertical corp-idev（公司 vertical 仓），自带 30min scheduler
   setInterval(() => { import("./dispatch.ts").then((m) => m.sweepTaskTitles().catch(() => {})); }, 300_000); // 任务精炼标题补齐
   setInterval(() => { import("./terminal-tasks.ts").then((m) => m.sweepTerminalTasks().catch((e) => log(`terminal sweep: ${e}`))); }, 300_000); // terminal 任务沉寂自动收尾（CC 会话 >15min 无写入）
   setInterval(() => { import("./terminal-tasks.ts").then((m) => m.sweepTerminalLinks().catch(() => {})); }, 60_000); // 给运行中 terminal 任务补链底层 CC 会话（确定性认领）
   setTimeout(() => { import("./terminal-tasks.ts").then((m) => m.sweepTerminalLinks().catch(() => {})); }, 20_000); // 启动即给现有 terminal 任务补链
   setTimeout(() => { import("./memory.ts").then((m) => m.sweepMemoryChores().catch(() => {})); }, 30_000);
   setTimeout(() => { import("./dispatch.ts").then((m) => m.sweepTaskTitles().catch(() => {})); }, 15_000); // 启动即补现有任务标题
-  setInterval(() => { import("./session-cleanup.ts").then((m) => { try { m.sweepDaemonTranscripts(); } catch (e) { log(`session cleanup: ${e}`); } }); }, 6 * 3600_000); // 每 6h 清 daemon 决策 transcript（>3天）
-  setTimeout(() => { import("./session-cleanup.ts").then((m) => { try { m.sweepDaemonTranscripts(); } catch (e) { log(`session cleanup: ${e}`); } }); }, 60_000); // 启动 1min 后清一次（首次会清掉历史积压的几千个）
-
   setInterval(sweepActions, 60_000); // snooze 到期回 open
   setInterval(() => { import("./calendar.ts").then((m) => m.sweepMeetingReminders()).catch((e) => log(`meeting reminders: ${e}`)); }, 60_000); // 会前 10min 提醒
-  setInterval(() => { import("./daily-digest.ts").then((m) => m.sweepDigest()).catch((e) => log(`daily digest: ${e}`)); }, 60_000); // 本地 24:00 自动日报
+  setInterval(() => { import("./midday.ts").then((m) => m.sweepMidday()).catch((e) => log(`midday: ${e}`)); }, 60_000); // 每日 12:30 统一任务：前一日日报 + 邮件精选 + 决策 transcript 清理
 
   const hbMs = (cfg.heartbeat.intervalMin || 45) * 60_000;
   setTimeout(() => {

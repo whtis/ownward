@@ -9,8 +9,8 @@
  * 项目知识不复制进角色：项目候选落在 projects/<主项目>/_candidates/，晋升目标是
  * README/decisions/operations 三份项目文件。
  *
- * 数据全部来自 /api/roles/*；正式记忆的内容走 /api/vault/file 只读预览，
- * 编辑一律跳去笔记 tab（daemon 那边路径校验锁死 vault 内 .md）。 */
+ * 数据全部来自 /api/roles/*；正式记忆的内容走 /api/vault/file 只读预览
+ * （daemon 那边路径校验锁死 vault 内 .md）。 */
 
 const Roles = {
   list: [], sel: null, role: null, candidates: [],
@@ -329,14 +329,14 @@ function renderRoleDetail() {
     ${expert ? projectCandidatesHtml(role) : ""}
 
     <div class="rl-block">
-      <div class="rl-block-head"><h3>角色记忆</h3><span class="rl-quiet">vault 里的 markdown 就是真相，可直接编辑</span></div>
+      <div class="rl-block-head"><h3>角色记忆</h3><span class="rl-quiet">vault 里的 markdown 就是真相</span></div>
       <div class="rl-docs">
         ${ROLE_DOCS.map((d) => `
           <div class="rl-doc">
             <div class="rl-doc-head">
               <span class="t">${esc(d.title)}</span>
               <span class="c" id="rl-doc-c-${d.key}"></span>
-              <button class="button ghost sm" onclick="openRoleDoc('${jsq(role.id)}','${d.key}')">在笔记里编辑</button>
+              <button class="button ghost sm" onclick="showRoleDoc('${jsq(role.id)}','${d.key}')">查看全文</button>
             </div>
             <div class="rl-quiet">${esc(d.hint)}</div>
             <div class="rl-doc-body" id="rl-doc-${d.key}">${stateBox("读取中…", "loading")}</div>
@@ -368,7 +368,7 @@ function expertOrgHtml(role, org) {
           <div class="k">主项目</div>
           <div class="v">${primary ? `<span class="chip" data-static="true" data-on="true">${esc(primary)}</span>` : `<span class="rl-quiet">未设置（编辑里补上）</span>`}</div>
           ${primary ? `<div class="pick-row" style="margin-top:6px">${PROJ_DOCS.map((d) =>
-            `<button class="button ghost sm" onclick="openProjectDoc('${jsq(role.id)}','${d.key}')">${esc(d.title)}</button>`).join("")}</div>
+            `<button class="button ghost sm" onclick="showProjectDoc('${jsq(role.id)}','${d.key}')">${esc(d.title)}</button>`).join("")}</div>
             <div class="rl-quiet" style="margin-top:6px">项目知识只住在 projects/${esc(primary)}/，不复制进角色</div>` : ""}
         </div>
         <div class="rl-org-cell">
@@ -456,7 +456,7 @@ function candidateHtml(role, c) {
   </div>`;
 }
 
-/** 正式记忆预览：只读 /api/vault/file（daemon 侧锁死 vault 内 .md），编辑走笔记 tab */
+/** 正式记忆预览：只读 /api/vault/file（daemon 侧锁死 vault 内 .md） */
 function roleDocPath(role, file) {
   const root = S.state?.vaultRoot;
   if (!root) return "";
@@ -483,35 +483,39 @@ async function loadRoleDocs(role, seq) {
     if (seq !== Roles.openSeq) return;
     if (!$(`#rl-doc-${d.key}`)) return;    // 详情已被重渲染
     if (!r?.ok) {
-      $(`#rl-doc-${d.key}`).innerHTML = `<div class="rl-quiet">读不到 ${esc(d.file)}（文件被删或改名？在笔记里新建同名文件即可恢复）</div>`;
+      $(`#rl-doc-${d.key}`).innerHTML = `<div class="rl-quiet">读不到 ${esc(d.file)}（文件可能已被删或改名）</div>`;
       continue;
     }
     const entries = docEntries(r.text);
     if (count) count.textContent = entries.length ? `${entries.length} 条` : "空";
     $(`#rl-doc-${d.key}`).innerHTML = entries.length
       ? `<ul class="rl-doc-list">${entries.slice(0, 4).map((t) => `<li>${esc(t.length > 140 ? t.slice(0, 140) + "…" : t)}</li>`).join("")}</ul>
-         ${entries.length > 4 ? `<div class="rl-quiet">还有 ${entries.length - 4} 条，在笔记里看全文</div>` : ""}`
-      : `<div class="rl-quiet">还是空的——晋升一条候选，或直接在笔记里写。</div>`;
+         ${entries.length > 4 ? `<div class="rl-quiet">还有 ${entries.length - 4} 条未展示</div>` : ""}`
+      : `<div class="rl-quiet">还是空的——晋升一条候选即可生成。</div>`;
   }
 }
-function openRoleDoc(id, key) {
+/** 角色文档全文：只读弹窗（notes tab 移除后这是 vault 内容的唯一 UI 出口） */
+async function showRoleDoc(id, key) {
   const role = Roles.role && Roles.role.id === id ? Roles.role : Roles.list.find((r) => r.id === id);
   const doc = ROLE_DOCS.find((d) => d.key === key);
   if (!role || !doc) return;
   const path = roleDocPath(role, doc.file);
   if (!path) { toast("daemon 状态还没到，稍后再试"); return; }
-  switchTab("notes");
-  Notes.open(path);
+  const r = await getJSON(`/api/vault/file?path=${encodeURIComponent(path)}`).catch(() => null);
+  if (!r?.ok) { toast(`读不到 ${doc.file}（文件可能已被删或改名）`); return; }
+  showText(`${role.name || role.id} · ${doc.title}`, r.text || "");
 }
-/** 主项目的正式文件：在笔记 tab 里打开（可能还不存在——笔记那边会如实说） */
-function openProjectDoc(id, key) {
+/** 主项目的正式文件：只读弹窗（可能还不存在——如实提示读不到） */
+async function showProjectDoc(id, key) {
   const role = Roles.role && Roles.role.id === id ? Roles.role : Roles.list.find((r) => r.id === id);
   const doc = PROJ_DOCS.find((d) => d.key === key);
   const root = S.state?.vaultRoot;
   if (!role || !doc || !role.primaryProject) return;
   if (!root) { toast("daemon 状态还没到，稍后再试"); return; }
-  switchTab("notes");
-  Notes.open(`${root}/${role.scope ? role.scope + "/" : ""}projects/${role.primaryProject}/${doc.file}`);
+  const path = `${root}/${role.scope ? role.scope + "/" : ""}projects/${role.primaryProject}/${doc.file}`;
+  const r = await getJSON(`/api/vault/file?path=${encodeURIComponent(path)}`).catch(() => null);
+  if (!r?.ok) { toast(`读不到 ${doc.file}（文件可能已被删或改名）`); return; }
+  showText(`${role.primaryProject} · ${doc.title}`, r.text || "");
 }
 
 /* ============ 动作（危险动作一律先确认，失败一律回显后端原话） ============ */

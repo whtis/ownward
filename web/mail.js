@@ -9,6 +9,7 @@ const Mail = {
   sel: null,       // { id, account } 选中邮件
   selAcc: "all",   // 账号 chip 筛选
   mode: "inbox",   // "inbox" | "search" | "compose"
+  source: "gmail", // "gmail" | "outlook"
   searchQ: "",     // 当前搜索词
   timer: null,     // 60s 轮询
   replying: false, // 回复框展开状态
@@ -20,9 +21,13 @@ TABS.mail = {
       <div class="col mail-list-col">
         <div style="padding-bottom:8px">
           <div style="display:flex;align-items:center;gap:8px;padding:2px 2px 8px">
-            <div class="eyebrow" style="margin:0">GMAIL</div>
+            <div class="eyebrow" style="margin:0">MAIL</div>
             <span style="flex:1"></span>
             <button class="button secondary sm" id="ml-compose">写邮件</button>
+          </div>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <button class="chip sm" data-source="gmail" id="ml-src-gmail">Gmail</button>
+            <button class="chip sm" data-source="outlook" id="ml-src-outlook">Outlook</button>
           </div>
           <div id="ml-accounts" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
           <input type="search" id="ml-search" placeholder="Gmail 语法搜索，回车触发；清空回收件箱" style="width:100%;box-sizing:border-box">
@@ -50,6 +55,11 @@ TABS.mail = {
     });
 
     loadMailAccounts();
+
+    // 源切换：Gmail / Outlook（Outlook 只读，无搜索/回复/写邮件）
+    $("#ml-src-gmail").addEventListener("click", () => setMailSource("gmail"));
+    $("#ml-src-outlook").addEventListener("click", () => setMailSource("outlook"));
+    syncMailSourceVisibility();
   },
   show() {
     loadMailList();
@@ -57,6 +67,42 @@ TABS.mail = {
   },
   hide() { clearInterval(Mail.timer); Mail.timer = null; },
 };
+
+/* ---- 源切换：Gmail / Outlook ---- */
+
+// 源显隐偏好（localStorage 持久化，系统设置里可改）：缺省两个源都显示
+function mailSourceVisible(s) { return localStorage.getItem(`ownward-mail-${s}-hidden`) !== "1"; }
+function setMailSourceVisible(s, visible) { visible ? localStorage.removeItem(`ownward-mail-${s}-hidden`) : localStorage.setItem(`ownward-mail-${s}-hidden`, "1"); }
+
+/** 启动/设置变更后调用：隐藏的源 chip 不显示；当前选中源被隐藏时自动切到第一个可见源 */
+function syncMailSourceVisibility() {
+  const g = mailSourceVisible("gmail"), o = mailSourceVisible("outlook");
+  $("#ml-src-gmail").style.display = g ? "" : "none";
+  $("#ml-src-outlook").style.display = o ? "" : "none";
+  if (!g && !o) { $("#ml-list").innerHTML = stateBox("两个邮件源都被隐藏——去系统设置恢复", "empty"); return; }
+  const cur = Mail.source;
+  const curVisible = cur === "gmail" ? g : o;
+  if (!curVisible) Mail.source = g ? "gmail" : "outlook";
+  syncMailSource();
+}
+
+function setMailSource(s) {
+  Mail.source = s;
+  Mail.sel = null;
+  syncMailSource();
+  loadMailList();
+}
+
+/** 切换后同步 UI 状态：chip 高亮、隐藏 Gmail 专属控件（账号/搜索/写邮件） */
+function syncMailSource() {
+  const isOutlook = Mail.source === "outlook";
+  $("#ml-src-gmail").dataset.active = !isOutlook;
+  $("#ml-src-outlook").dataset.active = isOutlook;
+  $("#ml-accounts").style.display = isOutlook ? "none" : "";
+  $("#ml-search").style.display = isOutlook ? "none" : "";
+  $("#ml-compose").style.display = isOutlook ? "none" : "";
+  $("#ml-detail").innerHTML = stateBox(isOutlook ? "从左侧选择一封邮件（Outlook 本地库，只读）" : "从左侧选择一封邮件");
+}
 
 /* ---- 账号 ---- */
 
@@ -106,6 +152,7 @@ async function loadMailList() {
   if (Mail.mode === "search") return; // 搜索结果不被轮询覆盖
   const el = $("#ml-list");
   if (!el) return;
+  if (Mail.source === "outlook") return loadOutlookList(el);
   try {
     const data = await getJSON(`/api/gmail/inbox?account=${encodeURIComponent(Mail.selAcc)}`);
     Mail.msgs = Array.isArray(data) ? data : [];
@@ -117,6 +164,96 @@ async function loadMailList() {
       : `载入失败：${String(e).slice(0, 100)}`;
     el.innerHTML = stateBox(hint, "error");
   }
+}
+
+/** Outlook 本地库列表：{ mails, unread }；GitLab 邮件后端已过滤 */
+async function loadOutlookList(el) {
+  try {
+    const data = await getJSON("/api/verticals/corp-outlook/inbox?limit=30");
+    Mail.msgs = data.mails || [];
+    renderOutlookList(el);
+  } catch (e) {
+    el.innerHTML = stateBox(`Outlook 本地库读取失败：${String(e).slice(0, 80)}（确认 Outlook 客户端已登录公司邮箱）`, "error");
+  }
+}
+
+function renderOutlookList(el) {
+  if (!Mail.msgs.length) { el.innerHTML = stateBox("收件箱为空（噪音邮件已过滤）", "empty"); return; }
+  const purgeBtn = `<div style="display:flex;align-items:center;gap:6px;padding:6px 4px 8px;border-bottom:1px solid var(--border-subtle);margin-bottom:6px">
+    <button class="button danger sm" id="ml-purge" onclick="mailPurgeNoise()">清理垃圾邮件</button>
+    <span style="flex:1"></span>
+    <button class="button ghost sm" id="ml-filter-toggle" onclick="mailToggleFilter()">屏蔽词管理</button>
+  </div>
+  <div id="ml-filter-panel" style="display:none;padding:8px;border:1px solid var(--border-subtle);border-radius:6px;margin-bottom:8px">
+    <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px">屏蔽关键词（发件人含 @ 精确匹配，主题模糊匹配）：</div>
+    <div id="ml-filter-list" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px"></div>
+    <div style="display:flex;gap:6px">
+      <input type="text" id="ml-filter-input" placeholder="新屏蔽词（如 周报）" style="flex:1;padding:4px 8px;font-size:12px;border:1px solid var(--border-subtle);border-radius:4px">
+      <button class="button primary sm" onclick="mailAddFilter()">添加</button>
+    </div>
+  </div>`;
+  el.innerHTML = purgeBtn + `<div class="glist">${Mail.msgs.map((m) => {
+    const timeStr = m.receivedAt ? ageText(m.receivedAt) : "";
+    return `<div class="card clickable" data-selected="${Mail.sel?.id === m.id}"
+        onclick="mailSelectOutlook(${m.id})">
+      <div class="top">
+        ${!m.read ? `<span class="dot ok" style="flex:none;width:7px;height:7px"></span>` : ""}
+        <span style="font-weight:${!m.read ? 600 : 400};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0">${esc(m.senderName || m.senderEmail)}</span>
+        <span class="right mono" style="font-size:11px;flex:none">${esc(timeStr)}</span>
+      </div>
+      <div class="body" style="${!m.read ? "font-weight:600" : ""}">${esc(m.subject || "(无主题)")}</div>
+      ${m.preview ? `<div class="body" style="color:var(--text-tertiary);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2">${esc(m.preview)}</div>` : ""}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+/* ---- 垃圾邮件清理 + 屏蔽词管理 ---- */
+
+async function mailPurgeNoise() {
+  const preview = await getJSON("/api/verticals/corp-outlook/purge");
+  if (!preview.wouldDelete) { toast("没有可清理的垃圾邮件"); return; }
+  if (!confirm(`将删除 ${preview.wouldDelete} 封命中屏蔽关键词且早于 30 天的邮件（GitLab 通知、自动报表、巡检、告警等），近 30 天不动。不可恢复，确认？`)) return;
+  const res = await post("/api/verticals/corp-outlook/purge", {});
+  toast(`已删除 ${res.deleted} 封垃圾邮件`);
+  loadMailList();
+}
+
+async function mailToggleFilter() {
+  const panel = $("#ml-filter-panel");
+  const show = panel.style.display === "none";
+  panel.style.display = show ? "" : "none";
+  if (show) {
+    const data = await getJSON("/api/verticals/corp-outlook/filter");
+    renderFilterList(data.keywords || []);
+  }
+}
+
+function renderFilterList(keywords) {
+  $("#ml-filter-list").innerHTML = keywords.map((k) =>
+    `<span class="tag" style="display:inline-flex;align-items:center;gap:4px">${esc(k)}<button onclick="mailRemoveFilter('${jsq(k)}')" style="border:none;background:none;cursor:pointer;padding:0;color:var(--text-tertiary);font-size:14px;line-height:1">×</button></span>`
+  ).join("");
+}
+
+async function mailAddFilter() {
+  const input = $("#ml-filter-input");
+  const kw = input.value.trim();
+  if (!kw) { toast("输入屏蔽词"); return; }
+  const data = await getJSON("/api/verticals/corp-outlook/filter");
+  const keywords = [...new Set([...(data.keywords || []), kw])];
+  await post("/api/verticals/corp-outlook/filter", { keywords });
+  input.value = "";
+  renderFilterList(keywords);
+  toast(`已添加屏蔽词「${kw}」`);
+  loadMailList(); // 列表立即按新规则过滤
+}
+
+async function mailRemoveFilter(kw) {
+  const data = await getJSON("/api/verticals/corp-outlook/filter");
+  const keywords = (data.keywords || []).filter((k) => k !== kw);
+  await post("/api/verticals/corp-outlook/filter", { keywords });
+  renderFilterList(keywords);
+  toast(`已移除屏蔽词「${kw}」`);
+  loadMailList();
 }
 
 async function loadMailSearch(q) {
@@ -169,6 +306,28 @@ function mailSenderName(from) {
 }
 
 /* ---- 邮件详情 ---- */
+
+/** Outlook 邮件详情（只读）：选中 → 拉正文 → 渲染 */
+async function mailSelectOutlook(id) {
+  Mail.sel = { id };
+  renderOutlookList($("#ml-list")); // 更新选中高亮
+  mailMobileView("detail");
+  const el = $("#ml-detail");
+  if (el) el.innerHTML = stateBox("正在载入邮件…", "loading");
+  try {
+    const d = await getJSON(`/api/verticals/corp-outlook/message?id=${id}`);
+    if (el) el.innerHTML = `
+      <div style="margin-bottom:12px">
+        <button class="button ghost sm" onclick="mailBackToList()" style="margin-bottom:10px">← 返回列表</button>
+        <div style="font-size:16px;font-weight:600;line-height:1.35;margin-bottom:8px">${esc(d.subject || "(无主题)")}</div>
+        <div style="font-size:11.5px;color:var(--text-tertiary)">Outlook 本地库 · 只读 · GitLab 邮件已过滤</div>
+      </div>
+      <div style="border-top:1px solid var(--border-subtle);margin-bottom:12px"></div>
+      <pre style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.65;font-family:inherit;margin:0">${esc(d.body || "（无正文）")}</pre>`;
+  } catch (e) {
+    if (el) el.innerHTML = stateBox(`载入失败：${String(e).slice(0, 80)}`, "error");
+  }
+}
 
 async function mailSelectMsg(id, account) {
   Mail.sel = { id, account };
@@ -327,7 +486,7 @@ function mailCancelCompose() {
   mailMobileView("list");
 }
 
-/* ---- 移动端 master-detail：媒体查询 + data 属性驱动（与 lark/chat 对称）——
+/* ---- 移动端 master-detail：媒体查询 + data 属性驱动（与 chat 对称）——
  *  内联 display 切换在窗口拉宽回桌面时会残留（列表列永久消失），CSS 方案 resize 自愈 ---- */
 (function () {
   const st = document.createElement("style");

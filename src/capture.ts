@@ -11,7 +11,7 @@ import { ccSessionPath, listCcSessions } from "./cc-sessions.ts";
 import { isWithinDataDir } from "./internal-path.ts";
 import { llmJson } from "./llm.ts";
 import { inboxDir, projectDir, SCOPES_ON, scopeForRemote, type Scope } from "./paths.ts";
-import { DATA, ensureDir, fmt, log } from "./util.ts";
+import { cfg, DATA, ensureDir, fmt, log } from "./util.ts";
 
 const STATE_FILE = join(DATA, "capture.json");
 
@@ -187,17 +187,24 @@ function extractConversation(path: string, maxChars = 14_000): Transcript {
   return { text: joined, paths };
 }
 
-/** 每 20 分钟扫一轮：CC + codex 沉寂 >15min 的实质会话逐个总结落盘（每轮最多 3 个控成本） */
+/** 每 2 小时扫一轮：CC + codex 沉寂 >15min 的实质会话逐个总结落盘（每轮最多 3 个控成本），
+ *  同一轮里再收割引擎任务（sweepHarvest）——都走 featureEnabled("capture") 总闸。 */
+/* 飞书消息收割已迁至 external vertical corp-lark-harvest（公司 vertical 仓）。 */
 export async function sweepCapture() {
+  const { featureEnabled } = await import("./features.ts");
+  if (!featureEnabled("capture")) return;
   const { listCodexSessions, codexSessionPath, readCodexMessages } = await import("./codex-sessions.ts");
+  const { engineSessionIds } = await import("./session-cleanup.ts");
   const state = loadCapState();
   const now = Date.now();
   let budget = 3;
+  // 引擎任务（bg 派发/接管）的 transcript 走任务收割（飞行记录素材更全），不再当普通会话双收
+  const engineIds = engineSessionIds();
 
   // 统一候选：CC transcript + codex rollout（codex 的 scope 用 rollout 里的 git remote 判，最准）
   const candidates: { id: string; cwd: string; project: string; title: string; size: number; mtime: number; active: boolean;
     scope?: Scope; read: () => Transcript }[] = [
-    ...listCcSessions(50).map((s) => ({
+    ...listCcSessions(50).filter((s) => !engineIds.has(s.id.split("/").pop() || "")).map((s) => ({
       ...s, read: () => extractConversation(ccSessionPath(s.id)),
     })),
     // codex_exec = `codex exec` 跑出来的（Ownward codex-bg 引擎任务、脚本调用），任务路径已有 harvest，不重复收割
@@ -233,6 +240,13 @@ export async function sweepCapture() {
       saveCapState(state);
     }
   }
+  // 引擎任务收割：原 sweepHarvest 的独立 10min 定时器并入本轮（reap 也不再即时收割），
+  // 沉寂 >15min 的任务重收一遍，多轮追问任务的日志不会停在首轮快照上
+  const { sweepHarvest } = await import("./harvest.ts");
+  await sweepHarvest().catch((e) => log(`harvest sweep: ${e}`));
+
+  // 飞书消息收割已迁至 external vertical corp-lark-harvest（公司 vertical 仓），不在此编排
+
   // 收割完顺手同步 vault（写了才 commit，没写是 no-op）
   const { syncVault } = await import("./vault-sync.ts");
   syncVault("capture").catch(() => {});
@@ -332,3 +346,4 @@ async function captureOne(s: { id: string; cwd: string; project: string; title: 
   appendKnowledge(s.cwd, slug, entry, scope);
   log(`capture [${scope ? `${scope}/` : ""}${slug}] ${res.title}${slug !== cwdSlug ? `（cwd=${cwdSlug}，按触达仓库归到 ${slug}）` : ""}`);
 }
+

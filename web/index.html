@@ -39,11 +39,13 @@
       <button class="nav-tab" data-tab="today">今日 <span class="badge" id="b-today"></span></button>
       <button class="nav-tab" data-tab="tasks">任务 <span class="badge" id="b-tasks"></span></button>
       <button class="nav-tab" data-tab="chat">对话</button>
+      <button class="nav-tab" data-tab="summary">每日总结</button>
       <button class="nav-tab" data-tab="lark">飞书 <span class="badge" id="b-lark"></span></button>
       <button class="nav-tab" data-tab="mail" data-feature="mail">邮件</button>
       <button class="nav-tab" data-tab="pr">PR <span class="badge" id="b-pr"></span></button>
       <button class="nav-tab" data-tab="roles">角色</button>
       <button class="nav-tab" data-tab="notes">笔记</button>
+      <button class="nav-tab" data-tab="feed">通知流 <span class="badge" id="b-feed"></span></button>
       <button class="nav-tab" data-tab="settings">设置</button>
     </nav>
     <div class="topbar-actions">
@@ -53,6 +55,7 @@
       <details class="topbar-more">
         <summary class="icon-btn" title="更多工具" aria-label="更多工具"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.4"/><circle cx="10" cy="10" r="1.4"/><circle cx="16" cy="10" r="1.4"/></svg></summary>
         <div class="topbar-menu">
+          <button class="mobile-menu-item" data-tab="summary">每日总结</button>
           <button class="mobile-menu-item" data-tab="lark">飞书</button>
           <button class="mobile-menu-item" data-tab="mail" data-feature="mail">邮件</button>
           <button class="mobile-menu-item" data-tab="pr">PR</button>
@@ -73,11 +76,10 @@
     <section class="pane-root" data-pane="feed"><div class="cols layout-feed" id="feed-root"></div></section>
     <section class="pane-root" data-pane="tasks"><div class="cols layout-split" id="tasks-root"></div></section>
     <section class="pane-root" data-pane="chat"><div class="cols layout-split" id="chat-root"></div></section>
-    <section class="pane-root" data-pane="lark"><div class="cols layout-split" id="lark-root"></div></section>
+    <section class="pane-root" data-pane="summary"><div class="cols layout-split" id="summary-root"></div></section>
     <section class="pane-root" data-pane="mail"><div class="cols layout-split" id="mail-root"></div></section>
     <section class="pane-root" data-pane="pr"><div class="cols layout-split" id="pr-root"></div></section>
     <section class="pane-root" data-pane="roles"><div class="cols layout-split" id="roles-root"></div></section>
-    <section class="pane-root" data-pane="notes"><div class="cols layout-notes" id="notes-root"></div></section>
     <section class="pane-root" data-pane="system"><div class="cols layout-system" id="system-root"></div></section>
     <section class="pane-root" data-pane="settings"><div class="settings-layout" id="settings-root"></div></section>
   </main>
@@ -261,7 +263,7 @@
 <!-- ⌘K 全局搜索/命令面板（逻辑在 app.js） -->
 <div class="overlay" id="palette-overlay">
   <div class="modal palette" role="dialog" aria-label="全局搜索">
-    <input type="text" id="pal-input" placeholder="搜索 tab / 任务 / 对话 / 笔记，或输入动作…" spellcheck="false" autocomplete="off">
+    <input type="text" id="pal-input" placeholder="搜索 tab / 任务 / 对话，或输入动作…" spellcheck="false" autocomplete="off">
     <div class="palette-list" id="pal-list"></div>
   </div>
 </div>
@@ -274,6 +276,7 @@
 <script src="/feed.js"></script>
 <script src="/tasks.js"></script>
 <script src="/chat.js"></script>
+<script src="/summary.js"></script>
 <script src="/lark.js"></script>
 <script src="/mail.js"></script>
 <script src="/pr.js"></script>

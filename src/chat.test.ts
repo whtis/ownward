@@ -235,16 +235,18 @@ describe("上下文注入：两个 provider 逐字相同", () => {
     expect(plain).not.toContain("PRINCIPLE_MARKER");
   });
 
-  test("无角色对话的 claude 参数没变（工具禁令 / resume 照旧）", async () => {
+  test("无角色对话的 claude 参数：工具全开（对齐原生 CLI），resume 照旧", async () => {
     freshVault();
     const sys = await chatSystemPrompt(chat());
     const args = claudeArgs(chat(), "你好", sys);
     expect(args.slice(0, 2)).toEqual(["-p", "你好"]);
     expect(args).toContain("--verbose");
     expect(args).toContain("--include-partial-messages");
-    expect(args[args.indexOf("--allowedTools") + 1]).toBe("WebSearch");
-    expect(args).toContain("--disallowedTools");
-    for (const banned of ["Bash", "Edit", "Write", "Read"]) expect(args).toContain(banned);
+    const toolsIdx = args.indexOf("--allowedTools");
+    expect(args[toolsIdx + 1]).toBe("WebSearch");
+    // 方案 A：开放 Read/Grep/Glob/Bash，效果对齐原生 CLI
+    expect(args.slice(toolsIdx + 1, toolsIdx + 7)).toEqual(["WebSearch", "WebFetch", "Read", "Grep", "Glob", "Bash"]);
+    expect(args).not.toContain("--disallowedTools");
     expect(args).not.toContain("--resume");
     expect(claudeArgs(chat({ claudeSessionId: "sess-1" }), "你好", sys).slice(-2)).toEqual(["--resume", "sess-1"]);
   });

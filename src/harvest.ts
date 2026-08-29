@@ -215,8 +215,8 @@ export async function sweepHarvest(): Promise<void> {
     const since = t.harvestedAt ? new Date(t.harvestedAt).getTime() : 0;
     return !t.harvested || mtime > since;
   });
-  // 每轮最多重收 2 个控成本；退避中的失败项不占预算，后续任务不会被饿死。
-  for (const t of selectHarvestBudget(candidates, retries, now)) {
+  // 每轮最多重收 5 个控成本（2h 一轮的 sweepCapture 编排进来后预算放宽）；退避中的失败项不占预算，后续任务不会被饿死。
+  for (const t of selectHarvestBudget(candidates, retries, now, 5)) {
     try {
       const note = await harvestTask(t);
       if (note) {

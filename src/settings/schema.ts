@@ -27,6 +27,7 @@ export interface SettingsSchema {
 const TIERS: Record<string, SettingTier> = {
   owner: "public", timezone: "public", quietHours: "public", notify: "public",
   vault: "public", heartbeat: "public", digest: "public", chat: "public",
+  git: "public",
   connectors: "public", strategy: "advanced", dashboard: "advanced",
   triage: "advanced", llm: "advanced", dispatch: "advanced", engine: "advanced",
   architecture: "internal", providers: "internal", release: "internal", verticals: "internal",

@@ -20,7 +20,7 @@ const OWNWARD_DIR = join(PROJECTS, ROOT.replace(/\/+$/, "").replace(/[^A-Za-z0-9
 const DECISION_PROMPT = /^(执行 (Heartbeat|Triage) 任务|把这次开发会话总结成工作日志|把下面这次(开发会话|编码任务)的过程总结成一条工作日志|把下面的开发任务压成一句|根据下面的活动记录，写|从下面的当日工作记录中提取|你是.{0,60}的工作总结代笔|用两三句话总结这个网页)/;
 
 /** 所有已知引擎任务的 toolSessionId（--resume 依赖其 transcript，绝不删） */
-function engineSessionIds(): Set<string> {
+export function engineSessionIds(): Set<string> {
   const set = new Set<string>();
   try {
     for (const f of readdirSync(join(DATA, "tasks"))) {

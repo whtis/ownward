@@ -7,6 +7,7 @@ const Tasks = {
   ccMsgs: [], ccOffset: 0, // 旁观增量
   ccList: [],              // 本机全部 agent 会话（去重后混进项目组；含 ownward 之外开的 claude/codex）
   recent: [], rq: "",      // 最近会话分区：ownward 原生引擎对话 + 筛选词
+  branchWts: [],           // 分支 → worktree 映射（/api/branches）：按分支视图补「还没任务」的 worktree 项目
   pinned: [],              // 置顶会话（daemon 持久化）
   dismissed: {},           // 隐藏的项目组 {project: epochMs}
   openTools: new Set(),    // 工具帧展开状态（重渲染保持）
@@ -41,6 +42,7 @@ TABS.tasks = {
         <div class="tasks-view-switch" aria-label="任务视图">
           <button class="chip" id="tk-v-all">全部工作</button>
           <button class="chip" id="tk-v-recent">最近会话</button>
+          <button class="chip" id="tk-v-branch">按分支</button>
         </div>
         <div class="col-scroll tasks-list-scroll" id="tk-list">${stateBox("正在载入任务…", "loading")}</div>
       </div>
@@ -58,6 +60,7 @@ TABS.tasks = {
     });
     $("#tk-v-all").addEventListener("click", () => tkSetView("all"));
     $("#tk-v-recent").addEventListener("click", () => tkSetView("recent"));
+    $("#tk-v-branch").addEventListener("click", () => tkSetView("branch"));
     tkSetView(tkView);
     loadTasksAux().then(renderTaskList);
     renderSessionTabs();
@@ -96,16 +99,18 @@ function tkSetContext(project, title) {
 /** 分组视图的辅助数据：全部会话 + 置顶 + 隐藏项目（任务本体走 SSE/轮询） */
 async function loadTasksAux() {
   Tasks.auxError = "";
-  const [cc, pin, dis, rc] = await Promise.all([
+  const [cc, pin, dis, rc, bw] = await Promise.all([
     getJSON("/api/cc/sessions").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/sessions/pinned").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/projects/dismissed").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/dev/recent").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
+    getJSON("/api/branches").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
   ]);
   if (cc) Tasks.ccList = cc;
   if (pin?.pinned) Tasks.pinned = pin.pinned;
   if (dis?.dismissed) Tasks.dismissed = dis.dismissed;
   if (rc) Tasks.recent = rc;
+  if (bw) Tasks.branchWts = bw.worktrees || [];
   Tasks.auxLoaded = true;
   if (Tasks.selKind === "cc" && Tasks.sel) void pollCcObserve(Tasks.sel, Tasks.selKind, true);
 }
@@ -195,9 +200,10 @@ let tkView = localStorage.getItem("ownward-tasks-view") || "all";
 function tkSetView(v) {
   tkView = v;
   localStorage.setItem("ownward-tasks-view", v);
-  const a = $("#tk-v-all"), r = $("#tk-v-recent");
+  const a = $("#tk-v-all"), r = $("#tk-v-recent"), b = $("#tk-v-branch");
   if (a) a.dataset.on = String(v === "all");
   if (r) r.dataset.on = String(v === "recent");
+  if (b) b.dataset.on = String(v === "branch");
   renderTaskList();
 }
 function rcCardHtml(s) {
@@ -229,32 +235,95 @@ function rcFilter(v) {
   const meta = $("#tk-rc-meta"); if (meta) meta.textContent = `${rcFiltered().length} / ${Tasks.recent.length}`;
 }
 
-function renderTaskList() {
-  const el = $("#tk-list"); if (!el) return;
-  renderSessionTabs();   // 顺路刷 tab 栏（高亮/迟到的标签）
-  if (composingEl && el.contains(composingEl)) return;   // 筛选框组字中：跳过这轮，SSE/定时器下轮会补
-  // 重渲染会吃掉筛选框的焦点/光标——先存后还
-  const rqHadFocus = document.activeElement === $("#tk-rq");
-  if (!Tasks.auxLoaded && S.tasks.length === 0 && !Tasks.tasksError) { el.innerHTML = stateBox("正在载入任务…", "loading"); return; }
-  if (tkView === "recent") {
-    el.innerHTML = `
-      ${Tasks.tasksError ? `<div class="tasks-inline-state">${stateBox(Tasks.tasksError, "error")}</div>` : ""}
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
-        <input type="text" id="tk-rq" placeholder="筛选：项目 / 标题 / 内容…" value="${esc(Tasks.rq)}" oninput="rcFilter(this.value)" style="flex:1;font-size:12px">
-        <span class="mono" id="tk-rc-meta" style="font-size:11px;color:var(--text-tertiary)">${rcFiltered().length} / ${Tasks.recent.length}</span>
-      </div>
-      <div id="tk-rc-cards" class="glist">${rcCardsHtml()}</div>`;
-    if (rqHadFocus) { const ni = $("#tk-rq"); ni.focus(); ni.setSelectionRange(ni.value.length, ni.value.length); }
-    return;
-  }
+/* ---- 按分支视图：需求(分支名) → 项目 → 任务/会话。branch 字段由后端在 /api/tasks、/api/cc/sessions 附带（cwd 解析 + 缓存） ---- */
+function tkBranchRows() {
   const pinnedKeys = new Set(Tasks.pinned.map((p) => pinKey(p.kind, p.ref)));
-  const tasks = S.tasks.filter((t) => t.kind !== "routine");
-  const routine = S.tasks.filter((t) => t.kind === "routine");
-  const running = tasks.filter((t) => t.status === "running" && !pinnedKeys.has(pinKey("task", t.id)));
-  const external = externalSessions();
-  const activeCc = external.filter((s) => s.active && !pinnedKeys.has(pinKey("cc", s.id)));
-
-  // 置顶区：daemon 持久化的长期会话，永远最顶
+  const rows = [];
+  for (const t of S.tasks) {
+    if (t.kind === "routine" || pinnedKeys.has(pinKey("task", t.id))) continue;
+    rows.push({ type: "task", t, project: t.project, branch: t.branch || "", time: +new Date(t.startedAt) || 0, dir: t.projectDir || t.cwd });
+  }
+  for (const s of externalSessions()) {
+    if (pinnedKeys.has(pinKey("cc", s.id))) continue;
+    rows.push({ type: "cc", s, project: s.project, branch: s.branch || "", time: s.mtime, dir: s.cwd });
+  }
+  // 隐藏项目沿用项目视图规则：隐藏后有新活动自动回来
+  return rows.filter((r) => { const at = Tasks.dismissed[r.project]; return !at || r.time > at; });
+}
+/** 分支 → 项目的两级归组；branch 为空串表示无分支。需求按最新活动倒序，无分支固定垫底 */
+function tkBranchTree(rows) {
+  const byBranch = new Map();   // 分支名 → { latest, projects: Map(项目 → 行[]) }
+  for (const r of rows) {
+    if (!byBranch.has(r.branch)) byBranch.set(r.branch, { latest: 0, projects: new Map() });
+    const g = byBranch.get(r.branch);
+    if (!g.projects.has(r.project)) g.projects.set(r.project, []);
+    g.projects.get(r.project).push(r);
+    if (r.time > g.latest) g.latest = r.time;
+  }
+  for (const g of byBranch.values()) for (const list of g.projects.values()) list.sort((a, b) => b.time - a.time);
+  return [...byBranch.entries()].sort((a, b) => (a[0] === "" ? 1 : 0) - (b[0] === "" ? 1 : 0) || b[1].latest - a[1].latest);
+}
+/** 该分支下「只在 worktree 里存在、还没任何任务/会话」的项目（/api/branches）；隐藏项目规则与行分组一致（隐藏即不出） */
+function tkWorktreeProjects(branch) {
+  const byProject = new Map();   // 项目 → worktree 行[]
+  for (const w of Tasks.branchWts) {
+    if (w.branch !== branch || Tasks.dismissed[w.project]) continue;
+    if (!byProject.has(w.project)) byProject.set(w.project, []);
+    byProject.get(w.project).push(w);
+  }
+  return byProject;
+}
+/** 需求节点序：有任务的分支按最新活动倒序在前；纯 worktree 分支（无活动可比）按名字序固定垫在其后；无分支最后 */
+function tkBranchNodes(tree) {
+  const known = new Set(tree.map(([b]) => b));
+  const extras = [...new Set(Tasks.branchWts.map((w) => w.branch))].filter((b) => b && !known.has(b) && tkWorktreeProjects(b).size).sort();   // 只剩已隐藏项目的纯 worktree 分支连节点都不出
+  const noBranch = tree.find(([b]) => b === "");
+  return [...tree.filter(([b]) => b !== ""), ...extras.map((b) => [b, { latest: 0, projects: new Map() }]), ...(noBranch ? [noBranch] : [])];
+}
+function tkBranchViewHtml() {
+  const nodes = tkBranchNodes(tkBranchTree(tkBranchRows()));
+  const treeHtml = nodes.map(([branch, g]) => {
+    const wts = tkWorktreeProjects(branch);
+    const count = [...g.projects.values()].reduce((n, list) => n + list.length, 0) + [...wts.keys()].filter((p) => !g.projects.has(p)).length;
+    const bKey = `br:${branch}`, bOpen = tkExpanded.has(bKey);   // branch 为空串 = 无分支组，键不会与真实分支冲突
+    const head = `<div class="group-head" onclick="tkToggle('${jsq(bKey)}')">
+      <span class="chev">${bOpen ? "▾" : "▸"}</span>
+      <span class="gname mono"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="6" cy="4.5" r="1.8"/><circle cx="6" cy="15.5" r="1.8"/><path d="M6 6.3v7.4M6 6.3c5.5 0 8.5 1.6 8.5 4.7"/></svg>${esc(branch || "无分支")}</span>
+      <span class="gmeta mono">${g.latest ? ageText(new Date(g.latest).toISOString()) : ""} · ${count}</span>
+    </div>`;
+    if (!bOpen) return head;
+    const projs = [...g.projects.entries()].map(([project, list]) => {
+      const pKey = `brp:${branch}|${project}`, pOpen = tkExpanded.has(pKey);
+      const dir = list.find((r) => r.dir)?.dir || "";
+      const pHead = `<div class="group-head" style="padding-left:22px" onclick="tkToggle('${jsq(pKey)}')">
+        <span class="chev">${pOpen ? "▾" : "▸"}</span>
+        <span class="gname">${esc(project)}</span>
+        <span class="gmeta mono">${ageText(new Date(list[0].time).toISOString())} · ${list.length}</span>
+        ${dir ? `<button class="button sm ghost" title="在此项目建任务" onclick="event.stopPropagation();openWork('${jsq(dir)}')">＋</button>` : ""}
+      </div>`;
+      const cards = pOpen ? `<div class="glist" style="margin-left:22px">${list.map((r) => r.type === "task" ? taskCardHtml(r.t) : ccRowHtml(r.s)).join("")}</div>` : "";
+      return pHead + cards;
+    }).join("");
+    // 「仅 worktree」的项目占位行：同一分支已在别的项目开出工作区但还没任务；无子级不可展开，路径整条放 title
+    const wtRows = [...wts].filter(([project]) => !g.projects.has(project)).map(([project, list]) => {
+      const paths = list.map((w) => w.path).join(" · ");
+      const dir = list.find((w) => w.dir)?.dir || "";
+      return `<div class="group-head" style="padding-left:22px" title="${esc(paths)}">
+        <span class="gname">${esc(project)}</span><span class="tag">仅 worktree</span>
+        <span class="gmeta mono">${esc(paths)}</span>
+        ${dir ? `<button class="button sm ghost" title="在此项目建任务" onclick="event.stopPropagation();openWork('${jsq(dir)}')">＋</button>` : ""}
+      </div>`;
+    }).join("");
+    return head + projs + wtRows;
+  }).join("");
+  return (Tasks.tasksError ? `<div class="tasks-inline-state">${stateBox(Tasks.tasksError, "error")}</div>` : "") +
+    (Tasks.auxError ? `<div class="tasks-inline-state">${stateBox(Tasks.auxError, "error")}</div>` : "") +
+    (S.tasks.length === 0 && Tasks.ccList.length === 0 && nodes.length === 0 ? stateBox("还没有任务或会话，点右上「派新任务」开始") : "") +
+    tkPinnedHtml() +
+    (nodes.length ? `<div class="section-title">需求（git 分支）</div>` : "") + treeHtml;
+}
+/** 置顶区（项目/分支两个视图共用）：daemon 持久化的长期会话，永远最顶 */
+function tkPinnedHtml() {
   const byId = new Map(S.tasks.map((t) => [t.id, t]));
   const ccById = new Map(Tasks.ccList.map((s) => [s.id, s]));
   const pinnedHtml = Tasks.pinned.map((p) => {
@@ -275,6 +344,34 @@ function renderTaskList() {
       <div class="body">${esc(p.title || p.ref)}</div>
       <div class="foot"><span style="flex:1"></span>${pinBtnHtml(p.kind, p.ref, p.project, p.title, p.cwd)}</div></div>`;
   }).join("");
+  return pinnedHtml ? `<div class="section-title"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 3 6 1-.8 4 2.3 2.3-4.1.9-1.7 5.7-1.2-5-3.8-2.2L6 7.8z"/></svg>置顶</div><div class="glist">${pinnedHtml}</div>` : "";
+}
+
+function renderTaskList() {
+  const el = $("#tk-list"); if (!el) return;
+  renderSessionTabs();   // 顺路刷 tab 栏（高亮/迟到的标签）
+  if (composingEl && el.contains(composingEl)) return;   // 筛选框组字中：跳过这轮，SSE/定时器下轮会补
+  // 重渲染会吃掉筛选框的焦点/光标——先存后还
+  const rqHadFocus = document.activeElement === $("#tk-rq");
+  if (!Tasks.auxLoaded && S.tasks.length === 0 && !Tasks.tasksError) { el.innerHTML = stateBox("正在载入任务…", "loading"); return; }
+  if (tkView === "recent") {
+    el.innerHTML = `
+      ${Tasks.tasksError ? `<div class="tasks-inline-state">${stateBox(Tasks.tasksError, "error")}</div>` : ""}
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+        <input type="text" id="tk-rq" placeholder="筛选：项目 / 标题 / 内容…" value="${esc(Tasks.rq)}" oninput="rcFilter(this.value)" style="flex:1;font-size:12px">
+        <span class="mono" id="tk-rc-meta" style="font-size:11px;color:var(--text-tertiary)">${rcFiltered().length} / ${Tasks.recent.length}</span>
+      </div>
+      <div id="tk-rc-cards" class="glist">${rcCardsHtml()}</div>`;
+    if (rqHadFocus) { const ni = $("#tk-rq"); ni.focus(); ni.setSelectionRange(ni.value.length, ni.value.length); }
+    return;
+  }
+  if (tkView === "branch") { el.innerHTML = tkBranchViewHtml(); return; }
+  const pinnedKeys = new Set(Tasks.pinned.map((p) => pinKey(p.kind, p.ref)));
+  const tasks = S.tasks.filter((t) => t.kind !== "routine");
+  const routine = S.tasks.filter((t) => t.kind === "routine");
+  const running = tasks.filter((t) => t.status === "running" && !pinnedKeys.has(pinKey("task", t.id)));
+  const external = externalSessions();
+  const activeCc = external.filter((s) => s.active && !pinnedKeys.has(pinKey("cc", s.id)));
 
   // 项目分组：历史任务 + 空闲旁观会话混排（时间倒序），隐藏的项目有新活动自动重现
   const byProject = new Map();
@@ -326,7 +423,7 @@ function renderTaskList() {
     (Tasks.auxError ? `<div class="tasks-inline-state">${stateBox(Tasks.auxError, "error")}</div>` : "") +
     (S.tasks.length === 0 && Tasks.ccList.length === 0
       ? stateBox("还没有任务或会话，点右上「派新任务」开始") : "") +
-    (pinnedHtml ? `<div class="section-title"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 3 6 1-.8 4 2.3 2.3-4.1.9-1.7 5.7-1.2-5-3.8-2.2L6 7.8z"/></svg>置顶</div><div class="glist">${pinnedHtml}</div>` : "") +
+    tkPinnedHtml() +
     (running.length || activeCc.length
       ? `<div class="section-title">正在进行</div><div class="glist">${running.map(taskCardHtml).join("")}${activeCc.map(ccRowHtml).join("")}</div>` : "") +
     (groups.length ? `<div class="section-title">项目</div>` : "") +

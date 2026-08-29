@@ -6,7 +6,7 @@
 
 Ownward 是给研发者用的本地 AI 工作台：从手机派任务，让 Claude Code、Codex 和 CodeBuddy 接力干活，再把散落在各个 Agent 中的执行事实收回自己的项目记忆。
 
-项目仍处于早期 alpha，命令行入口是 `own`。
+项目仍处于早期 alpha，命令行入口是 `ownward`。
 
 研发者用 AI 编程以后，真正麻烦的通常不是“模型不会写”，而是工作接不上：人离开电脑便无法跟进；Claude 限流后换 Codex，又得从头解释；不同 CLI 改过同一个项目，却没有一份完整记录；写周报时还要重新翻聊天和 Git 历史。
 
@@ -127,14 +127,14 @@ Ownward 不是 IDE，也不是 Agent 的安全沙箱。它负责工作连续性�
 
 ```bash
 # 在 Terminal 中启动 Claude Code，随时人工接管
-bin/own work ~/workspace/example "修复登录页闪退"
+bin/ownward work ~/workspace/example "修复登录页闪退"
 
 # 在隔离 worktree 中后台执行
-bin/own work ~/workspace/example "补全单元测试" --bg
-bin/own work ~/workspace/example "重构 utils 目录" --bg --codex
+bin/ownward work ~/workspace/example "补全单元测试" --bg
+bin/ownward work ~/workspace/example "重构 utils 目录" --bg --codex
 
-bin/own tasks
-bin/own done <id>
+bin/ownward tasks
+bin/ownward done <id>
 ```
 
 后台任务默认在隔离 worktree 中运行。worktree 能减少误改主 checkout 的风险，但不是权限沙箱。

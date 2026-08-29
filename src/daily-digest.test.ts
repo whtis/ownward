@@ -15,10 +15,10 @@ describe("digestRetryDecision", () => {
     expect(digestRetryDecision(st, d, "02:30", t("02:30"))).toBe("wait");
     expect(digestRetryDecision(st, d, "03:00", t("03:00"))).toBe("run");
   });
-  test("次数用尽或过了 10:00 → give-up；已放弃 → done", () => {
+  test("次数用尽或过了 18:00 → give-up；已放弃 → done", () => {
     const base = { date: d, lastAt: new Date(t("01:00")).toISOString() };
     expect(digestRetryDecision({ digestRetry: { ...base, attempts: DIGEST_MAX_ATTEMPTS } }, d, "03:00", t("03:00"))).toBe("give-up");
-    expect(digestRetryDecision({ digestRetry: { ...base, attempts: 2 } }, d, "10:01", t("10:01"))).toBe("give-up");
+    expect(digestRetryDecision({ digestRetry: { ...base, attempts: 2 } }, d, "18:01", t("18:01"))).toBe("give-up");
     expect(digestRetryDecision({ digestRetry: { ...base, attempts: 2, gaveUp: true } }, d, "03:00", t("03:00"))).toBe("done");
   });
   test("昨天的重试记录不影响今天", () => {

@@ -58,6 +58,10 @@
     "codexModel": "",
     "codebuddyBin": "codebuddy"
   },
+  "git": {
+    "provider": "github",
+    "host": ""
+  },
   "dispatch": {
     "worktreeRoot": "~/.ownward-worktrees",
     "watchSec": 60,

@@ -6,6 +6,7 @@ import { basename, isAbsolute, join, normalize, resolve, sep } from "path";
 import { lookup } from "dns/promises";
 import { listActions, resolveAction, setActionState } from "./actions.ts";
 import { chatBinding, deleteChat, getChat, listChats, providers, renameChat, resolveChatBinding, saveChatCandidate, streamChat } from "./chat.ts";
+import { withBranches, worktreeBranches } from "./git-branch.ts";
 import { loadTasks } from "./dispatch.ts";
 import { chatMeta, markRead, touchChat } from "./lark-state.ts";
 import { RESEARCH_DIR, VAULT_ROOT } from "./paths.ts";
@@ -169,6 +170,66 @@ function saveProjects(list: { name: string; dir: string }[]) {
   writeFileSync(PROJECTS_FILE, JSON.stringify(list, null, 2));
 }
 
+// 项目候选集：收藏 + 近期任务/会话目录并集。收藏是手动维护的（开源化重置后常年一条），
+// 派发下拉的真实价值来自「你最近在哪些目录干过活」——从活动数据自动喂；/api/projects 与 /api/branches 共用
+async function projectCandidates(): Promise<{ name: string; dir: string }[]> {
+  const fav = loadProjects();
+  const seen = new Set<string>();
+  const out: { name: string; dir: string }[] = [];
+  const allowedRoots = (cfg.architecture?.allowedRoots ?? []).flatMap((root) => {
+    try { const actual = realpathSync(resolve(expandHome(root))); return statSync(actual).isDirectory() ? [actual] : []; }
+    catch { return []; }
+  });
+  let wtRoot = expandHome(cfg.dispatch?.worktreeRoot || "~/.ownward-worktrees");
+  try { wtRoot = realpathSync(wtRoot); } catch { /* 尚未创建时沿用展开路径 */ }
+  const push = (dir?: string | null, name?: string) => {
+    if (!dir) return;
+    let actual: string;
+    try { actual = realpathSync(resolve(expandHome(dir))); if (!statSync(actual).isDirectory()) return; }
+    catch { return; }
+    if (!allowedRoots.some((root) => isWithin(root, actual)) || seen.has(actual)) return;
+    if (isStrictlyWithin(wtRoot, actual) || /-\d{8}-[a-z0-9]{4}$/.test(actual)) return;  // 任务临时 worktree 不进候选
+    seen.add(actual);
+    out.push({ name: name || basename(actual) || actual, dir: actual });
+  };
+  for (const project of fav) push(project.dir, project.name);
+  for (const t of [...loadTasks()].reverse()) {
+    push((t as any).projectDir);
+    for (const dir of (t as any).extraDirs ?? []) push(dir);
+  }
+  try {
+    const { SessionRepository } = await import("./sessions/repository.ts");
+    for (const session of new SessionRepository(DATA).list().reverse()) {
+      push(session.cwd);
+      for (const dir of session.extraDirs ?? []) push(dir);
+    }
+  } catch { /* 仓库损坏时仍保留任务与历史会话 fallback */ }
+  try {
+    const { listCcSessions } = await import("./cc-sessions.ts");
+    for (const s of listCcSessions(30)) push((s as any).cwd);
+  } catch { /* 会话列表失败不影响收藏部分 */ }
+  return out;
+}
+
+/** 「按分支」视图的 worktree 补全：对每个项目候选扫 git worktree list，得 分支 → 项目/worktree 平铺行。
+ *  同一仓库的多个项目候选（互为 worktree）会扫出同一份集合，按路径重合去重只记一次；任务临时 worktree 不进映射。 */
+async function branchWorktrees(): Promise<{ branch: string; project: string; dir: string; path: string; isMain: boolean }[]> {
+  let wtRoot = expandHome(cfg.dispatch?.worktreeRoot || "~/.ownward-worktrees");
+  try { wtRoot = realpathSync(wtRoot); } catch { /* 尚未创建时沿用展开路径 */ }
+  const seenRepo = new Set<string>();
+  const out: { branch: string; project: string; dir: string; path: string; isMain: boolean }[] = [];
+  const perDir = await Promise.all((await projectCandidates()).slice(0, 30).map(async ({ name, dir }) => ({ name, dir, wts: await worktreeBranches(dir) })));
+  for (const { name, dir, wts } of perDir) {
+    if (wts.some((w) => seenRepo.has(w.path))) continue;   // 同仓库已由别的项目目录扫出
+    for (const w of wts) {
+      seenRepo.add(w.path);
+      if (isStrictlyWithin(wtRoot, w.path) || /-\d{8}-[a-z0-9]{4}$/.test(w.path)) continue;
+      out.push({ branch: w.branch, project: name, dir, path: w.path, isMain: w.isMain });
+    }
+  }
+  return out;
+}
+
 // open_id → 姓名缓存：持久化 + 负缓存（外部租户查不到就记空，不再反复重查——这是切会话慢的主因之一）
 const NAMES_FILE = join(DATA, "lark-names.json");
 let nameCache: Map<string, string> | null = null;
@@ -247,7 +308,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     if (t.logFile && existsSync(t.logFile)) {
       return json({ ok: true, text: tailRead(t.logFile, 60 * 1024) });
     }
-    return json({ ok: true, text: "(terminal 模式任务：过程在 Terminal 窗口/Claude transcript 里，结束后运行 own done 收割)" });
+    return json({ ok: true, text: "(terminal 模式任务：过程在 Terminal 窗口/Claude transcript 里，结束后运行 ownward done 收割)" });
   }
 
   // ---- terminal 任务底层 CC 会话 id（app 内直接旁观该 terminal 任务的 Claude 会话）----
@@ -391,32 +452,6 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
       log(`workbench: lark reply sent to ${body.chat_id}`);
       return json({ ok: true, msg: "已发送" });
     } catch (e) { return json({ ok: false, msg: String(e) }, 500); }
-  }
-
-  // ---- 飞书夜间收割：当天相关消息，默认全纳入工作总结（取消勾选 = 排除） ----
-  if (p === "/api/lark/digest") {
-    const { larkDailyFor, latestLarkDailyDate } = await import("./lark-digest.ts");
-    const date = url.searchParams.get("date") || latestLarkDailyDate();
-    return json({ date, messages: larkDailyFor(date) });
-  }
-  if (req.method === "POST" && p === "/api/lark/digest/toggle") {
-    const body = await req.json() as { date: string; id: string; selected: boolean };
-    const { toggleLarkMsg } = await import("./lark-digest.ts");
-    return json({ ok: toggleLarkMsg(body.date, body.id, body.selected), msg: body.selected ? "已纳入" : "已移出" });
-  }
-  if (req.method === "POST" && p === "/api/lark/digest/select-all") {
-    const body = await req.json() as { date: string; selected: boolean };
-    const { selectAllLarkMsgs } = await import("./lark-digest.ts");
-    const n = selectAllLarkMsgs(body.date, body.selected);
-    return json({ ok: true, msg: body.selected ? `已全选 ${n} 条` : "已全部取消" });
-  }
-  if (req.method === "POST" && p === "/api/lark/digest/pull") {
-    // 手动触发收割（默认结算刚结束的一天；?today=1 拉今天此刻之前的，便于即时预览）
-    const { pullDailyLark } = await import("./sources/lark.ts");
-    try {
-      const r = await pullDailyLark({ today: url.searchParams.get("today") === "1" });
-      return json({ ok: true, date: r.date, count: r.count, msg: `已收 ${r.count} 条（${r.date}）` });
-    } catch (e) { return json({ ok: false, msg: String(e instanceof Error ? e.message : e) }, 500); }
   }
 
   // ---- macOS 定时任务 ----
@@ -630,46 +665,9 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   }
 
   // ---- 项目启动器 ----
-  // 收藏 + 近期任务/会话目录并集：收藏是手动维护的（开源化重置后常年一条），
-  // 派发下拉的真实价值来自「你最近在哪些目录干过活」——从活动数据自动喂
-  if (p === "/api/projects") {
-    const fav = loadProjects();
-    const seen = new Set<string>();
-    const out: { name: string; dir: string }[] = [];
-    const allowedRoots = (cfg.architecture?.allowedRoots ?? []).flatMap((root) => {
-      try { const actual = realpathSync(resolve(expandHome(root))); return statSync(actual).isDirectory() ? [actual] : []; }
-      catch { return []; }
-    });
-    let wtRoot = expandHome(cfg.dispatch?.worktreeRoot || "~/.ownward-worktrees");
-    try { wtRoot = realpathSync(wtRoot); } catch { /* 尚未创建时沿用展开路径 */ }
-    const push = (dir?: string | null, name?: string) => {
-      if (!dir) return;
-      let actual: string;
-      try { actual = realpathSync(resolve(expandHome(dir))); if (!statSync(actual).isDirectory()) return; }
-      catch { return; }
-      if (!allowedRoots.some((root) => isWithin(root, actual)) || seen.has(actual)) return;
-      if (isStrictlyWithin(wtRoot, actual) || /-\d{8}-[a-z0-9]{4}$/.test(actual)) return;  // 任务临时 worktree 不进候选
-      seen.add(actual);
-      out.push({ name: name || basename(actual) || actual, dir: actual });
-    };
-    for (const project of fav) push(project.dir, project.name);
-    for (const t of [...loadTasks()].reverse()) {
-      push((t as any).projectDir);
-      for (const dir of (t as any).extraDirs ?? []) push(dir);
-    }
-    try {
-      const { SessionRepository } = await import("./sessions/repository.ts");
-      for (const session of new SessionRepository(DATA).list().reverse()) {
-        push(session.cwd);
-        for (const dir of session.extraDirs ?? []) push(dir);
-      }
-    } catch { /* 仓库损坏时仍保留任务与历史会话 fallback */ }
-    try {
-      const { listCcSessions } = await import("./cc-sessions.ts");
-      for (const s of listCcSessions(30)) push((s as any).cwd);
-    } catch { /* 会话列表失败不影响收藏部分 */ }
-    return json(out.slice(0, 30));
-  }
+  if (p === "/api/projects") return json((await projectCandidates()).slice(0, 30));
+  // 分支 → 项目/worktree 映射：「按分支」视图把还没任务的 worktree 项目补进对应需求节点
+  if (p === "/api/branches") return json({ worktrees: await branchWorktrees() });
   if (req.method === "POST" && p === "/api/projects/add") {
     const body = await req.json() as { name?: string; dir: string };
     const dir = expandHome((body.dir || "").trim());
@@ -891,7 +889,8 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     const { listCodexSessions } = await import("./codex-sessions.ts");
     const { devObservationDto } = await import("./kernel/sessions/dev-observation.ts");
     const all = [...listCcSessions(), ...listCodexSessions()].sort((a, b) => b.mtime - a.mtime);
-    return json(all.map((meta: any) => devObservationDto(meta)));
+    // 附带 branch（按 cwd 解析，带缓存）：前端「按分支」视图分组用
+    return json(await withBranches(all.map((meta: any) => devObservationDto(meta))));
   }
   if (req.method === "POST" && p === "/api/cc/adopt-capability") {
     try {

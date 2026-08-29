@@ -7,6 +7,11 @@ const Pr = {
   timer: null,
 };
 
+/** Git 官方橙色 branch 图标，用于 PR 外链入口 */
+const GIT_ICON = `<svg width="12" height="12" viewBox="0 0 16 16" style="vertical-align:-1px;margin-right:4px;fill:#F05032" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <path d="M11.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122V6A2.5 2.5 0 0110 8.5H6a1 1 0 00-1 1v1.128a2.251 2.251 0 11-1.5 0V5.372a2.25 2.25 0 111.5 0v1.836a2.493 2.493 0 011.25-2.143A2.5 2.5 0 019.5 4.5h1.628a2.249 2.249 0 01-2.25-2.25zM4.25 7.25a.75.75 0 100 1.5.75.75 0 000-1.5zM3.5 10.75a.75.75 0 11-1.5 0 .75.75 0 011.5 0z"/>
+</svg>`;
+
 TABS.pr = {
   init(root) {
     root.innerHTML = `
@@ -38,7 +43,7 @@ TABS.pr = {
   hide() { clearInterval(Pr.timer); Pr.timer = null; },
 };
 
-// 移动端 master-detail：媒体查询 + data 属性驱动（与 lark/chat 对称）——
+// 移动端 master-detail：媒体查询 + data 属性驱动（与 chat 对称）——
 // 内联 display 切换在窗口拉宽回桌面时会残留（列表列永久消失），CSS 方案 resize 自愈
 (function () {
   const st = document.createElement("style");
@@ -72,8 +77,8 @@ async function prLoadList(force) {
     if (!el) return;
     const msg = String(e).replace(/^Error: /, "");
     el.innerHTML = stateBox(
-      msg.toLowerCase().includes("gh") || msg.includes("not logged")
-        ? "需要 gh CLI 已登录（gh auth login）"
+      msg.toLowerCase().includes("glab") || msg.includes("not logged") || msg.includes("401")
+        ? "需要 glab CLI 已登录（glab auth login --hostname <系统 tab 配置的 GitLab host>）"
         : msg || "PR 列表载入失败",
       "error"
     );
@@ -94,11 +99,19 @@ function prStateTag(p) {
   return `<span class="tag"${tone ? ` data-tone="${tone}"` : ""}>${esc(label)}</span>`;
 }
 
+/** repo#number 标签：有 url 时外链到 GitLab（点它跳走，点卡片其余区域仍进详情） */
+function prRepoTag(p) {
+  const label = `${esc(p.repo)}#${p.number}`;
+  const safe = safeUrl(p.url || "");
+  if (safe) return `<a class="mono" href="${esc(safe)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:11px;color:var(--text-tertiary);display:inline-flex;align-items:center">${GIT_ICON}${label}</a>`;
+  return `<span class="mono" style="font-size:11px;color:var(--text-tertiary)">${label}</span>`;
+}
+
 function prCardHtml(p) {
   const sel = Pr.sel?.repo === p.repo && Pr.sel?.num === p.number;
   return `<div class="card clickable" data-selected="${sel}" onclick="prSelect('${jsq(p.repo)}',${p.number})">
     <div class="top">
-      <span class="mono" style="font-size:11px;color:var(--text-tertiary)">${esc(p.repo)}#${p.number}</span>
+      ${prRepoTag(p)}
       ${prStateTag(p)}
       <span class="right">${ageText(p.updatedAt)}</span>
     </div>
@@ -197,7 +210,7 @@ function renderPrDetail(d) {
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <button class="button ghost sm" onclick="prMobileSync(false)">← 返回</button>
       <span style="flex:1"></span>
-      ${safeGhUrl ? `<a href="${esc(safeGhUrl)}" target="_blank" rel="noopener" class="button ghost sm">在 GitHub 打开</a>` : ""}
+      ${safeGhUrl ? `<a href="${esc(safeGhUrl)}" target="_blank" rel="noopener" class="button ghost sm">${GIT_ICON}在 GitHub 打开</a>` : ""}
       <button class="button ghost sm" id="pr-diff-btn" onclick="prViewDiff('${jsq(d.repo)}',${d.number})">看 Diff</button>
     </div>
     <h2 style="font-size:15px;margin:0 0 6px;line-height:1.4">${esc(d.title)}</h2>

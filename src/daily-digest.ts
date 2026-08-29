@@ -1,20 +1,18 @@
-// 一日总结：本地 24:00（次日 00:00）聚合刚结束这天的 feed / 任务 / 已完成 Action / 会议 → AI 写日报 →
-// 落 vault 的 daily/ + 推送。每天只成功一次（state.lastDigestDate 去重）；AI 失败（02:00 撞上限额是常态）
-// 不占坑，改为 state.digestRetry 有界重试：每小时一次，最多 DIGEST_MAX_ATTEMPTS 次且不晚于 DIGEST_RETRY_UNTIL。
+// 一日总结：每日 12:30（midday 统一任务）聚合前一日的 inbox 收割 / 任务 / 已完成 Action → AI 写日报 →
+// 落 vault 的 daily/ + 推送。涉及需求的编码工作按需求（git 分支/单号）维度分组。
+// 每天只成功一次（state.lastDigestDate 去重）；AI 失败不占坑，改为 state.digestRetry 有界重试：
+// 每小时一次，最多 DIGEST_MAX_ATTEMPTS 次且不晚于 DIGEST_RETRY_UNTIL。
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { listActions } from "./actions.ts";
 import { loadTasks } from "./dispatch.ts";
-import { readFeed } from "./feed.ts";
-import { hasLarkDaily, larkDailyFor, selectedLarkForDigest } from "./lark-digest.ts";
 import { llmJson } from "./llm.ts";
 import { notify } from "./notify.ts";
 import { dailyDir, inboxDir } from "./paths.ts";
-import { cfg, ensureDir, fmt, loadState, log, updateState } from "./util.ts";
-import { connectorEnabled } from "./connector-config.ts";
+import { ensureDir, fmt, loadState, log, updateState } from "./util.ts";
 
 export const DIGEST_MAX_ATTEMPTS = 8;
-export const DIGEST_RETRY_UNTIL = "10:00";   // 本地时间；过了这点还没成就放弃，等手动 POST /api/digest/run?date=
+export const DIGEST_RETRY_UNTIL = "18:00";   // 本地时间；12:30 首跑失败后每小时重试，过了这点还没成就放弃，等手动 POST /api/digest/run?date=
 
 export interface DigestRetry { date: string; attempts: number; lastAt: string; gaveUp?: boolean }
 
@@ -57,18 +55,10 @@ export async function runDailyDigest(force = false, dateOverride?: string): Prom
   const inbox = existsSync(inboxFile) ? readFileSync(inboxFile, "utf8").slice(0, 20_000) : "";
   const tasks = loadTasks().filter((t) => fmt(new Date(t.startedAt), "date") === today && !isPersonal(t.project));
   const doneActions = listActions().filter((a) => a.state === "resolved" && fmt(new Date(a.updatedAt), "date") === today);
-  // 飞书夜间收割的当天消息（默认全纳入，AI 判相关；用户取消勾选的已排除）。
-  // 手动触发时目标日是「今天」，桶要到明晚才结算——先即时收割一把今天的，别回退去拿昨天的旧料。
-  if (force && today === firedOn && connectorEnabled(cfg, "lark") && !larkDailyFor(today).length) {
-    try {
-      const { pullDailyLark } = await import("./sources/lark.ts");
-      await pullDailyLark({ today: true });
-    } catch (e) { log(`digest: 即时收割飞书失败，继续无飞书素材生成: ${e}`); }
-  }
-  const larkPicks = selectedLarkForDigest(today);
 
-  // 别把 larkPicks 算进「今天干活了」的判据：现在默认全纳入，光有别人发来的消息不代表我工作了
-  const hasWork = inbox.split("\n## ").length > 1 || tasks.length > 0;
+  // 飞书块（| lark |）不算「我今天干活了」的证据：光有别人找我，不代表我工作了
+  const workBlocks = inbox.split("\n## ").slice(1).filter((b) => !b.includes(" | lark |"));
+  const hasWork = workBlocks.length > 0 || tasks.length > 0;
   if (!hasWork) {
     log("digest: 今天没有工作记录（inbox 空、无工作任务），不生成日报");
     if (!force) markDone();   // 没素材不是失败，今天不用再试
@@ -81,22 +71,20 @@ export async function runDailyDigest(force = false, dateOverride?: string): Prom
     `【红线】只写公司工作；以下私人项目即使出现在素材里也不能写：${personal.join("、")}。`,
     memoryPack("digest"),
     `{"summary": "<两三句话的当日概览>",`,
-    ` "coding": "<编码工作：做了什么项目/任务，1-3 条，无则空字符串>",`,
+    ` "requirements": [{"name": "<需求标识：git 分支或需求单号（如 TPSSO-52744），认不出就用项目名>", "work": "<这个需求下我做了什么，一两句>"}],`,
+    ` "other_coding": "<不属于任何明确需求的编码工作，无则空字符串>",`,
     ` "comms": "<协作沟通：处理了什么消息/邮件/PR，无则空字符串>",`,
     ` "pending": "<还挂着的事/明天要跟的，无则空字符串>"}`,
     "",
     "只写「我做的事」；素材不足就少写，禁止把别人的动态或推测写成我的工作。",
+    "涉及需求的编码工作按需求维度分组进 requirements（同一分支/单号的工作并成一条）；分不出需求归属的进 other_coding。",
+    "inbox 里 | lark | 块是飞书里别人发给我的协作消息（AI 已粗筛），只把与我工作直接相关的往来写进 comms，闲聊不写。",
     `=== 今日工作收割（第一人称证据）===`,
     inbox || "(无)",
     `=== 今日工作任务（${tasks.length}）===`,
-    ...tasks.map((t) => `- [${t.project}] ${t.task.slice(0, 100)} → ${t.status}${t.exitCode !== undefined ? ` (exit ${t.exitCode})` : ""}`),
+    ...tasks.map((t) => `- [${t.project}] ${t.task.slice(0, 100)}${t.branch ? `（分支 ${t.branch}）` : ""} → ${t.status}${t.exitCode !== undefined ? ` (exit ${t.exitCode})` : ""}`),
     `=== 完成的行动（${doneActions.length}）===`,
     ...doneActions.map((a) => `- ${a.title} (${a.resolution})`),
-    `=== 当天飞书消息（${larkPicks.length}，别人发给我的，自动收割）===`,
-    "从中挑与我工作直接相关的协作往来写进 comms（谁找我对齐/评审/求助了什么）；闲聊、通知、与我无关的群消息一律忽略。",
-    // (m.text || "")：脏桶（缺 text 的历史数据）只降级成空预览，别让一条坏消息炸掉全天日报——
-    // 日报入口先占坑防重试，崩一次当天就没了
-    ...larkPicks.map((m) => `- [${m.chat_name}] ${m.sender}: ${(m.text || "").slice(0, 120)}`),
   ].join("\n");
 
   const res = await llmJson(prompt);
@@ -112,6 +100,9 @@ export async function runDailyDigest(force = false, dateOverride?: string): Prom
   const dir = dailyDir();
   ensureDir(dir);
   const file = join(dir, `${today}.md`);
+  const reqs = (Array.isArray(res.requirements) ? res.requirements : [])
+    .filter((r: any) => r?.name && r?.work)
+    .map((r: any) => ({ name: String(r.name).slice(0, 60), work: String(r.work) }));
   const md = [
     "---",
     `date: ${today}`,
@@ -121,7 +112,8 @@ export async function runDailyDigest(force = false, dateOverride?: string): Prom
     `# ${today} 日报`,
     "",
     res.summary,
-    ...(res.coding ? ["", "## 编码", res.coding] : []),
+    ...(reqs.length ? ["", "## 需求", ...reqs.flatMap((r) => ["", `### ${r.name}`, r.work])] : []),
+    ...(res.other_coding ? ["", "## 其他编码", res.other_coding] : []),
     ...(res.comms ? ["", "## 协作", res.comms] : []),
     ...(res.pending ? ["", "## 待跟进", res.pending] : []),
     "",
@@ -135,36 +127,7 @@ export async function runDailyDigest(force = false, dateOverride?: string): Prom
 
   // 顺带提取候选记忆（只进 _candidates/，人工确认后合并进正式记忆）
   extractCandidates(prompt).then((f) => {
-    if (f) notify("🧠 今日记忆候选已生成，笔记 tab → memory/_candidates 确认", { source: "heartbeat", noLark: true });
+    if (f) notify("🧠 今日记忆候选已生成，角色 tab → memory/_candidates 确认", { source: "heartbeat", noLark: true });
   }).catch((e) => log(`memory candidates failed: ${e}`));
   return file;
-}
-
-/** daemon 每分钟调：本地 24:00（次日 00:00）后自动生成「刚结束昨天」的日报；昨天是周末不打工不写日报 */
-export function sweepDigest() {
-  if (!cfg.digest?.enabled) return; // 自动日报默认关（要烧一次 AI）；手动 POST /api/digest/run 不受此限
-  const at = cfg.digest?.time || "00:00"; // 触发时点：默认本地 24:00（= 00:00），到点后靠 lastDigestDate 保证当天只成功一次
-  if (fmt(new Date(), "time") < at) return;
-  const firedOn = fmt(new Date(), "date");
-  const decision = digestRetryDecision(loadState(), firedOn, fmt(new Date(), "time"), Date.now());
-  if (decision === "done" || decision === "wait") return; // 今天已成功 / 上次失败不到一小时（也防等桶的日志刷屏）
-  if (decision === "give-up") {
-    log(`digest: 今天重试已用尽（${DIGEST_MAX_ATTEMPTS} 次或过了 ${DIGEST_RETRY_UNTIL}），放弃；可手动 POST /api/digest/run?date=<昨天>`);
-    updateState((s) => { if (s.digestRetry?.date === firedOn) s.digestRetry.gaveUp = true; });
-    return;
-  }
-  // 要总结的是刚结束的「昨天」（与 runDailyDigest 一致，用日历昨天 = 触发日 − 1 天，不用会漂的 12h 偏移）；
-  // 昨天落在周末（周六/周日）就不打工、不写日报。周一全天「昨天=周日」→ 一直跳过，不再中午冒；
-  // 周一的日报顺延到周二 00:00 用整天素材正常发。
-  const day = fmt(new Date(Date.now() - 24 * 3600_000), "date");
-  const dow = new Date(`${day}T00:00:00`).getDay();
-  if (dow === 0 || dow === 6) return;
-  // 飞书收割（sweepLarkDaily）和日报同在 00:00 的分钟循环里赛跑，桶没落盘就取材会扑空——
-  // 昨天的桶还没结算就先等，最多 15 分钟；超时照常生成（lark 挂了不能永远堵住日报）。
-  if (connectorEnabled(cfg, "lark") && !hasLarkDaily(day)) {
-    const toMin = (s: string) => { const [h, m] = s.split(":").map(Number); return h * 60 + m; };
-    if (toMin(fmt(new Date(), "time")) - toMin(at) < 15) return;
-    log("digest: 等飞书收割落盘超时（15 分钟），无飞书素材生成");
-  }
-  runDailyDigest().catch((e) => log(`digest failed: ${e}`));
 }

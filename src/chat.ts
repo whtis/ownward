@@ -336,10 +336,9 @@ export function claudeArgs(chat: AiChat, prompt: string, system: string, hasImag
     ...(hasImages ? ["-p", "--input-format", "stream-json"] : ["-p", prompt]),
     "--model", chat.model,
     "--output-format", "stream-json", "--include-partial-messages", "--verbose",
-    // 联网查证要几轮（搜索→抓页→回答），给足；文件/命令类工具仍全禁
-    "--max-turns", "8",
-    "--allowedTools", "WebSearch", "WebFetch",
-    "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "Task", "TodoWrite", "NotebookEdit",
+    // 联网查证 + 读项目代码（绑定项目时能看源码）：效果对齐原生 CLI
+    "--max-turns", "20",
+    "--allowedTools", "WebSearch", "WebFetch", "Read", "Grep", "Glob", "Bash",
     "--append-system-prompt", system,
   ];
   if (chat.claudeSessionId) args.push("--resume", chat.claudeSessionId);
@@ -529,8 +528,10 @@ export async function saveChatCandidate(
 async function* runClaude(chat: AiChat, prompt: string, system: string, images: PreparedImage[] = []): AsyncGenerator<ChatEvent, string> {
   const withImages = images.length > 0;
   const bin = chat.provider === "codebuddy" ? (cfg.llm?.codebuddyBin || "codebuddy") : (cfg.llm?.claudeBin || "claude");
+  // 工作目录：绑定项目时切到项目目录（能读源码），否则用 CHATS_DIR
+  const workDir = bindSnapshot(chat).primaryProject || CHATS_DIR;
   const proc = Bun.spawn([bin, ...claudeArgs(chat, prompt, system, withImages)], {
-    cwd: CHATS_DIR, stdout: "pipe", stderr: "pipe", stdin: withImages ? "pipe" : "ignore",
+    cwd: workDir, stdout: "pipe", stderr: "pipe", stdin: withImages ? "pipe" : "ignore",
     env: { ...process.env, DISABLE_OMC: "1" },
   });
   if (withImages) {
@@ -595,7 +596,11 @@ async function* runCodex(chat: AiChat, text: string, system: string, imageFiles:
   const imgArgs = imageFiles.map((f) => `--image=${f}`);
   // 推理力度（fast 聊天体验）：config chat.codexEffort ∈ minimal/low/medium/high，空=账号默认
   const effort = ["minimal", "low", "medium", "high"].includes(cfg.chat?.codexEffort) ? [`-c`, `model_reasoning_effort=${cfg.chat.codexEffort}`] : [];
-  const base = ["exec", "--skip-git-repo-check", "-C", CHATS_DIR, "--sandbox", "read-only", ...effort, ...imgArgs];
+  // 工作目录：绑定项目时切到项目目录（能读源码），否则用 CHATS_DIR
+  const workDir = bindSnapshot(chat).primaryProject || CHATS_DIR;
+  // 沙箱：绑定项目时 workspace-write（可改代码跑命令），否则 read-only
+  const sandbox = bindSnapshot(chat).primaryProject ? "workspace-write" : "read-only";
+  const base = ["exec", "--skip-git-repo-check", "-C", workDir, "--sandbox", sandbox, ...effort, ...imgArgs];
   // codex-alt = 第二个 ChatGPT 账号（独立 CODEX_HOME / 独立额度）
   const env = chat.provider === "codex-alt"
     ? { CODEX_HOME: `${process.env.HOME}/.codex-alt` }
@@ -604,7 +609,7 @@ async function* runCodex(chat: AiChat, text: string, system: string, imageFiles:
   const withModel = chat.model && chat.model !== "default";
 
   let r = await run([bin, ...base, ...(withModel ? ["-m", chat.model] : []), prompt],
-    { timeoutMs: 300_000, cwd: CHATS_DIR, env });
+    { timeoutMs: 300_000, cwd: workDir, env });
   // ChatGPT 账号只能用账号默认模型：指定 -m 会 400，自动去掉重试一次
   if (r.code !== 0 && withModel && /model.*not supported|invalid_request/i.test(r.stderr || r.stdout)) {
     log(`chat: codex 模型 ${chat.model} 不支持，回退默认`);

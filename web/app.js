@@ -1,5 +1,5 @@
 "use strict";
-/* ownward web workbench — 核心：状态、SSE、tab 路由、通知流。各 tab 在 today/tasks/chat/notes/system.js */
+/* ownward web workbench — 核心：状态、SSE、tab 路由、通知流。各 tab 在 today/tasks/chat/summary/system.js */
 
 /* ============ 工具 ============ */
 const $ = (s, el) => (el || document).querySelector(s);
@@ -320,6 +320,7 @@ const TABS = {};  // name → {init(root), show?, hide?} 由各 tab 文件注册
 const inited = new Set();
 function switchTab(name) {
   if (!TABS[name]) return;
+  if (tabHidden(name)) return;  // tab 已隐藏：路由层兜底，快捷键/⌘K 都进不去
   const prev = S.tab;
   if (prev && TABS[prev]?.hide) TABS[prev].hide();
   S.tab = name;
@@ -429,6 +430,22 @@ function pushFeed(entry) {
   }
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "Ownward"; });
+
+/* 通知流隐藏开关：纯前端偏好，localStorage 持久化（键值风格照 skin.js）。
+ * 只藏渲染层入口——桌面 tab 和移动菜单共用 data-tab="feed"，一条选择器全盖住；
+ * SSE 照常进 S.feed，后端与数据不动，恢复开关在系统 tab（system.js）。 */
+// 可隐藏的 tab：默认全部隐藏（用户要求先把通知流/对话/角色入口收起来），
+// 系统设置里勾选 = 显式写 "0" 恢复。feed 沿用旧键，不动已有用户状态。
+const TOGGLABLE_TABS = ["feed", "chat", "roles", "lark", "notes"];   // lark/notes 默认隐藏（D5：入口默认收起，系统 tab 界面区勾选恢复）
+const tabHiddenKey = (name) => (name === "feed" ? "ownward-feed-hidden" : `ownward-tab-${name}-hidden`);
+const tabHidden = (name) => TOGGLABLE_TABS.includes(name) && localStorage.getItem(tabHiddenKey(name)) !== "0";   // 只有可隐藏 tab 参与判断；其他 tab 永不隐藏
+function applyTabVisibility() {
+  for (const name of TOGGLABLE_TABS) $$(`[data-tab="${name}"]`).forEach((b) => (b.style.display = tabHidden(name) ? "none" : ""));
+}
+function setTabHidden(name, hidden) {
+  localStorage.setItem(tabHiddenKey(name), hidden ? "1" : "0");   // 默认隐藏，恢复是显式写 0
+  applyTabVisibility();
+}
 
 /* ============ SSE ============ */
 /** 顶栏状态：渐进披露——一切正常只有一个安静的点，异常才说人话（离线/待分流堆积） */
@@ -695,7 +712,7 @@ function bindTopbar() {
     }
     // 新增的 tab 一律追加在末尾：改既有数字等于把用户的肌肉记忆洗掉一次
     const idx = "1234567890".indexOf(e.key);
-    if (idx >= 0) switchTab(["today", "feed", "tasks", "chat", "notes", "system", "roles", "lark", "mail", "pr"][idx]);
+    if (idx >= 0) switchTab(["today", "feed", "tasks", "chat", "", "system", "roles", "summary", "mail", "pr"][idx]);
   });
 
   $("#skin-btn").addEventListener("click", (e) => {
@@ -755,10 +772,10 @@ function bindDirPicker() {
 
 /* ============ ⌘K 全局搜索/命令面板 ============ */
 /** 主仓 SwiftUI 有 CommandPalette（跨域模糊搜 + 快捷动作），网页化时掉了。
- *  精简版：tab 跳转 + 快捷动作 + 任务/对话/笔记三个域的标题搜索；选中即跳。 */
+ *  精简版：tab 跳转 + 快捷动作 + 任务/对话两个域的标题搜索；选中即跳。 */
 const PAL = { items: [], filtered: [], sel: 0, open: false };
 function palStatic() {
-  const tabs = [["today", "今日"], ["tasks", "任务"], ["chat", "对话"], ["lark", "飞书"], ["mail", "邮件"], ["pr", "PR"], ["roles", "角色"], ["notes", "笔记"], ["feed", "通知流"], ["system", "系统"], ["settings", "设置"]];
+  const tabs = [["today", "今日"], ["tasks", "任务"], ["chat", "对话"], ["summary", "每日总结"], ["lark", "飞书"], ["mail", "邮件"], ["pr", "PR"], ["roles", "角色"], ["notes", "笔记"], ["feed", "通知流"], ["system", "系统"], ["settings", "设置"]].filter(([id]) => !tabHidden(id));
   return [
     ...tabs.map(([id, n]) => ({ label: `去 · ${n}`, hint: "tab", go: () => switchTab(id) })),
     { label: "派新任务", hint: "动作", go: () => window.openWork?.() },
@@ -778,15 +795,11 @@ async function palOpen() {
   ];
   palRender();
   input.focus();
-  // 对话/笔记异步补进来（面板已可用，不等网络）
-  const [chats, notes] = await Promise.all([
-    getJSON("/api/chat/list").catch(() => []),
-    getJSON("/api/vault/list").catch(() => []),
-  ]);
+  // 对话异步补进来（面板已可用，不等网络）
+  const chats = await getJSON("/api/chat/list").catch(() => []);
   if (!PAL.open) return;
   PAL.items.push(
     ...(chats || []).slice(0, 60).map((c) => ({ label: `对话 · ${c.title || c.id}`, hint: c.provider || "", go: () => { switchTab("chat"); if (typeof openChat === "function") openChat(c.id); } })),
-    ...(notes || []).slice(0, 120).map((n) => { const path = n.path || n; const name = String(path).split("/").pop(); return { label: `笔记 · ${name}`, hint: String(path), go: () => { switchTab("notes"); if (typeof openNoteFile === "function") openNoteFile(path); } }; }),
   );
   palRender();
 }
@@ -850,6 +863,7 @@ async function appInit() {
   bindTopbar();
   bindPalette();
   bindDirPicker();
+  applyTabVisibility();  // 隐藏时先把各 tab 入口藏掉（渲染层过滤，不动 HTML）
   let feedFailed = false, tasksFailed = false;
   const [feed, tasks, state, projects] = await Promise.all([
     getJSON("/api/feed?limit=150").catch(() => (feedFailed = true, [])),
@@ -860,6 +874,7 @@ async function appInit() {
   S.feed = feed.reverse(); S.feedError = feedFailed ? "通知流暂时无法载入" : ""; S.tasks = tasks; S.state = state; S.projects = projects;
   if (typeof Tasks !== "undefined") Tasks.tasksError = tasksFailed ? "任务列表暂时无法载入" : "";
   renderTopbar();
+  if (tabHidden(S.tab)) S.tab = "today";  // 上次停在已隐藏的 tab：回今日，别落空
   switchTab(S.tab in TABS ? S.tab : "today");
   connectSSE();
   setInterval(refreshTasks, 30000);

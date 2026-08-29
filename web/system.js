@@ -22,6 +22,25 @@ TABS.system = {
               <a class="button ghost" href="/strategy" style="justify-content:flex-start;text-decoration:none">策略页（strategy 开启时）</a>
               <button class="button ghost danger" id="sy-restart" style="justify-content:flex-start">重启 daemon（后端改动生效）</button>
             </div>
+            <div class="rail-section"><h3>界面</h3>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px"><input type="checkbox" id="sy-tab-feed"> 显示通知流 tab</label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:2px"><input type="checkbox" id="sy-tab-chat"> 显示对话 tab</label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:2px"><input type="checkbox" id="sy-tab-roles"> 显示角色 tab</label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:2px"><input type="checkbox" id="sy-tab-lark"> 显示飞书 tab</label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:2px"><input type="checkbox" id="sy-tab-notes"> 显示笔记 tab</label>
+              <div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">邮件 tab 显示哪些源：</div>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:4px"><input type="checkbox" id="sy-mail-gmail"> Gmail</label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:2px"><input type="checkbox" id="sy-mail-outlook"> Outlook（本地库）</label>
+              <div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">后台功能：</div>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:4px"><input type="checkbox" id="sy-feat-capture"> 自动收割（会话/任务/飞书，2h 一轮）</label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:2px"><input type="checkbox" id="sy-feat-digest"> 每日日报（12:30 生成前一日）</label>
+            </div>
+            <div class="rail-section"><h3>Git 提供商（PR/MR 工作台）</h3>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px"><input type="radio" name="sy-git-provider" id="sy-git-github" value="github"> GitHub（gh CLI）</label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-top:2px"><input type="radio" name="sy-git-provider" id="sy-git-gitlab" value="gitlab"> GitLab（glab CLI）</label>
+              <input type="text" id="sy-git-host" placeholder="GitLab 实例 host，如 git.example.com" style="width:100%;box-sizing:border-box;margin-top:6px;font-size:12px;display:none">
+              <button class="button secondary sm" id="sy-git-save" style="margin-top:6px">保存</button>
+            </div>
             <div class="rail-section"><h3>扩展 Vertical</h3><div id="sy-verticals"><span style="font-size:12px;color:var(--text-tertiary)">加载中…</span></div></div>
             <div class="rail-section">
               <h3>自演进（改 Ownward 自己）</h3>
@@ -74,6 +93,49 @@ TABS.system = {
     $("#sy-autolog").addEventListener("change", (e) => (Sys.autoLog = e.target.checked));
     // 高级诊断（全机任务）只在展开时按需拉一次，避免默认就糊一脸
     root.querySelector(".sys-advanced")?.addEventListener("toggle", function () { if (this.open && !Sys.allLoaded) { Sys.allLoaded = true; loadAllSchedules(); } });
+    // tab 显隐开关（偏好存 localStorage，逻辑在 app.js 的 tabHidden/setTabHidden）：勾选 = 显示，这里也是唯一恢复入口
+    for (const [id, tab, label] of [["sy-tab-feed", "feed", "通知流"], ["sy-tab-chat", "chat", "对话"], ["sy-tab-roles", "roles", "角色"], ["sy-tab-lark", "lark", "飞书"], ["sy-tab-notes", "notes", "笔记"]]) {
+      const el = $(`#${id}`);
+      el.checked = !tabHidden(tab);
+      el.addEventListener("change", () => { setTabHidden(tab, !el.checked); toast(el.checked ? `${label}已显示` : `${label}已隐藏`); location.reload(); });
+    }
+    // 邮件源显隐开关（localStorage 持久化，mail.js 消费）：勾选 = 显示
+    for (const [id, src, label] of [["sy-mail-gmail", "gmail", "Gmail"], ["sy-mail-outlook", "outlook", "Outlook"]]) {
+      const el = $(`#${id}`);
+      el.checked = mailSourceVisible(src);
+      el.addEventListener("change", () => {
+        setMailSourceVisible(src, el.checked);
+        toast(el.checked ? `${label} 源已显示` : `${label} 源已隐藏`);
+        syncMailSourceVisibility(); // mail tab 若在后台已挂载，立即生效
+      });
+    }
+    // 功能开关（服务端 data/features.json 持久化，默认全开；daemon 各 sweep 入口读它）
+    getJSON("/api/features").then((f) => {
+      for (const [id, key] of [["sy-feat-capture", "capture"], ["sy-feat-digest", "digest"]]) {
+        const el = $(`#${id}`); if (!el) continue;
+        el.checked = f?.[key] !== false;
+        el.addEventListener("change", async () => {
+          const r = await post("/api/features", { key, enabled: el.checked });
+          toast(r.ok ? (el.checked ? "已开启" : "已关闭") : (r.msg || "保存失败"));
+        });
+      }
+    }).catch(() => {});
+    // git 提供商（PR/MR 工作台 GitHub/GitLab）：读当前 → 勾选；gitlab 时才显示 host 输入
+    getJSON("/api/git/provider").then((g) => {
+      const syncHost = () => { $("#sy-git-host").style.display = $("#sy-git-gitlab").checked ? "" : "none"; };
+      $("#sy-git-github").checked = g?.provider !== "gitlab";
+      $("#sy-git-gitlab").checked = g?.provider === "gitlab";
+      $("#sy-git-host").value = g?.host || "";
+      syncHost();
+      $("#sy-git-github").addEventListener("change", syncHost);
+      $("#sy-git-gitlab").addEventListener("change", syncHost);
+      $("#sy-git-save").addEventListener("click", async () => {
+        const provider = $("#sy-git-gitlab").checked ? "gitlab" : "github";
+        const host = $("#sy-git-host").value.trim();
+        const r = await post("/api/git/provider", { provider, host });
+        toast(r.ok ? "已保存（下次刷新 PR 列表生效）" : (r.msg || "保存失败"));
+      });
+    }).catch(() => {});
     loadSystem();
   },
   show() {

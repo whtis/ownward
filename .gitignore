@@ -10,3 +10,7 @@ node_modules
 config.json
 prompts/owner.md
 .gstack/
+.ai-tracker/
+
+# 本地门禁词表（公司字面量，永远不进 git——公开仓里连门禁自身都不能含公司词）
+scripts/local-gates.d/

@@ -23,7 +23,7 @@ Ownward 已从个人工作台演进为一个可承载不同专业领域的本地
 ## 2. 设计原则
 
 1. **任务与会话是内核原语。** Task、Run、Session、Action、Event 是不同领域共同使用的基础能力，不整体插件化。
-2. **领域工作流不是内核。** Git worktree、diff、commit、PR、`own work` 和 `own evolve` 属于内置 `dev` Vertical。
+2. **领域工作流不是内核。** Git worktree、diff、commit、PR、`ownward work` 和 `ownward evolve` 属于内置 `dev` Vertical。
 3. **Provider 与 Vertical 分离。** Provider 回答“由哪个 Agent 执行”；Vertical 回答“在什么领域做什么”。领域 Vertical 不实现 Codex/Claude 调用。
 4. **Connector 只负责接入。** Connector 将外部变化规范化为 Event，Vertical 或内核策略决定如何处理。
 5. **依赖只能指向稳定契约。** Vertical、Connector、Provider 不直接 import Kernel 私有实现和数据文件。
