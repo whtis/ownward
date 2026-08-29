@@ -1,0 +1,21 @@
+docs/TODO.md
+  s_093ae9a852e755::t_42a5ea4d2f5f5d 122,124
+  s_093ae9a852e755::t_f1bcd6c01cc01c 154-156
+  s_093ae9a852e755::t_9dd9cfff3cceb0 51-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "91ce6a3834d21b5b0a0b8d686790bd8c5a31ebcb",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}

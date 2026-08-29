@@ -1,0 +1,30 @@
+config.default.json
+  s_093ae9a852e755::t_339924bb83bd9e 61-64
+src/github-pr.ts
+  s_093ae9a852e755::t_8ff75f9c3979fb 1-2,4-5,8,29,35-36,41,44,67-79,83-220,224-225,227,233-239,250,253,256,264-265,274,295,301-302,305,309,311,313-315,331-332,341-342,344,347,349,352,358,365,370-390
+web/system.js
+  s_093ae9a852e755::t_12b2c09f28fd3b 36-41
+  s_093ae9a852e755::t_e1f52262057d47 118-133
+src/github-pr.test.ts
+  s_093ae9a852e755::t_515403d31a33db 1-35
+src/server.ts
+  s_093ae9a852e755::t_1a17b36d094f39 390
+  s_093ae9a852e755::t_02f13f6e297f40 372-389,391
+  s_093ae9a852e755::t_70f56f0bdf0410 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "d419089e33b826b34059198115d9c6725728f8dc",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}

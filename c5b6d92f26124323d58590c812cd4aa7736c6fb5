@@ -1,0 +1,21 @@
+scripts/upstream-align.txt
+  s_093ae9a852e755::t_7b3137cc8a5503 179
+src/cli.ts
+  s_093ae9a852e755::t_7b3137cc8a5503 2,49,57,68,102,104,112,139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "c5b6d92f26124323d58590c812cd4aa7736c6fb5",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}

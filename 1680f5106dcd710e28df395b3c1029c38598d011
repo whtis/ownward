@@ -1,0 +1,24 @@
+src/capture.ts
+  s_093ae9a852e755::t_772af93caf6d19 248
+  s_093ae9a852e755::t_7733337715f553 191-192
+docs/refactor-ownward-merge.md
+  s_093ae9a852e755::t_45b6e20656308e 52,54,100
+src/midday.test.ts
+  s_093ae9a852e755::t_f8001222c74445 25-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "1680f5106dcd710e28df395b3c1029c38598d011",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}

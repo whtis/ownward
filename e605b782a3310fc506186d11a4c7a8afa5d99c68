@@ -1,0 +1,27 @@
+src/daemon.ts
+  s_093ae9a852e755::t_71de6160996f2a 266
+src/server.ts
+  s_093ae9a852e755::t_71de6160996f2a 425
+src/midday.ts
+  s_093ae9a852e755::t_71de6160996f2a 5
+scripts/upstream-align.txt
+  s_093ae9a852e755::t_d63b84e01a0581 11-16,22,127-128,408
+src/capture.ts
+  s_093ae9a852e755::t_71de6160996f2a 192,248
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "e605b782a3310fc506186d11a4c7a8afa5d99c68",
+  "prompts": {},
+  "sessions": {
+    "s_093ae9a852e755": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6123f356-29b7-4b54-80c4-e9e7f030dc76",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}
