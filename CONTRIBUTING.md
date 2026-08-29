@@ -2,6 +2,19 @@
 
 Thanks for helping make AI-assisted work more durable and user-controlled.
 
+## Where changes belong
+
+Before opening a feature PR, decide whether it belongs in the public base, a
+Connector, an external Vertical, or a private company/personal repository.
+The full boundary and extension checklist is in
+[docs/contributing/extension-contract.md](docs/contributing/extension-contract.md).
+
+As a rule of thumb, the public base accepts generic Kernel contracts and
+reusable UI/data mechanisms. Company systems, private MCPs, contacts, raw
+corpora, and domain-specific mappings stay in a private Vertical or Connector.
+If a feature needs a capability that the current Kernel does not expose, submit
+the generic Core Contract first; do not create a side channel from the Vertical.
+
 ## Before starting
 
 - Open an Issue before a large feature or architecture change.
@@ -10,8 +23,9 @@ Thanks for helping make AI-assisted work more durable and user-controlled.
   server, vault paths, approvals, or agent session code.
 - Read [the configuration guide](docs/configuration.md) before changing defaults,
   providers, connectors, or deployment behavior.
-- Maintainers releasing a private change to this repository should follow
-  [the public maintenance guide](docs/public-maintenance.md).
+- Do not add company-specific literals, credentials, contacts, vault content, or raw
+  runtime data to the public base. Split mixed features into a generic Core Contract
+  change and a private Vertical change.
 - Maintainers publishing a reviewed public snapshot should follow the
   [public release maintenance guide](docs/public-maintenance.md), including
   the Ownward version, changelog, and Desk lock checks.
@@ -39,6 +53,11 @@ Before submitting a pull request, run:
 The verification gate includes bundling, `tsc --noEmit`, unit tests, a test-mode daemon smoke test, API probes, and browser JavaScript parsing.
 
 Include tests for behavior changes. For provider or agent integrations, test argument construction, event parsing, capability fallbacks, failures, and redaction without requiring contributors' real credentials.
+
+For Vertical and Connector changes, also include manifest/capability validation,
+stable event identity, retry/unknown-outcome behavior, data schema and migration
+notes, and an explicit statement of whether the change is a key delivery path or
+an at-most-once observation path.
 
 ## Pull requests
 
