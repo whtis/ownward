@@ -1,0 +1,19 @@
+scripts/gitlab-sync.sh
+  s_8322ab6a16853b::t_bd85b7cd96cee1 1-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "7b2011deba76242a023fe5f637046e22937c133b",
+  "prompts": {},
+  "sessions": {
+    "s_8322ab6a16853b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a194cf7b-df00-40ef-859a-665fba222217",
+        "model": "k3"
+      },
+      "human_author": "yuxuan.weng <wengyx@trip.com>"
+    }
+  }
+}
