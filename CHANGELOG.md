@@ -2,6 +2,13 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.1.3] - 2026-08-30
+
+### Changed
+
+- Added an English README so developers can discover Ownward's workflow,
+  architecture boundaries, configuration, and remote-access setup.
+
 ## [1.1.2] - 2026-08-29
 
 ### Added
