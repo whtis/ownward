@@ -24,6 +24,10 @@ test("public exporter is shell-valid and has the release metadata gate", () => {
   expect(script.indexOf("CANDIDATE_TREE=$(git -C \"$STAGE\" write-tree)")).toBeLessThan(script.indexOf("Running the verification gate"));
 });
 
+test("public exporter uses tools available on a clean macOS runner", () => {
+  expect(script).not.toContain("rg ");
+});
+
 test("public exporter compares strict semver without allowing equal or lower releases", () => {
   const start = script.indexOf("version_component_gt() {");
   const end = script.indexOf("\n\nwhile (($#));", start);

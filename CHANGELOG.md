@@ -2,6 +2,13 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.1.6] - 2026-08-30
+
+### Fixed
+
+- Removed the public exporter's dependency on `rg`, so the fallback metadata
+  parser works on a clean GitHub Actions macOS runner.
+
 ## [1.1.5] - 2026-08-30
 
 ### Changed
@@ -46,6 +53,7 @@ All notable public changes to Ownward are documented here.
 - Improved settings navigation and system status presentation across the web workbench.
 - Hardened extension, connector, session, and deployment recovery paths.
 
+[1.1.6]: https://github.com/whtis/ownward/releases/tag/v1.1.6
 [1.1.5]: https://github.com/whtis/ownward/releases/tag/v1.1.5
 [1.1.4]: https://github.com/whtis/ownward/releases/tag/v1.1.4
 [1.1.3]: https://github.com/whtis/ownward/releases/tag/v1.1.3

@@ -58,7 +58,7 @@ read_kernel_version() {
   local root=$1 file lines count value
   file="$root/src/kernel/extensions/contracts.ts"
   [ -f "$file" ] || { echo "Release metadata is missing: $file" >&2; return 1; }
-  lines=$(rg -n --no-heading '^[[:space:]]*export const KERNEL_VERSION[[:space:]]*=[[:space:]]*"[^"]+"[[:space:]]*;' "$file" || true)
+  lines=$(grep -E -n '^[[:space:]]*export const KERNEL_VERSION[[:space:]]*=[[:space:]]*"[^"]+"[[:space:]]*;' "$file" || true)
   count=$(printf '%s\n' "$lines" | sed '/^$/d' | wc -l | tr -d '[:space:]')
   if [ "$count" != 1 ]; then
     echo "Expected exactly one KERNEL_VERSION declaration in $file." >&2
@@ -200,7 +200,7 @@ tar -xf "$ARCHIVE" -C "$STAGE"
 # this machine. --no-ignore includes dotfiles and lockfiles as well.
 while IFS= read -r marker || [ -n "$marker" ]; do
   case "$marker" in ""|'#'*) continue ;; esac
-  if rg -q -i -F --hidden --no-ignore -- "$marker" "$STAGE"; then
+  if grep -R -q -i -F -- "$marker" "$STAGE"; then
     echo "Public export blocked by the private denylist." >&2
     exit 66
   fi
@@ -288,7 +288,7 @@ for public_text in "$MESSAGE" "$PUBLIC_AUTHOR_NAME" "$PUBLIC_AUTHOR_EMAIL"; do
   fi
   while IFS= read -r marker || [ -n "$marker" ]; do
     case "$marker" in ""|'#'*) continue ;; esac
-    if printf '%s' "$public_text" | rg -q -i -F -- "$marker"; then
+    if printf '%s' "$public_text" | grep -q -i -F -- "$marker"; then
       echo "Public commit metadata is blocked by the private denylist." >&2
       exit 66
     fi
