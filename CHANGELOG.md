@@ -2,6 +2,13 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.1.7] - 2026-08-30
+
+### Fixed
+
+- Restore owner write permission before recovering a read-only stale release
+  lock on macOS runners.
+
 ## [1.1.6] - 2026-08-30
 
 ### Fixed
@@ -53,6 +60,7 @@ All notable public changes to Ownward are documented here.
 - Improved settings navigation and system status presentation across the web workbench.
 - Hardened extension, connector, session, and deployment recovery paths.
 
+[1.1.7]: https://github.com/whtis/ownward/releases/tag/v1.1.7
 [1.1.6]: https://github.com/whtis/ownward/releases/tag/v1.1.6
 [1.1.5]: https://github.com/whtis/ownward/releases/tag/v1.1.5
 [1.1.4]: https://github.com/whtis/ownward/releases/tag/v1.1.4
