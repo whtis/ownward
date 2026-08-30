@@ -119,16 +119,11 @@ open http://127.0.0.1:4517
 The installer creates local configuration and starts the daemon and an isolated
 Runner through launchd. The workbench listens on `127.0.0.1:4517` by default.
 
-To use only Codex, set this in the generated `config.json`:
-
-```json
-{
-  "llm": { "engine": "codex" }
-}
-```
-
-CodeBuddy is off by default. Enable it with
-`providers.codebuddy.enabled: true`.
+After the first launch, open **Settings → AI Engines** to select the background
+decision engine, enable or disable Claude Code, Codex, and CodeBuddy, and choose
+the default project directory, provider, model, and permission for new tasks.
+For a Codex-only installation, select Codex there. CodeBuddy is off by default
+and can be enabled from the same page.
 
 ## How work gets carried forward
 
@@ -223,6 +218,8 @@ sandbox.
 - **Feed**: Triage results from external events
 - **Notes**: Browse and edit the Markdown vault
 - **System**: Event sources, schedules, logs, and runtime status
+- **Settings**: Configure providers, event sources, notifications, automation,
+  remote listening, and task-dispatch defaults with a reviewable diff
 
 GitHub, Feishu, Gmail, and stock event sources are off by default. Without any
 external account, you can still use task dispatch, session harvesting, project
@@ -230,17 +227,24 @@ records, Actions, Heartbeat, notes, and macOS notifications.
 
 ## Configuration and security
 
-Ownward uses two configuration layers. The checked-in `config.default.json`
-contains defaults, while the local `config.json` contains only overrides and is
-never committed. These files adjust common behavior:
+Use the workbench's **Settings** tab for everyday configuration. It covers owner
+identity, timezone, vault, providers, event sources, Heartbeat, digest,
+notifications, Dashboard listening, and the default directory, provider, model,
+and permission for new tasks. Ownward shows a deterministic diff before approval,
+then writes the override and restarts the Runner and daemon through the paired
+release transaction.
+
+Underneath, Ownward still uses two configuration layers. The checked-in
+`config.default.json` contains defaults, while the local `config.json` contains
+only overrides and is never committed. Prompt editing and new Routines still use:
 
 - `prompts/owner.md`: which people and events matter, plus writing preferences;
 - `prompts/heartbeat.md`: the proactive check list;
 - `data/routines.json`: recurring responsibilities.
 
-After changing configuration, run `bash install.sh` so the Runner and daemon
-switch to the same frozen configuration snapshot. See the full
-[configuration guide](docs/configuration.md).
+If you edit `config.json` directly, run `bash install.sh` so the Runner and daemon
+switch to the same frozen configuration snapshot. Applying a change from Settings
+runs that transaction automatically. See the full [configuration guide](docs/configuration.md).
 
 Local storage and a local control plane do not mean the model runs locally.
 Content sent to a provider is covered by that provider's terms, and an agent may
@@ -275,7 +279,9 @@ Ownward is licensed under the [Apache License 2.0](LICENSE).
 
 ## Remote access from a phone
 
-Enable remote listening in `config.json`, then reinstall:
+Open **Settings → Advanced → Dashboard**, change **Listening scope** to
+**LAN access**, review the high-risk diff, and apply it. If you only have terminal
+access, set the same option manually:
 
 ```json
 {
@@ -408,13 +414,8 @@ open http://127.0.0.1:4517
 ```
 
 安装脚本会生成本机配置，并通过 launchd 启动 daemon 和独立 Runner。默认只监听
-`127.0.0.1:4517`。只使用 Codex 时，在生成的 `config.json` 中设置：
-
-```json
-{ "llm": { "engine": "codex" } }
-```
-
-CodeBuddy 默认关闭，设置 `providers.codebuddy.enabled: true` 开启。
+`127.0.0.1:4517`。首次打开后进入「设置 → AI 引擎」，可以切换后台决策引擎、启停
+Claude Code / Codex / CodeBuddy，并配置派发任务时默认使用的目录、引擎、模型和权限。
 
 ### Vertical 扩展
 
@@ -429,9 +430,11 @@ CodeBuddy 默认关闭，设置 `providers.codebuddy.enabled: true` 开启。
 
 ### 配置与安全
 
-`config.default.json` 保存默认值，本机 `config.json` 只写覆盖项且不会提交。常用行为
-可以通过 `prompts/owner.md`、`prompts/heartbeat.md` 和 `data/routines.json` 调整。
-修改配置后重新运行 `bash install.sh`，让 Runner 与 daemon 使用同一份配置快照。
+日常配置优先在工作台「设置」完成。Owner、时区、Vault、Provider、事件源、心跳、日报、
+通知、Dashboard 监听范围和任务派发默认值都可以在页面修改；应用前会展示 diff 并要求确认。
+底层仍由 `config.default.json` 和本机 `config.json` 两层组成。提示词和新增 Routine 继续通过
+`prompts/owner.md`、`prompts/heartbeat.md` 与 `data/routines.json` 管理。直接手改配置后需要
+运行 `bash install.sh`，设置页应用则会自动执行同一套事务。
 
 Ownward 不是 IDE，也不是 Agent 安全沙箱。Agent 可能以当前用户权限执行命令和修改文件，
 发给 Provider 的内容受对应服务条款约束。不要提交配置、凭据、vault、原始 transcript 或
@@ -451,9 +454,10 @@ bun install --frozen-lockfile
 
 ### 手机从外网连接
 
-在 `config.json` 设置 `dashboard.listen` 为 `"all"` 后重新运行 `bash install.sh`，再用
-Nginx 或 Cloudflare Tunnel 提供 HTTPS 入口。不要直接把 4517 端口暴露到公网；首次登录
-使用 `data/secrets/api-token.txt` 中的令牌，换取 HttpOnly cookie 后即可使用。
+在「设置 → 高级 → Dashboard」把监听范围改为“局域网可访问”并应用，再用 Nginx 或
+Cloudflare Tunnel 提供 HTTPS 入口。没有页面时也可以手动把 `dashboard.listen` 设为
+`"all"` 后运行 `bash install.sh`。不要直接把 4517 端口暴露到公网；首次登录使用
+`data/secrets/api-token.txt` 中的令牌，换取 HttpOnly cookie 后即可使用。
 
 ---
 

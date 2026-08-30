@@ -34,4 +34,11 @@ describe("settings and skill control plane", () => {
     expect(js).not.toContain('CATEGORY_ROOTS.release');
     expect(js).not.toContain('CATEGORY_ROOTS.verticals');
   });
+
+  test("offers safe controls for remote listening and dispatch defaults", () => {
+    for (const marker of ["仅本机 (127.0.0.1)", "局域网可访问 (0.0.0.0)", "派发默认值", "默认项目目录", "默认引擎", "默认权限"])
+      expect(js).toContain(marker);
+    expect(js).toContain('provider:[["","跟随系统默认"]');
+    expect(js).toContain('permission:[["","跟随引擎默认"]');
+  });
 });

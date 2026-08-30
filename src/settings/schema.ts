@@ -43,7 +43,7 @@ function valueType(value: unknown): SettingValueType {
 
 const INTERNAL_PATH = /^(?:\/architecture\/(?:sessionRunnerMode|sessionRunnerTaskIds)|\/release\/|\/verticals\/|\/connectors\/externalPaths$|\/connectors\/lark\/eventKeys$|\/providers\/[^/]+\/version$)/;
 const ADVANCED_PATH = /^(?:\/dashboard\/|\/triage\/|\/llm\/|\/dispatch\/|\/engine\/|\/strategy\/|\/providers\/|\/architecture\/)/;
-const HIGH_RISK_PATH = /(?:\/dashboard\/port$|Bin$|\/command$|\/positionsCmd$|\/allowedRoots$|\/allowFullAccess$|\/worktreeRoot$|\/vault\/root$)/;
+const HIGH_RISK_PATH = /(?:\/dashboard\/(?:port|listen)$|Bin$|\/command$|\/positionsCmd$|\/allowedRoots$|\/allowFullAccess$|\/worktreeRoot$|\/vault\/root$)/;
 const SENSITIVE_PATH = /(?:password|secret|token|api[-_]?key|credential)/i;
 
 function leafTier(path: string, inherited: SettingTier): SettingTier {

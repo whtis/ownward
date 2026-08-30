@@ -106,6 +106,9 @@ function validateNode(value: unknown, spec: SettingSchemaNode, path: string, iss
   if (actual !== spec.type) { issues.push({ path, code: "TYPE", message: `需要 ${spec.type}，实际为 ${actual}` }); return; }
   if (typeof value === "number" && !Number.isFinite(value)) issues.push({ path, code: "VALUE", message: "必须是有限数字" });
   if (path === "/dashboard/port" && (value as number) % 1 !== 0 || path === "/dashboard/port" && ((value as number) < 1 || (value as number) > 65_535)) issues.push({ path, code: "VALUE", message: "端口必须是 1–65535 的整数" });
+  if (path === "/dashboard/listen" && value !== "local" && value !== "all") issues.push({ path, code: "VALUE", message: "监听范围只能是 local 或 all" });
+  if (path === "/dispatch/defaults/provider" && value !== "" && !["claude", "codex", "codebuddy"].includes(value as string)) issues.push({ path, code: "VALUE", message: "默认 Provider 只能是 claude、codex 或 codebuddy" });
+  if (path === "/dispatch/defaults/permission" && value !== "" && value !== "safe" && value !== "bypass") issues.push({ path, code: "VALUE", message: "默认权限只能是 safe 或 bypass" });
   if (/\/(?:intervalMin|pollMin|maxBatch|watchSec|observationSec)$/.test(path) && (value as number) < 0) issues.push({ path, code: "VALUE", message: "不能小于 0" });
   if (path === "/engine/compactThreshold" && ((value as number) <= 0 || (value as number) > 1)) issues.push({ path, code: "VALUE", message: "必须大于 0 且不超过 1" });
   if (typeof value === "string" && /\/(?:time|start|end)$/.test(path) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) issues.push({ path, code: "VALUE", message: "时间必须是 HH:mm" });
@@ -176,6 +179,8 @@ export function validateSettingsPatches(input: { sourceDigest?: unknown; patches
   }
   const defaults = parseSettingsFile(files.defaultFile), beforeEffective = mergeDeep(defaults, canonicalConnectorOverlay(currentOverride));
   const afterEffective = mergeDeep(defaults, canonicalConnectorOverlay(next));
+  if (!issues.length && (afterEffective as any).dispatch?.defaults?.permission === "bypass" && (afterEffective as any).architecture?.allowFullAccess !== true)
+    issues.push({ path: "/dispatch/defaults/permission", code: "VALUE", message: "默认权限使用 bypass 前必须先开启 architecture.allowFullAccess" });
   const normalizedPatches = issues.length ? [] : accepted.filter((patch) => {
     const parts = tokens(patch.path)!;
     if (patch.op === "remove") return valueAt(currentOverride, parts).exists;
@@ -189,7 +194,7 @@ export function validateSettingsPatches(input: { sourceDigest?: unknown; patches
   });
   const level: SettingRisk = redactedDiff.some((entry) => entry.risk === "critical") ? "critical" : redactedDiff.some((entry) => entry.risk === "high") ? "high" : "low";
   const confirmations = [
-    ...(redactedDiff.some((entry) => entry.path === "/dashboard/port") ? ["dashboard-origin-change"] : []),
+    ...(redactedDiff.some((entry) => /^\/dashboard\/(?:port|listen)$/.test(entry.path)) ? ["dashboard-origin-change"] : []),
     ...(redactedDiff.some((entry) => /(?:Bin$|\/command$|\/positionsCmd$)/.test(entry.path)) ? ["command-execution"] : []),
     ...(redactedDiff.some((entry) => entry.path === "/architecture/allowFullAccess") ? ["full-access"] : []),
   ];

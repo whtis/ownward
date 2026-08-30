@@ -31,6 +31,8 @@ describe("settings schema and snapshot", () => {
   test("schema covers every defaults leaf and forces top-level classification", () => {
     const f = files(), defaults = JSON.parse(readFileSync(f.defaultFile, "utf8")), { schema } = loadSettings(f);
     expect(schemaLeafPointers(schema)).toEqual(defaultLeaves(defaults));
+    for (const pointer of ["/dashboard/listen", "/dispatch/defaults/dir", "/dispatch/defaults/model", "/dispatch/defaults/permission", "/dispatch/defaults/provider"])
+      expect(schemaLeafPointers(schema)).toContain(pointer);
     expect(new Set(Object.values(schema.nodes).map((node) => node.tier))).toEqual(new Set(["public", "advanced", "internal"]));
   });
 
@@ -98,6 +100,30 @@ describe("validate-only patches", () => {
     expect(validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path: "/sources/github/enabled", value: true }] }, f).issues[0]?.code).toBe("LEGACY_READ_ONLY");
     expect(validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path: "/heartbeat/enabled", value: "yes" }] }, f).issues[0]?.code).toBe("TYPE");
     expect(validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path: "/dashboard/port", value: 70_000 }] }, f).issues[0]?.code).toBe("VALUE");
+    expect(validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path: "/dashboard/listen", value: "public" }] }, f).issues[0]?.message).toContain("local 或 all");
+    expect(validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path: "/dispatch/defaults/provider", value: "unknown" }] }, f).issues[0]?.message).toContain("默认 Provider");
+    expect(validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path: "/dispatch/defaults/permission", value: "danger" }] }, f).issues[0]?.message).toContain("默认权限");
+    expect(validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path: "/dispatch/defaults/permission", value: "bypass" }] }, f).issues[0]?.message).toContain("allowFullAccess");
+  });
+
+  test("accepts dashboard listen and dispatch defaults exposed by the settings page", () => {
+    const f = files(), digest = loadSettings(f).snapshot.sourceDigest;
+    const result = validateSettingsPatches({ sourceDigest: digest, patches: [
+      { op: "set", path: "/dashboard/listen", value: "all" },
+      { op: "set", path: "/dispatch/defaults/dir", value: "~/workspace/example" },
+      { op: "set", path: "/dispatch/defaults/provider", value: "codex" },
+      { op: "set", path: "/dispatch/defaults/model", value: "default" },
+      { op: "set", path: "/dispatch/defaults/permission", value: "safe" },
+    ] }, f);
+    expect(result.valid).toBeTrue();
+    expect(result.risk).toEqual({ level: "high", approvalRequired: true, confirmations: ["dashboard-origin-change"] });
+    expect(result.normalizedPatches.map((patch) => patch.path)).toEqual([
+      "/dashboard/listen",
+      "/dispatch/defaults/dir",
+      "/dispatch/defaults/model",
+      "/dispatch/defaults/permission",
+      "/dispatch/defaults/provider",
+    ]);
   });
 
   test("validates the whole candidate while tolerating extension siblings", () => {

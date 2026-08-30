@@ -2,6 +2,18 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.1.8] - 2026-08-30
+
+### Added
+
+- Settings can now control Dashboard listening scope and the default directory,
+  provider, model, and permission used when dispatching a new task.
+
+### Changed
+
+- Updated the English and Chinese setup documentation to use the Settings page
+  for everyday configuration, while keeping manual file editing as a fallback.
+
 ## [1.1.7] - 2026-08-30
 
 ### Fixed
@@ -60,6 +72,7 @@ All notable public changes to Ownward are documented here.
 - Improved settings navigation and system status presentation across the web workbench.
 - Hardened extension, connector, session, and deployment recovery paths.
 
+[1.1.8]: https://github.com/whtis/ownward/releases/tag/v1.1.8
 [1.1.7]: https://github.com/whtis/ownward/releases/tag/v1.1.7
 [1.1.6]: https://github.com/whtis/ownward/releases/tag/v1.1.6
 [1.1.5]: https://github.com/whtis/ownward/releases/tag/v1.1.5

@@ -17,7 +17,8 @@
     ]
   },
   "dashboard": {
-    "port": 4517
+    "port": 4517,
+    "listen": "local"
   },
   "vault": {
     "root": "~/Documents/ownward-vault",
@@ -61,7 +62,12 @@
   "dispatch": {
     "worktreeRoot": "~/.ownward-worktrees",
     "watchSec": 60,
-    "defaults": {}
+    "defaults": {
+      "dir": "",
+      "provider": "",
+      "model": "",
+      "permission": ""
+    }
   },
   "engine": {
     "autoCompact": true,
