@@ -2,6 +2,12 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.1.4] - 2026-08-30
+
+### Fixed
+
+- Added the missing release link for the `1.1.3` changelog entry.
+
 ## [1.1.3] - 2026-08-30
 
 ### Changed
@@ -33,5 +39,7 @@ All notable public changes to Ownward are documented here.
 - Improved settings navigation and system status presentation across the web workbench.
 - Hardened extension, connector, session, and deployment recovery paths.
 
+[1.1.4]: https://github.com/whtis/ownward/releases/tag/v1.1.4
+[1.1.3]: https://github.com/whtis/ownward/releases/tag/v1.1.3
 [1.1.2]: https://github.com/whtis/ownward/releases/tag/v1.1.2
 [1.1.1]: https://github.com/whtis/ownward/releases/tag/v1.1.1
