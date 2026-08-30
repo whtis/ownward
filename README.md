@@ -2,6 +2,8 @@
 
 > Your work, carried forward.
 
+[English](#ownward) · [简体中文](#ownward-zh-cn)
+
 ## AI sessions end. Development work should not have to start over.
 
 Ownward is a local AI workbench for developers. Dispatch work from your phone,
@@ -367,6 +369,91 @@ connecting the native Android or iOS clients, confirm that their authentication
 flow is compatible with the Access policy. Keep Ownward's own access token even
 when Access is enabled. See the [Nginx reverse-proxy documentation](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)
 for the proxy directives.
+
+<a id="ownward-zh-cn"></a>
+
+## Ownward（简体中文）
+
+Ownward 是给研发者使用的本地 AI 工作台：从手机派发任务，让 Claude Code、Codex
+或 CodeBuddy 接力工作，再把每个 Agent 的执行事实收回同一个项目记忆。
+
+项目目前仍处于 early alpha，命令行入口是 `own`。Ownward 常驻在你的 Mac 上，统一
+管理任务、项目目录和工作记录；Android / iPhone 作为远程工作台，代码、凭据和 Agent
+CLI 仍留在 Mac 上。
+
+### 主要能力
+
+1. **手机派发和旁观研发任务**：选择项目目录、附加目录、模型和权限，查看流式回复、
+   工具调用、图片、diff、测试、commit 和 PR，也可以继续追问、中断或接管。
+2. **跨引擎接力**：任务会话切换引擎时建立可追溯的后继会话，带上有界的近期历史、
+   工作目录和权限；新引擎必须先检查真实 Git / 文件状态，不能重放旧工具调用。
+3. **统一执行记录**：Claude Code、Codex 和 CodeBuddy 的任务都写入同一套 Run 和
+   Flight Record，目标、过程、代码变化、commit 和结论不会散落在不同工具里。
+4. **会话收割和项目记忆**：外部 Claude Code、Codex CLI 的实质会话会自动收割到
+   Markdown vault；长期知识先进入 `_candidates/`，经人确认后才成为正式记忆。
+5. **Routine 起草**：从近期记录、任务结果和项目记忆生成晨会、周报或项目同步草稿；
+   写入飞书文档前必须由人确认。
+
+### 快速开始
+
+服务端目前支持 macOS，需要 Bun、Git，以及已登录的
+[Claude Code](https://claude.com/claude-code) 或 [Codex CLI](https://github.com/openai/codex)。
+CodeBuddy 可选。
+
+```bash
+git clone https://github.com/whtis/ownward.git
+cd ownward
+./install.sh
+open http://127.0.0.1:4517
+```
+
+安装脚本会生成本机配置，并通过 launchd 启动 daemon 和独立 Runner。默认只监听
+`127.0.0.1:4517`。只使用 Codex 时，在生成的 `config.json` 中设置：
+
+```json
+{ "llm": { "engine": "codex" } }
+```
+
+CodeBuddy 默认关闭，设置 `providers.codebuddy.enabled: true` 开启。
+
+### Vertical 扩展
+
+研发工作台是内置的 `dev` Vertical。Kernel、Runner、Provider 适配器、事实层和权限层
+不依赖“写代码”这一具体领域。外部 Vertical 可以通过能力契约挂载自己的 API、页面和
+导航，并在独立 Host 进程中运行。公开的
+[只读 Vertical 示例](examples/verticals/sample-readonly) 用 scoped storage 展示脱敏
+候选人列表，验证 Host、路由、页面和授权边界。
+
+外部 Vertical 必须是用户明确启用的 trusted 本地代码。独立进程用于隔离崩溃和生命周期，
+不是安全沙箱。扩展契约和开发规则见[开发指南](docs/development.md)。
+
+### 配置与安全
+
+`config.default.json` 保存默认值，本机 `config.json` 只写覆盖项且不会提交。常用行为
+可以通过 `prompts/owner.md`、`prompts/heartbeat.md` 和 `data/routines.json` 调整。
+修改配置后重新运行 `bash install.sh`，让 Runner 与 daemon 使用同一份配置快照。
+
+Ownward 不是 IDE，也不是 Agent 安全沙箱。Agent 可能以当前用户权限执行命令和修改文件，
+发给 Provider 的内容受对应服务条款约束。不要提交配置、凭据、vault、原始 transcript 或
+运行时数据。远程访问请放在 Tailscale 或可信 TLS 代理之后，并保留 Ownward 自己的令牌鉴权。
+完整配置见[配置指南](docs/configuration.md)，安全边界见 [SECURITY.md](SECURITY.md)。
+
+### 开发与验证
+
+```bash
+bun install --frozen-lockfile
+./verify.sh
+```
+
+验证门包含构建、TypeScript 类型检查、单元测试、daemon 冒烟、API 探活和 Web JavaScript
+解析。贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，架构说明见
+[docs/architecture-v1.md](docs/architecture-v1.md)。
+
+### 手机从外网连接
+
+在 `config.json` 设置 `dashboard.listen` 为 `"all"` 后重新运行 `bash install.sh`，再用
+Nginx 或 Cloudflare Tunnel 提供 HTTPS 入口。不要直接把 4517 端口暴露到公网；首次登录
+使用 `data/secrets/api-token.txt` 中的令牌，换取 HttpOnly cookie 后即可使用。
 
 ---
 

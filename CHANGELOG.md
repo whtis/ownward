@@ -2,6 +2,13 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.1.5] - 2026-08-30
+
+### Changed
+
+- README now includes English and Simplified Chinese sections with language
+  links, so the public project overview is readable in both languages.
+
 ## [1.1.4] - 2026-08-30
 
 ### Fixed
@@ -39,6 +46,7 @@ All notable public changes to Ownward are documented here.
 - Improved settings navigation and system status presentation across the web workbench.
 - Hardened extension, connector, session, and deployment recovery paths.
 
+[1.1.5]: https://github.com/whtis/ownward/releases/tag/v1.1.5
 [1.1.4]: https://github.com/whtis/ownward/releases/tag/v1.1.4
 [1.1.3]: https://github.com/whtis/ownward/releases/tag/v1.1.3
 [1.1.2]: https://github.com/whtis/ownward/releases/tag/v1.1.2
