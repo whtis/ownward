@@ -53,6 +53,12 @@ function onFrame(frame: any) {
 }
 
 const reader = Bun.stdin.stream().getReader(), decoder = new TextDecoder(); let buffer = "";
+// 真 CLI resume 时的时序（2026-08-31 线上抓帧）：先补发上一轮遗留的后台任务通知，并为这条通知
+// 单独走一个伪 turn —— init + result(origin.kind="task-notification")，之后才是本轮自己的 init
+if (process.env.FAKE_CLAUDE_STALE_TASK === "1") {
+  write({ type: "system", subtype: "task_notification", task_id: "bg-1", tool_use_id: "toolu_bg", status: "stopped", output_file: "", summary: "No completion record was found for this background shell command from the previous session." });
+  init(); write({ type: "result", subtype: "success", is_error: false, num_turns: 0, result: "", origin: { kind: "task-notification" }, usage: { input_tokens: 0, output_tokens: 0 } }); initialized = false;
+}
 init(); // 覆盖 CLI 在首条 user frame 前先发 init 的真实时序。
 while (true) {
   const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); let newline;

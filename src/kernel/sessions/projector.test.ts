@@ -135,6 +135,14 @@ describe("notice 分类不许被吞", () => {
     expect(s.messages[0].text).toContain("终端");
     expect(s.messages[0].name).toBe("error");
   });
+  test("上一轮遗留的后台任务通知透出到会话里", () => {
+    // 后台任务是随上一轮 CLI 一起没的，而 agent 上一轮多半承诺了「跑完自动怎样」——不透出，
+    // 用户就会一直等一件永远不会发生的事
+    const s = project([{ type: "provider-notice", body: { category: "background_task", message: "上一轮的后台任务 bg-1 → stopped：No completion record was found" } }]);
+    expect(s.messages).toHaveLength(1);
+    expect(s.messages[0].text).toContain("bg-1");
+    expect(s.messages[0].name).toBe("error");
+  });
   test("表里没有的分类原样透出，不静默丢弃", () => {
     const s = project([{ type: "provider-notice", body: { category: "brand_new_failure_mode", tail: "провал" } }]);
     expect(s.messages).toHaveLength(1);

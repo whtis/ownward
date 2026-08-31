@@ -217,6 +217,21 @@ describe("Claude Code Runner Provider contract", () => {
     } finally { client.close(); server.stop(); }
   });
 
+  test("resume 补发的后台任务通知不终结 turn：通知透出，用户消息照常被处理", async () => {
+    // 上一轮留了个活着的后台任务时，CLI 每次 resume 先补发通知 + 一个 origin=task-notification 的伪
+    // turn result。把它认成 turn 终结 → 立刻 SIGKILL CLI，用户消息还没从 stdin 读走就没了，
+    // run 却记成 completed，前端一句提示都没有
+    const { data, server, client, provider } = await fixture({}, {}, { FAKE_CLAUDE_STALE_TASK: "1" }); try {
+      await client.request("submit", startBody("stale-task", "hello", "stale-task-session"));
+      const events = await waitTerminal(client, "stale-task"), values = payloads(data, events);
+      expect(values.find((value) => value.category === "background_task")?.message ?? "<无通知>").toContain("bg-1");
+      expect(JSON.stringify(values)).toContain("reply:hello");                       // 用户这条消息真的被处理了
+      expect(events.filter((event) => ["completed", "failed", "interrupted"].includes(event.type))).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ type: "completed" });
+      expect(provider.metrics.droppedFrames).toBeGreaterThan(0);                     // 伪 turn 的 result 是可观测地丢的
+    } finally { client.close(); server.stop(); }
+  });
+
   test("stderr 仅保留有界 ring 并作为 notice blob，不进入 terminal/journal 明文", async () => {
     const { data, server, client } = await fixture({ stderrRingBytes: 1024 }); try { await client.request("submit", startBody("stderr", "STDERR_EXIT", "stderr-session")); const events = await waitTerminal(client, "stderr"), values = payloads(data, events), notice = values.find((value) => value.category === "stderr"); expect(notice.tail.length).toBeLessThanOrEqual(1024); expect(events.at(-1)).toMatchObject({ type: "failed", reason: "provider_exit" }); expect(JSON.stringify(events)).not.toContain("SSSS"); }
     finally { client.close(); server.stop(); }

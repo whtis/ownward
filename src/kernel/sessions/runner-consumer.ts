@@ -264,6 +264,7 @@ export class RunnerAgentStateProjector {
       provider_warning: `⚠️ ${detail || "provider 警告"}`,
       lock_conflict: `⚠️ 会话被另一个进程占用，本轮没跑起来${detail ? `：${detail}` : ""}\n多半是终端里还开着同一个会话（codex resume / claude --resume），先退出它再续聊`,
       resume_not_found: `⚠️ 找不到可恢复的会话${detail ? `：${detail}` : ""}`,
+      background_task: `⚠️ ${detail || "后台任务状态变更"}`,
     };
     // 查不到就兜底原样透出：分类表永远追不上 provider 新增的错误，而「有错误却什么都不显示」
     // 正是这个函数存在的理由。2026-08-24 实撞：lock_conflict 不在表里，用户只看到「失败 1」。

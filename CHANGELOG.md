@@ -2,6 +2,16 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.1.9] - 2026-08-31
+
+### Fixed
+
+- Fixed messages being silently swallowed when resuming a session that left a
+  background task running. Claude Code replays the stale background-task
+  notification as its own pseudo turn, whose result was mistaken for the
+  turn's own; the session is now kept alive and the notification is surfaced in
+  the conversation.
+
 ## [1.1.8] - 2026-08-30
 
 ### Added

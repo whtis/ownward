@@ -285,6 +285,13 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       if (raw.compact_result) return this.notice(turn, "compact_ok", {});
       return this.dropFrame(session, `status:${typeof raw.status === "string" ? raw.status.slice(0, 40) : "unknown"}`);  // 可观测地忽略，不装成错误
     }
+    // resume 时 CLI 会补发上一轮遗留的后台任务通知（background shell 没有完成记录）。必须透出：
+    // agent 上一轮往往承诺了「后台跑完自动怎样」，而那个进程早随上一轮的 CLI 一起没了
+    if (raw.type === "system" && raw.subtype === "task_notification") {
+      const taskId = typeof raw.task_id === "string" ? raw.task_id : "?", status = typeof raw.status === "string" ? raw.status : "unknown";
+      const summary = typeof raw.summary === "string" ? raw.summary.replace(/\s+/g, " ").slice(0, 200) : "";
+      return this.notice(turn, "background_task", { message: `上一轮的后台任务 ${taskId} → ${status}${summary ? `：${summary}` : ""}` });
+    }
     if (raw.type === "control_request" && plain(raw.request) && raw.request.subtype === "can_use_tool") {
       const requestId = typeof raw.request_id === "string" ? raw.request_id : ""; if (!requestId) return this.failTurn(session, "provider_protocol_error", "Claude approval request 缺 request_id");
       const toolName = typeof raw.request.tool_name === "string" ? raw.request.tool_name : typeof raw.request.toolName === "string" ? raw.request.toolName : "", toolInput = plain(raw.request.input) ? structuredClone(raw.request.input) : {};
@@ -320,6 +327,11 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       return;
     }
     if (raw.type === "result") {
+      // 上面那条后台任务通知在 CLI 里是一个独立的伪 turn（init + result(origin.kind="task-notification")），
+      // 跟用户这条消息无关。认它作 turn 终结 → runTurn 立刻 SIGKILL CLI，而用户的消息还没被 CLI 从
+      // stdin 读走，随进程一起蒸发；run 却记成 completed，前端连个提示都没有
+      // （2026-08-31 实撞：会话上一轮留了个活着的后台任务，此后每条消息都被静默吞掉，且永久复发）
+      if (plain(raw.origin) && raw.origin.kind === "task-notification") return this.dropFrame(session, "task-notification-result");
       this.flushDelta(turn); turn.queue.push(this.event(command, "usage", { payload: JSON.stringify({ scope: "turn", ...normalizeUsage(raw.usage) }) }, "best-effort"));
       const type = raw.is_error ? (turn.interruptRequested ? "interrupted" : "failed") : "completed"; if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined });
       turn.terminal = true; turn.queue.push(this.event(command, type, type === "interrupted" ? { reason: "user_interrupt" } : type === "failed" ? { reason: "provider_result_error" } : {})); turn.queue.end(); return;
@@ -328,7 +340,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   }
   private flushDelta(turn: Turn): void { if (!turn.delta) return; const text = turn.delta; turn.delta = ""; this.metrics.aggregatedDeltas++; turn.queue.push(this.event(turn.command, "delta", { payload: JSON.stringify({ role: "assistant", text }) }, "best-effort")); }
   private emitSessionUpdate(session: ClaudeSession, turn: Turn): void { if (!turn.started || turn.sessionUpdateEmitted || !session.nativeRef || !turn.initMeta) return; turn.sessionUpdateEmitted = true; turn.queue.push(this.event(turn.command, "session-updated", { nativeRef: session.nativeRef, payload: JSON.stringify({ nativeRef: session.nativeRef, ...turn.initMeta }) })); }
-  private notice(turn: Turn, category: "rate_limited" | "auth_expired" | "api_error" | "compacting" | "compact_failed" | "compact_ok" | "stderr", detail: Record<string, unknown>): void { this.metrics.notices++; turn.queue.push(this.event(turn.command, "provider-notice", { payload: JSON.stringify({ category, ...detail }) }, "best-effort")); }
+  private notice(turn: Turn, category: "rate_limited" | "auth_expired" | "api_error" | "compacting" | "compact_failed" | "compact_ok" | "stderr" | "background_task", detail: Record<string, unknown>): void { this.metrics.notices++; turn.queue.push(this.event(turn.command, "provider-notice", { payload: JSON.stringify({ category, ...detail }) }, "best-effort")); }
   private dropFrame(session: ClaudeSession, reason: string): void { session.droppedFrames++; this.metrics.droppedFrames++; emitCoreLog({ event: "claude-frame-dropped", moduleType: "provider", moduleId: this.id, operation: "decode-frame", runId: session.turn?.command.runId, sessionId: session.sessionId, eventId: session.turn?.command.commandId, errorClass: "PROVIDER_FRAME_DROPPED", msg: `reason=${reason} total=${session.droppedFrames}` }); }
   private onExit(session: ClaudeSession, proc: Bun.Subprocess, generation: number, code: number): void {
     if (session.proc !== proc || session.generation !== generation) return; session.proc = undefined; const turn = session.turn; if (!turn || turn.terminal) return;
