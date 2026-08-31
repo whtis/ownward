@@ -2,6 +2,23 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.2.0] - 2026-08-31
+
+### Added
+
+- Added model and reasoning-depth selection when dispatching tasks, with live session reconfiguration across Web, Android, and iOS.
+- Added GPT-5.6 Sol as the default Codex model while keeping explicit model choices available.
+
+### Changed
+
+- Android and iOS now reopen the last selected Inbox, Agent, or Chat area after relaunch while preserving the first-launch Chat experience.
+
+### Fixed
+
+- Restored visible Codex conversation history for current rollout formats and large sessions, including returned tool images.
+- Limited harvested Git evidence to commits attributed to the configured owner identity.
+- Consolidated identical Skill deployments into one manageable entry and made multi-location adoption visibly actionable.
+
 ## [1.1.9] - 2026-08-31
 
 ### Fixed

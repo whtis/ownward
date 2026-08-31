@@ -385,6 +385,133 @@ function handoffState(dev) {
   return { disabled: false, reason: "" };
 }
 function handoffErrorCode(result) { return String(result?.errorCode || result?.code || ""); }
+function sessionConfigValues() {
+  return {
+    providerId: $("#session-config-provider")?.value || "",
+    model: $("#session-config-model")?.value || "",
+    effort: $("#session-config-effort")?.value || "",
+  };
+}
+function sessionConfigIsNoop(values = sessionConfigValues()) {
+  const dialog = $("#session-config-dialog");
+  return values.providerId === dialog?.dataset.currentProvider
+    && values.model === (dialog?.dataset.currentModel || "")
+    && values.effort === (dialog?.dataset.currentEffort || "");
+}
+function sessionConfigStatus(message, state = "") {
+  const status = $("#session-config-status");
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.state = state;
+}
+function updateSessionConfigSubmit(clearError = true) {
+  const dialog = $("#session-config-dialog"), submit = $("#session-config-submit");
+  if (!dialog || !submit || dialog.dataset.busy === "true") return;
+  const values = sessionConfigValues(), noop = sessionConfigIsNoop(values), sameProvider = values.providerId === dialog.dataset.currentProvider;
+  const capability = workProviderCapability(values.providerId);
+  const modelValid = sameProvider && !values.model || capability.models.includes(values.model);
+  const effortValid = sameProvider && !values.effort || workProviderEfforts(values.providerId, values.model).includes(values.effort);
+  const validPair = modelValid && effortValid;
+  submit.disabled = noop || !values.providerId || !validPair;
+  if (clearError || $("#session-config-status")?.dataset.state !== "error") {
+    sessionConfigStatus(noop ? "当前配置没有变化" : sameProvider ? "将创建同 Provider 的新会话并沿用有界历史" : "将创建目标 Provider 的新会话并沿用有界历史", noop ? "muted" : "ready");
+  }
+}
+function fillSessionConfigEfforts(requestedEffort = "", preserveLegacy = false, allowOmitted = false) {
+  const dialog = $("#session-config-dialog"), providerId = $("#session-config-provider")?.value || "";
+  const model = $("#session-config-model")?.value || "", effortSelect = $("#session-config-effort");
+  if (!dialog || !effortSelect) return;
+  const efforts = workProviderEfforts(providerId, model);
+  const legacyEffort = preserveLegacy && requestedEffort && !efforts.includes(requestedEffort) ? requestedEffort : "";
+  const legacyDefault = allowOmitted && !requestedEffort;
+  effortSelect.innerHTML = `${legacyDefault ? '<option value="">Provider 默认（当前）</option>' : ""}${legacyEffort ? `<option value="${esc(legacyEffort)}" disabled>${esc(legacyEffort)}（当前值不受所选模型支持）</option>` : ""}${efforts.map((item) => `<option value="${esc(item)}">${esc(WORK_EFFORT_LABELS[item] || item)}</option>`).join("")}`;
+  effortSelect.value = legacyDefault || legacyEffort ? requestedEffort : efforts.includes(requestedEffort) ? requestedEffort : workProviderDefaultEffort(providerId, model);
+  updateSessionConfigSubmit();
+}
+function fillSessionConfigOptions(providerId) {
+  const dialog = $("#session-config-dialog"), modelSelect = $("#session-config-model"), effortSelect = $("#session-config-effort");
+  if (!dialog || !modelSelect || !effortSelect) return;
+  const capability = workProviderCapability(providerId), sameProvider = providerId === dialog.dataset.currentProvider;
+  const currentModel = dialog.dataset.currentModel || "", currentEffort = dialog.dataset.currentEffort || "";
+  const model = sameProvider ? currentModel : capability.handoffModel;
+  const effort = sameProvider ? currentEffort : capability.handoffEffort;
+  const customModel = sameProvider && currentModel && !capability.models.includes(currentModel) ? [currentModel] : [];
+  // API 把空字符串视为“未传”，无法清除已经持久化的显式值。只有原值本来就缺失的
+  // legacy 会话才显示空选项，避免画出一个实际不会生效的“重置为 Provider 默认”。
+  modelSelect.innerHTML = `${sameProvider && !currentModel ? '<option value="">Provider 默认（当前）</option>' : ""}${[...customModel, ...capability.models].map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join("")}`;
+  modelSelect.value = model;
+  fillSessionConfigEfforts(effort, sameProvider, sameProvider);
+}
+function openSessionConfig(id) {
+  const dev = Tasks.dev, state = handoffState(dev);
+  if (state.disabled) { toast(state.reason); return; }
+  const dialog = $("#session-config-dialog"), body = $("#session-config-body");
+  if (!dialog || !body) return;
+  const currentProvider = dev.backend || dev.providerId || "claude";
+  dialog.dataset.taskId = id;
+  dialog.dataset.currentProvider = currentProvider;
+  dialog.dataset.currentModel = dev.model || "";
+  dialog.dataset.currentEffort = dev.effort || "";
+  dialog.dataset.busy = "false";
+  body.innerHTML = `<div class="dialog-head"><div><div class="eyebrow">SESSION CONFIG</div><h2 id="session-config-title">切换或调整会话</h2></div><button class="button ghost" id="session-config-close" type="button">关闭</button></div>
+    <div class="session-config-current" aria-label="当前会话配置"><span><b>Provider</b>${esc(currentProvider)}</span><span><b>模型</b>${esc(dev.model || "Provider 默认")}</span><span><b>思考深度</b>${esc(dev.effort || "Provider 默认")}</span></div>
+    <div class="session-config-grid">
+      <label>Provider<select id="session-config-provider">${Object.entries(WORK_PROVIDER_CAPABILITIES).map(([providerId, capability]) => `<option value="${providerId}" ${providerId === currentProvider ? "selected" : ""}>${esc(capability.label)}</option>`).join("")}</select></label>
+      <label>模型<select id="session-config-model"></select></label>
+      <label>思考深度<select id="session-config-effort"></select></label>
+    </div>
+    <div class="session-config-status" id="session-config-status" role="status" aria-live="polite"></div>
+    <div class="dialog-actions"><button class="button ghost" id="session-config-cancel" type="button">取消</button><button class="button primary" id="session-config-submit" type="button">应用配置</button></div>`;
+  $("#session-config-close").addEventListener("click", () => dialog.close());
+  $("#session-config-cancel").addEventListener("click", () => dialog.close());
+  $("#session-config-provider").addEventListener("change", (event) => fillSessionConfigOptions(event.target.value));
+  $("#session-config-model").addEventListener("change", () => fillSessionConfigEfforts($("#session-config-effort").value, false, $("#session-config-provider").value === dialog.dataset.currentProvider));
+  $("#session-config-effort").addEventListener("change", () => updateSessionConfigSubmit());
+  $("#session-config-submit").addEventListener("click", submitSessionConfig);
+  fillSessionConfigOptions(currentProvider);
+  dialog.showModal();
+}
+async function submitSessionConfig() {
+  const dialog = $("#session-config-dialog"), submit = $("#session-config-submit");
+  if (!dialog || !submit || dialog.dataset.busy === "true") return;
+  const { providerId, model, effort } = sessionConfigValues(), id = dialog.dataset.taskId;
+  if (sessionConfigIsNoop({ providerId, model, effort })) { updateSessionConfigSubmit(); return; }
+  dialog.dataset.busy = "true";
+  $$('button,select', $("#session-config-body")).forEach((control) => { control.disabled = true; });
+  submit.textContent = "应用中…";
+  sessionConfigStatus("正在创建接力会话并应用配置…", "busy");
+  let applied = false;
+  try {
+    const payload = { id, providerId, model: model || undefined, effort: effort || undefined, reason: providerId === dialog.dataset.currentProvider ? "manual-reconfigure" : "manual-handoff" };
+    let res = await post("/api/dev/handoff", payload);
+    if (handoffErrorCode(res) === "SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED") {
+      const proceed = confirm("旧会话存在结果未知的操作，可能已经产生副作用。\n\n系统不会重放旧命令；继续只会创建新的 Session 接力。确认仍要继续？");
+      if (!proceed) { sessionConfigStatus("已取消：请先确认旧会话的实际结果", "error"); return; }
+      res = await post("/api/dev/handoff", { ...payload, confirmUnknownOutcome: true });
+    }
+    if (!res?.ok) throw new Error(res?.msg || "会话配置失败");
+    applied = true;
+    sessionConfigStatus(res.msg || "配置已应用，正在刷新会话…", "success");
+    await refreshTasks();
+    await pollDetail(true);
+    dialog.close();
+    toast(res.msg || "会话配置已更新");
+  } catch (error) {
+    sessionConfigStatus(`${applied ? "配置已应用，但刷新失败" : "应用失败"}：${error instanceof Error ? error.message : String(error)}`, "error");
+  } finally {
+    dialog.dataset.busy = "false";
+    if (dialog.open) {
+      $$('button,select', $("#session-config-body")).forEach((control) => { control.disabled = false; });
+      if (applied) {
+        [$("#session-config-provider"), $("#session-config-model"), $("#session-config-effort"), submit].forEach((control) => { control.disabled = true; });
+        submit.textContent = "已应用";
+      } else {
+        submit.textContent = "应用配置";
+        updateSessionConfigSubmit(false);
+      }
+    }
+  }
+}
 function tabsSave() { localStorage.setItem("ownward-session-tabs", JSON.stringify(Tasks.tabs)); }
 function tabUpsert(kind, id) {
   const meta = tabMeta(kind, id);
@@ -492,12 +619,7 @@ function detailHead(t, extra) {
     if (dev.control === "observing") btns.push(`<button class="button sm secondary" onclick="devControl('${esc(t.id)}','take')">接管输入</button>`);
     else if (dev.control === "ownward") btns.push(`<button class="button sm ghost" onclick="devControl('${esc(t.id)}','release')">释放输入权</button>`);
     const handoff = handoffState(dev);
-    const current = dev.backend || dev.providerId || t.mode;
-    const targets = ["claude", "codex", "codebuddy"].filter((p) => p !== current);
-    btns.push(`<select class="handoff-select" aria-label="切换引擎" title="${esc(handoff.reason || "创建新会话并接力当前任务")}" onchange="devHandoff('${jsq(t.id)}',this)" ${handoff.disabled ? "disabled" : ""}>
-      <option value="">${handoff.disabled ? `切换引擎 · ${esc(handoff.reason)}` : "切换引擎…"}</option>
-      ${targets.map((p) => `<option value="${p}">${p}</option>`).join("")}
-    </select>`);
+    btns.push(`<button class="button sm ghost session-config-trigger" type="button" title="${esc(handoff.reason || "切换 Provider，或调整当前会话的模型与思考深度")}" onclick="openSessionConfig('${jsq(t.id)}')" ${handoff.disabled ? "disabled" : ""}>${handoff.disabled ? "会话配置不可用" : "引擎 / 模型…"}</button>`);
   }
   if (t.mode === "terminal") {
     if (t.status === "running") btns.push(`<button class="button sm secondary" onclick="taskDone('${esc(t.id)}')">结束并收割</button>`);
@@ -526,7 +648,8 @@ function detailHead(t, extra) {
     t.branch ? `<span class="tag mono">${esc(t.branch)}</span>` : "",
     tok ? `<span class="tag mono" title="token 用量">${(tok / 1000).toFixed(1)}k tok</span>` : "",
     ctxPill,
-    dev?.model ? `<span class="tag mono">${esc(dev.model)}</span>` : "",
+    `<span class="tag mono" title="当前模型">模型 ${esc(dev?.model || "默认")}</span>`,
+    `<span class="tag mono" title="当前思考深度">深度 ${esc(dev?.effort || "默认")}</span>`,
   ].filter(Boolean).join("");
   const dirs = dev?.cwd ? `<div class="session-dirs" aria-label="当前会话目录">
     <span class="dir-chip primary" title="${esc(dev.cwd)}"><b>主目录</b> ${esc(dev.cwd.split("/").filter(Boolean).at(-1) || dev.cwd)}</span>
@@ -648,34 +771,6 @@ function msgHtml(m, i) {
     <div class="bubble">${m.role === "assistant" ? mdHtml(m.text) : esc(m.text)}</div>${imgs}</div>`;
 }
 
-async function devHandoff(id, select) {
-  const providerId = select.value;
-  select.value = "";
-  if (!providerId) return;
-  const state = handoffState(Tasks.dev);
-  if (state.disabled) { toast(state.reason); return; }
-  if (!confirm(`确认切换到 ${providerId}？\n\n系统会创建一个新的 ${providerId} Session 接力当前任务；旧会话和历史消息会完整保留。`)) return;
-  select.disabled = true;
-  let switched = false;
-  try {
-    let res = await post("/api/dev/handoff", { id, providerId, reason: "manual" });
-    if (handoffErrorCode(res) === "SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED") {
-      const proceed = confirm(`旧会话存在结果未知的操作，可能已经产生副作用。\n\n系统不会重放旧命令；继续只会创建新的 ${providerId} Session 接力。确认仍要切换？`);
-      if (!proceed) { toast("已取消切换；请先确认旧会话的实际结果"); return; }
-      res = await post("/api/dev/handoff", { id, providerId, reason: "manual", confirmUnknownOutcome: true });
-    }
-    if (!res?.ok) throw Object.assign(new Error(res?.msg || "切换引擎失败"), { code: handoffErrorCode(res) });
-    switched = true;
-    toast(res.msg || `已切换到 ${providerId}`);
-    await refreshTasks();
-    await pollDetail(true);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    toast(switched ? `切换已完成，但刷新失败：${detail}` : `切换失败：${detail}`);
-  } finally {
-    select.disabled = false;
-  }
-}
 function renderSession(t, dev) {
   const el = $("#tk-detail");
   // 追问框组字中不动 DOM；置空 dev 让下轮轮询必然重渲（否则 changed 比对会漏掉这帧）

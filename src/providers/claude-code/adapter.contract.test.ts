@@ -7,7 +7,7 @@ import { stageRunnerAttachment } from "../../runner/attachments.ts";
 import { auditRunnerBlobs, RunnerEventJournal } from "../../runner/journals.ts";
 import { RunnerServer } from "../../runner/server.ts";
 import { ClaudeCodeRunnerProvider, type ClaudeProviderOptions } from "./adapter.ts";
-import { CLAUDE_PROVIDER_CAPABILITIES, buildClaudeProviderArgs, parseClaudeOptions } from "./protocol.ts";
+import { CLAUDE_EFFORTS, CLAUDE_PROVIDER_CAPABILITIES, buildClaudeProviderArgs, parseClaudeOptions } from "./protocol.ts";
 import { canaryProvider } from "../../release/provider-canary.ts";
 
 const roots: string[] = [], providers: ClaudeCodeRunnerProvider[] = [];
@@ -43,10 +43,11 @@ describe("Claude Code Runner Provider contract", () => {
     expect(parsed).toMatchObject({ model: "claude-sonnet-4.5", effort: "high" });
     expect(buildClaudeProviderArgs(["claude"], parsed)).toEqual(expect.arrayContaining(["--model", "claude-sonnet-4.5", "--effort", "high"]));
     for (const bad of ["", "--opus", "opus latest", "opus\0"]) expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], model: bad })).toThrow("model 非法");
-    for (const bad of ["", "max", "HIGH", "high --resume bad"]) expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], effort: bad })).toThrow("effort 非法");
+    for (const effort of CLAUDE_EFFORTS) expect(parseClaudeOptions({ access: "standard", extraDirs: [], effort })).toMatchObject({ effort });
+    for (const bad of ["", "minimal", "ultra", "HIGH", "high --resume bad"]) expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], effort: bad })).toThrow("effort 非法");
     expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], temperature: 1 })).toThrow("options 含未知字段");
   });
-  test("first explicit effort awaits one bounded shared probe and never silently drops the flag",async()=>{for(const supported of[true,false]){const{data,server,client,provider}=await fixture({}, {}, {FAKE_CLAUDE_EFFORT:supported?"1":"0",FAKE_CLAUDE_HELP_DELAY_MS:"40"});try{await Promise.all([client.request("submit",startBody(`effort-first-${supported}`,"capability")),client.request("submit",startBody(`effort-concurrent-${supported}`,"capability-2"))]);const first=JSON.stringify(payloads(data,await waitTerminal(client,`effort-first-${supported}`))),second=JSON.stringify(payloads(data,await waitTerminal(client,`effort-concurrent-${supported}`)));expect(first.includes("--effort|high")).toBe(supported);expect(second.includes("--effort|high")).toBe(supported);expect(provider.metrics.effortProbePending).toBeGreaterThan(0);expect(provider.metrics.effortUnsupported).toBe(supported?0:2);}finally{client.close();server.stop();}}});
+  test("explicit effort either reaches argv or fails before spawn when unsupported/probe-failed",async()=>{for(const mode of["supported","unsupported","probe-failed"] as const){const spawnRecord=join(root(),`${mode}.jsonl`),{data,server,client,provider}=await fixture({}, {}, {FAKE_CLAUDE_EFFORT:mode==="unsupported"?"0":"1",FAKE_CLAUDE_HELP_DELAY_MS:"40",FAKE_CLAUDE_HELP_FAIL:mode==="probe-failed"?"1":"0",FAKE_CLAUDE_SPAWN_RECORD:spawnRecord});try{await Promise.all([client.request("submit",startBody(`effort-first-${mode}`,"capability")),client.request("submit",startBody(`effort-concurrent-${mode}`,"capability-2"))]);const first=await waitTerminal(client,`effort-first-${mode}`),second=await waitTerminal(client,`effort-concurrent-${mode}`);if(mode==="supported"){expect(JSON.stringify(payloads(data,first))).toContain("--effort|high");expect(JSON.stringify(payloads(data,second))).toContain("--effort|high");expect(readFileSync(spawnRecord,"utf8").trim().split("\n")).toHaveLength(2);}else{for(const events of[first,second]){expect(events.at(-1)).toMatchObject({type:"failed",reason:"unsupported_command"});expect(events.some(event=>event.type==="started"||event.type==="session-updated")).toBeFalse();}expect(() => readFileSync(spawnRecord,"utf8")).toThrow();}expect(provider.metrics.effortProbePending).toBeGreaterThan(0);expect(provider.metrics.effortUnsupported).toBe(mode==="supported"?0:2);expect(provider.metrics.effortProbeFailures).toBe(mode==="probe-failed"?1:0);}finally{client.close();server.stop();}}});
 
   test("slow effort help keeps Runner query responsive and remains bounded",async()=>{const{server,client}=await fixture({}, {}, {FAKE_CLAUDE_EFFORT:"1",FAKE_CLAUDE_HELP_DELAY_MS:"500"});try{await client.request("submit",startBody("slow-help","capability"));const before=Date.now();expect((await client.queryCommand("slow-help")).body.events).toBeArray();expect(Date.now()-before).toBeLessThan(400);expect((await waitTerminal(client,"slow-help",3_000)).at(-1)?.type).toBe("completed");}finally{client.close();server.stop();}});
 
@@ -211,6 +212,66 @@ describe("Claude Code Runner Provider contract", () => {
     } finally { client.close(); server.stop(); }
   });
 
+  test(">2MiB tool_result 图片先解析落盘，payload 脱 base64且整轮成功", async () => {
+    const { data, server, client } = await fixture(); try {
+      await client.request("submit", startBody("large-tool-image", "LARGE_TOOL_IMAGE", "large-image-session"));
+      const events = await waitTerminal(client, "large-tool-image");
+      expect(events.at(-1)?.type).toBe("completed");
+      const event = events.find((item) => item.type === "message-completed" && item.payloadRef && JSON.parse(new RunnerEventJournal(data).readPayload(item)!).role === "tool-result");
+      const raw = new RunnerEventJournal(data).readPayload(event)!;
+      expect(raw).not.toContain('"data"');
+      const url = JSON.parse(raw).results[0].images[0];
+      expect(url).toMatch(/^\/api\/agent-image\/large-image-session\/[a-f0-9]{16}\.png$/);
+      const [, , , key, file] = url.split("/");
+      const { readAgentImage } = await import("../../runner/agent-images.ts");
+      expect(readAgentImage(data, key, file)!.bin.length).toBeGreaterThan(2 * 1024 * 1024);
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("单行 8 张合计 8MiB tool_result 图片完整解析归一化，不把 base64 写入 payload", async () => {
+    const { data, server, client } = await fixture(); try {
+      await client.request("submit", startBody("multi-tool-images", "MULTI_TOOL_IMAGES", "multi-image-session"));
+      const events = await waitTerminal(client, "multi-tool-images", 5_000);
+      expect(events.at(-1)?.type).toBe("completed");
+      const event = events.find((item) => item.type === "message-completed" && item.payloadRef && JSON.parse(new RunnerEventJournal(data).readPayload(item)!).role === "tool-result");
+      const raw = new RunnerEventJournal(data).readPayload(event)!;
+      expect(raw).not.toContain('"data"');
+      const images = JSON.parse(raw).results[0].images;
+      expect(images).toHaveLength(8);
+      const { readAgentImage } = await import("../../runner/agent-images.ts");
+      for (const url of images) {
+        const [, , , key, file] = url.split("/");
+        expect(readAgentImage(data, key, file)!.bin.length).toBe(1024 * 1024);
+      }
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("tool_result 图片总量超预算仍完成整轮，只保存预算内图片并脱掉全部 base64", async () => {
+    const { data, server, client } = await fixture(); try {
+      await client.request("submit", startBody("tool-overflow", "TOOL_IMAGE_OVERFLOW", "tool-overflow-session"));
+      const events = await waitTerminal(client, "tool-overflow", 5_000);
+      expect(events.at(-1)?.type).toBe("completed");
+      const event = events.find((item) => item.type === "message-completed" && item.payloadRef && JSON.parse(new RunnerEventJournal(data).readPayload(item)!).role === "tool-result"), raw = new RunnerEventJournal(data).readPayload(event)!;
+      expect(raw).not.toContain('"data"');
+      expect(JSON.parse(raw).results[0].images).toHaveLength(7);
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("错误 tool_result 的小图和大图都脱敏落盘，错误文字可见且不阻断 terminal", async () => {
+    const { data, server, client } = await fixture(); try {
+      await client.request("submit", startBody("error-images", "ERROR_TOOL_IMAGES", "error-image-session"));
+      const events = await waitTerminal(client, "error-images", 5_000);
+      expect(events.at(-1)?.type).toBe("completed");
+      const event = events.find((item) => item.type === "message-completed" && item.payloadRef && JSON.parse(new RunnerEventJournal(data).readPayload(item)!).error === true), raw = new RunnerEventJournal(data).readPayload(event)!;
+      expect(raw).toContain("boom-visible");
+      expect(raw).not.toContain('"data"');
+      const content = JSON.parse(raw).content[0], urls = content.filter((part: any) => typeof part.url === "string").map((part: any) => part.url);
+      expect(urls).toHaveLength(2);
+      const { readAgentImage } = await import("../../runner/agent-images.ts");
+      expect(urls.map((url: string) => { const [, , , key, file] = url.split("/"); return readAgentImage(data, key, file)!.bin.length; }).sort((a: number, b: number) => a - b)).toEqual([1032, 3 * 1024 * 1024 + 8]);
+    } finally { client.close(); server.stop(); }
+  });
+
   test("单行坏 JSON 可跳过；跨 chunk 半行可恢复；巨型半行达到上限才失败", async () => {
     const { server, client } = await fixture({ maxStdoutBufferBytes: 1024 }); try {
       for (const [id, text, expected] of [["one-bad", "ONE_BAD", "completed"], ["chunked", "CHUNKED", "completed"], ["giant", "GIANT_HALF", "failed"]] as const) { await client.request("submit", startBody(id, text, `session-${id}`)); expect((await waitTerminal(client, id)).at(-1)?.type).toBe(expected); }
@@ -218,9 +279,9 @@ describe("Claude Code Runner Provider contract", () => {
   });
 
   test("resume 补发的后台任务通知不终结 turn：通知透出，用户消息照常被处理", async () => {
-    // 上一轮留了个活着的后台任务时，CLI 每次 resume 先补发通知 + 一个 origin=task-notification 的伪
-    // turn result。把它认成 turn 终结 → 立刻 SIGKILL CLI，用户消息还没从 stdin 读走就没了，
-    // run 却记成 completed，前端一句提示都没有
+    // 2026-08-31 线上事故：上一轮留了个活着的后台任务，CLI 每次 resume 先补发通知 + 一个
+    // origin=task-notification 的伪 turn result。旧实现认它作 turn 终结 → 立刻 SIGKILL CLI，
+    // 用户消息还没从 stdin 读走就没了，run 却记成 completed，前端一句提示都没有
     const { data, server, client, provider } = await fixture({}, {}, { FAKE_CLAUDE_STALE_TASK: "1" }); try {
       await client.request("submit", startBody("stale-task", "hello", "stale-task-session"));
       const events = await waitTerminal(client, "stale-task"), values = payloads(data, events);
@@ -275,6 +336,19 @@ describe("Claude Code Runner Provider contract", () => {
       expect(payloads(data, events).some((value) => value.text?.includes("reply:hello") && value.text?.includes("envleak:none"))).toBe(true);
       // transcript 是 codebuddy 私有格式（~/.codebuddy/projects，非 CC 帧）：readHistory 显式拒绝，不许静默读错家目录
       await expect(provider.readHistory({ nativeRef: "any" })).rejects.toMatchObject({ code: "PROVIDER_CAPABILITY_UNSUPPORTED" });
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("codebuddy 显式 effort 在 CLI 不支持时同样于 spawn 前失败", async () => {
+    const data = root(), spawnRecord = join(root(), "codebuddy-unsupported.jsonl"), provider = new ClaudeCodeRunnerProvider(command, { ...process.env, NODE_ENV: "test", OWNWARD_CLAUDE_FAKE: "1", FAKE_CLAUDE_EFFORT: "0", FAKE_CLAUDE_SPAWN_RECORD: spawnRecord }, { dataRoot: data, providerId: "codebuddy" }); providers.push(provider);
+    const server = new RunnerServer(data, (id) => { if (id !== "codebuddy") throw new Error("unregistered"); return provider; }); server.start();
+    const client = new RunnerClient(data);
+    try {
+      await client.request("submit", { ...startBody("cb-effort-unsupported", "hello"), providerId: "codebuddy" });
+      const events = await waitTerminal(client, "cb-effort-unsupported");
+      expect(events.at(-1)).toMatchObject({ type: "failed", reason: "unsupported_command" });
+      expect(events.some((event) => event.type === "started" || event.type === "session-updated")).toBeFalse();
+      expect(() => readFileSync(spawnRecord, "utf8")).toThrow();
     } finally { client.close(); server.stop(); }
   });
 

@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { canonicalConnectorOverlay } from "../connector-config.ts";
 import { mergeDeep } from "../util.ts";
+import { CLAUDE_EFFORTS, DEFAULT_CODEX_MODEL, isCodexModelEffortPair } from "../session-options.ts";
 import { buildSettingsSchema, type SettingRisk, type SettingSchemaNode, type SettingsSchema } from "./schema.ts";
 
 export type SettingsPatch = { op: "set"; path: string; value: unknown } | { op: "remove"; path: string };
@@ -179,6 +180,16 @@ export function validateSettingsPatches(input: { sourceDigest?: unknown; patches
   }
   const defaults = parseSettingsFile(files.defaultFile), beforeEffective = mergeDeep(defaults, canonicalConnectorOverlay(currentOverride));
   const afterEffective = mergeDeep(defaults, canonicalConnectorOverlay(next));
+  if (!issues.length) {
+    const dispatch = (afterEffective as any).dispatch?.defaults ?? {}, provider = String(dispatch.provider ?? ""), model = String(dispatch.model ?? ""), effort = String(dispatch.effort ?? "");
+    if (!provider && effort) issues.push({ path: "/dispatch/defaults/effort", code: "VALUE", message: "未选择默认 Provider 时不能设置思考深度" });
+    else if (provider === "codex") {
+      if (model === "default") issues.push({ path: "/dispatch/defaults/model", code: "VALUE", message: "任务派发不能使用 default 哨兵，请选择具体 Codex 模型或留空" });
+      else if (effort && !isCodexModelEffortPair(model || DEFAULT_CODEX_MODEL, effort)) issues.push({ path: "/dispatch/defaults/effort", code: "VALUE", message: "Codex 模型与思考深度组合不受支持" });
+    } else if ((provider === "claude" || provider === "codebuddy") && effort && !CLAUDE_EFFORTS.includes(effort as typeof CLAUDE_EFFORTS[number])) {
+      issues.push({ path: "/dispatch/defaults/effort", code: "VALUE", message: `${provider} 思考深度不受支持` });
+    }
+  }
   if (!issues.length && (afterEffective as any).dispatch?.defaults?.permission === "bypass" && (afterEffective as any).architecture?.allowFullAccess !== true)
     issues.push({ path: "/dispatch/defaults/permission", code: "VALUE", message: "默认权限使用 bypass 前必须先开启 architecture.allowFullAccess" });
   const normalizedPatches = issues.length ? [] : accepted.filter((patch) => {

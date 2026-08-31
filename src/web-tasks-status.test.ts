@@ -65,7 +65,9 @@ describe("task provider handoff", () => {
   test("renders provider identity and handoff events from the live session", () => {
     expect(source).toContain("dev?.backend || dev?.providerId || t.mode");
     expect(source).toContain('m.role === "system" && m.name === "handoff"');
-    expect(source).toContain('post("/api/dev/handoff", { id, providerId, reason: "manual" })');
+    expect(source).toContain('model: model || undefined, effort: effort || undefined');
+    expect(source).toContain('post("/api/dev/handoff", payload)');
+    expect(source).toContain('"manual-reconfigure" : "manual-handoff"');
   });
 
   test("unknown outcomes require a second explicit confirmation without replay", () => {
@@ -76,9 +78,9 @@ describe("task provider handoff", () => {
   });
 
   test("all handoff exits restore the disabled control", () => {
-    const fn = source.slice(source.indexOf("async function devHandoff("), source.indexOf("function renderSession("));
+    const fn = source.slice(source.indexOf("async function submitSessionConfig("), source.indexOf("function tabsSave("));
     expect(fn).toContain("} finally {");
-    expect(fn).toContain("select.disabled = false;");
-    expect(fn).toContain("切换已完成，但刷新失败");
+    expect(fn).toContain("control.disabled = false;");
+    expect(fn).toContain("配置已应用，但刷新失败");
   });
 });

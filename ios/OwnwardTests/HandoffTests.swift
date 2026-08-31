@@ -40,4 +40,75 @@ struct HandoffTests {
             ApiError(code: 400, message: "other", errorCode: "SESSION_BUSY")))
         #expect(!needsUnknownHandoffConfirmation(URLError(.timedOut)))
     }
+
+    @Test func 会话能力精确匹配模型矩阵() {
+        #expect(workCodexModelEfforts == [
+            "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+            "gpt-5.5": ["low", "medium", "high", "xhigh"],
+            "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        ])
+        #expect(workProviderEfforts("claude", model: "sonnet") == ["low", "medium", "high", "xhigh", "max"])
+        #expect(workProviderEfforts("codebuddy", model: "hy3") == workProviderEfforts("claude", model: "sonnet"))
+        #expect(workProviderEfforts("codex", model: "gpt-5.5-pro").isEmpty)
+        #expect(workProviderDefaultModel("codex") == "gpt-5.6-sol")
+        #expect(workProviderHandoffModel("codex") == "gpt-5.6-sol")
+    }
+
+    @Test func 服务端默认模型表只有sol时_仍补齐所有任务模型() {
+        #expect(workProviderModels("codex", providers: ["codex": ["gpt-5.6-sol"]]) == [
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4",
+        ])
+    }
+
+    @Test func 模型变化选择受支持默认值_旧非法组合不能提交() {
+        #expect(workProviderDefaultEffort("codex", model: "gpt-5.4") == "medium")
+        #expect(workProviderSelectionIsValid("codex", model: "gpt-5.6-sol", effort: "ultra"))
+        #expect(!workProviderSelectionIsValid("codex", model: "gpt-5.6-luna", effort: "ultra"))
+        #expect(!workProviderSelectionIsValid("codex", model: "gpt-5.5-pro", effort: "xhigh"))
+    }
+
+    @Test func 派发默认值保留Provider默认_只修复非法显式深度() {
+        #expect(normalizedDispatchDefaultEffort("codex", model: "gpt-5.6-sol", configured: nil) == "")
+        #expect(normalizedDispatchDefaultEffort("codex", model: "gpt-5.6-sol", configured: "") == "")
+        #expect(normalizedDispatchDefaultEffort("codex", model: "gpt-5.6-sol", configured: "ultra") == "ultra")
+        #expect(normalizedDispatchDefaultEffort("codex", model: "gpt-5.6-luna", configured: "ultra") == "medium")
+    }
+
+    @Test func 同Provider允许单个省略哨兵_跨Provider仍要求具体组合() {
+        #expect(workProviderSelectionIsValid("codex", model: "", effort: "ultra", allowOmitted: true))
+        #expect(workProviderSelectionIsValid("codex", model: "gpt-5.6-luna", effort: "", allowOmitted: true))
+        #expect(!workProviderSelectionIsValid("codex", model: "", effort: "ultra"))
+        #expect(!workProviderSelectionIsValid("codex", model: "gpt-5.6-luna", effort: ""))
+        #expect(!workProviderSelectionIsValid("codex", model: "", effort: "unsupported", allowOmitted: true))
+    }
+
+    @Test func 接力请求省略空哨兵字段() {
+        let body = devHandoffBody(
+            id: "task 1", providerId: "codex", confirmUnknownOutcome: false,
+            model: "", effort: "high", reason: "manual-reconfigure")
+        #expect(body["model"] == nil)
+        #expect(body["effort"] == .string("high"))
+    }
+
+    @Test func 同Provider无变化会被拦截_修改模型或深度则允许() {
+        #expect(sessionConfigIsNoop(
+            currentProvider: "codex", currentModel: "gpt-5.6-sol", currentEffort: "medium",
+            provider: "codex", model: "gpt-5.6-sol", effort: "medium"))
+        #expect(!sessionConfigIsNoop(
+            currentProvider: "codex", currentModel: "gpt-5.6-sol", currentEffort: "medium",
+            provider: "codex", model: "gpt-5.6-sol", effort: "high"))
+        #expect(!sessionConfigIsNoop(
+            currentProvider: "codex", currentModel: "gpt-5.6-sol", currentEffort: "medium",
+            provider: "claude", model: "sonnet", effort: "medium"))
+    }
+
+    @Test func 状态可解码Provider模型和思考深度_老daemon回退backend() throws {
+        let decoded = try state(#"{"backend":"claude","providerId":"codex","model":"gpt-5.6-sol","effort":"xhigh"}"#)
+        #expect(agentProvider(decoded) == "codex")
+        #expect(decoded.model == "gpt-5.6-sol")
+        #expect(decoded.effort == "xhigh")
+        #expect(agentProvider(try state(#"{"backend":"claude"}"#)) == "claude")
+    }
 }

@@ -77,10 +77,11 @@ struct StateSnapshot: Decodable, Sendable, Equatable {
     @Defaulted var dispatchDefaults: DispatchDefaults   // config dispatch.defaults（派任务预填，前端不硬编码）
 }
 
-/// config dispatch.defaults = {dir, model, permission, codex, provider}，字段全可缺
+/// config dispatch.defaults = {dir, model, effort, permission, codex, provider}，字段全可缺
 struct DispatchDefaults: Decodable, Sendable, Equatable {
     var dir: String?
     var model: String?
+    var effort: String?
     var permission: String?   // safe | bypass
     var codex: Bool?          // 旧开关；provider 优先
     var provider: String?     // claude | codex | codebuddy
@@ -280,11 +281,13 @@ struct AgentState: Decodable, Sendable, Equatable {
     @Defaulted var partial: String
     @Defaulted var pending: [PendingPerm]
     @Defaulted var backend: String
+    var providerId: String?
     @Defaulted var control: String       // ownward | external | observing
     @Defaulted var queued: [QueuedView]
     @Defaulted var plan: [PlanStep]
     var tokens: TokenUsage?
     var model: String?
+    var effort: String?
     var ctxTokens: Int64?
     @Defaulted var lastActivityAt: Int64
     // Runner 不可达时服务端仍回 200 但标 stale——不显示会让人对着过期快照以为 agent 还在干活

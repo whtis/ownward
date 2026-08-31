@@ -2,11 +2,51 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { canonicalTaskExtraDirs, devLegacyRoutes, devVerticalManifest, scopedTasks } from "./verticals.ts";
+import { canonicalTaskExtraDirs, devLegacyRoutes, devVerticalManifest, projectExternalVerticalNavigation, scopedTasks } from "./verticals.ts";
+import type { VerticalManifest, VerticalStatus } from "./kernel/extensions/contracts.ts";
 import { createDevVertical } from "./verticals/dev.ts";
 import { createDevDomainAdapter } from "./verticals/dev-domain-adapter.ts";
 const roots:string[]=[];afterEach(()=>{for(const r of roots.splice(0))rmSync(r,{recursive:true,force:true})});
 function fixture(){const root=realpathSync(mkdtempSync(join(tmpdir(),"ownward-task-grant-"))),outside=realpathSync(mkdtempSync(join(tmpdir(),"ownward-task-outside-")));roots.push(root,outside);mkdirSync(join(root,"project"));symlinkSync(outside,join(root,"escape"));return{root,outside};}
+const navStatus = (id: string, state: VerticalStatus["state"], source: VerticalStatus["source"] = "external"): VerticalStatus => ({ id, name: id, version: "1.0.0", source, state, consecutiveFailures: 0 });
+const navManifest = (id: string, navigation: NonNullable<VerticalManifest["navigation"]>): VerticalManifest => ({ id, name: id, version: "1.0.0", kernelApiVersion: 1, entry: "index.ts", capabilities: [], roots: [], routes: [], assets: [], navigation });
+
+describe("external Vertical navigation projection", () => {
+  test("only ready/degraded external manifests can project links under their own namespace", () => {
+    const statuses = [
+      navStatus("ready-ext", "ready"), navStatus("degraded-ext", "degraded"),
+      navStatus("disabled-ext", "disabled"), navStatus("failed-ext", "failed"),
+      navStatus("builtin-ready", "ready", "builtin"),
+    ];
+    const manifests = statuses.map((status) => navManifest(status.id, [{ id: `${status.id}-home`, label: status.name, href: `/verticals/${status.id}/index.html` }]));
+    expect(projectExternalVerticalNavigation(statuses, manifests)).toEqual([
+      { verticalId: "ready-ext", id: "ready-ext-home", label: "ready-ext", href: "/verticals/ready-ext/index.html", state: "ready" },
+      { verticalId: "degraded-ext", id: "degraded-ext-home", label: "degraded-ext", href: "/verticals/degraded-ext/index.html", state: "degraded" },
+    ]);
+  });
+
+  test("rejects cross-namespace, traversal, encoded, URL, query and prefix-sibling hrefs", () => {
+    const hrefs = [
+      "/verticals/other/index.html", "/verticals/safe-evil/index.html", "/verticals/safe/../secret.html",
+      "/verticals/safe/%2e%2e/secret.html", "/verticals/safe/index.html?token=x",
+      "/verticals/safe/index.html#x", "https://example.com/verticals/safe/index.html", "//example.com/verticals/safe/index.html",
+    ];
+    const manifest = navManifest("safe", hrefs.map((href, index) => ({ id: `entry-${index}`, label: `Entry ${index}`, href })));
+    expect(projectExternalVerticalNavigation([navStatus("safe", "ready")], [manifest])).toEqual([]);
+  });
+
+  test("keeps hostile-looking labels as inert text and deterministically removes duplicate ids/hrefs/statuses", () => {
+    const label = '<img src=x onerror="globalThis.pwned=1">';
+    const manifest = navManifest("safe", [
+      { id: "home", label, href: "/verticals/safe/index.html" },
+      { id: "home", label: "duplicate id", href: "/verticals/safe/other.html" },
+      { id: "other", label: "duplicate href", href: "/verticals/safe/index.html" },
+    ]);
+    expect(projectExternalVerticalNavigation([navStatus("safe", "ready"), navStatus("safe", "degraded")], [manifest])).toEqual([
+      { verticalId: "safe", id: "home", label, href: "/verticals/safe/index.html", state: "ready" },
+    ]);
+  });
+});
 // 接管幂等：bind() 按 nativeRef 去重，若调用方先 mint 了 task 再 adopt，多出来的卡片就永远
 // 指向同一个对话（2026-08-24 实撞：一条 Session 挂了三个 taskId，三张卡点进去是同一个会话）。
 // 用子进程 + 独立 OWNWARD_DATA_ROOT 跑，因为它真的会建卡落盘——绝不能写进生产 data。

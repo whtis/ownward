@@ -29,6 +29,15 @@ describe("settings and skill control plane", () => {
       expect(js).toContain(marker);
   });
 
+  test("adopts the full catalog entry with visible progress and durable failures", () => {
+    expect(js).toContain("data-adopt-catalog");
+    expect(js).toContain('observationIds:item.observationIds');
+    expect(js).toContain("个相同版本位置一起纳管");
+    expect(js).toContain('stateBox("正在生成 Skill 操作方案…","loading")');
+    expect(js).toContain('stateBox(Settings.skillsError,"error")');
+    expect(js).toContain('Settings.skillsError=`${error.code||"计划失败"}：${error.message}`');
+  });
+
   test("only renders schema leaves explicitly marked editable", () => {
     expect(js).toContain("field.metadata?.editable");
     expect(js).not.toContain('CATEGORY_ROOTS.release');

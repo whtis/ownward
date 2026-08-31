@@ -13,6 +13,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 
@@ -21,6 +22,13 @@ private val Context.dataStore by preferencesDataStore(name = "ownward-settings")
 @Serializable
 data class ServerConfig(val baseUrl: String = "", val token: String = "") {
     val configured: Boolean get() = baseUrl.isNotBlank()  // token 可空：本地直连/免鉴权部署
+}
+
+internal const val DEFAULT_TOP_LEVEL_ROOT = "chat"
+
+internal fun normalizeTopLevelRoot(root: String?): String = when (root) {
+    "inbox", "agent", "chat" -> root
+    else -> DEFAULT_TOP_LEVEL_ROOT
 }
 
 /**
@@ -83,6 +91,7 @@ private object TokenCrypto {
 class Settings(private val context: Context) {
     private val keyBaseUrl = stringPreferencesKey("base_url")
     private val keyToken = stringPreferencesKey("token")
+    private val keyTopLevelRoot = stringPreferencesKey("top_level_root")
 
     val config: Flow<ServerConfig> = context.dataStore.data.map { p ->
         ServerConfig(
@@ -91,10 +100,21 @@ class Settings(private val context: Context) {
         )
     }
 
+    val topLevelRoot: Flow<String> = context.dataStore.data
+        .map { p -> normalizeTopLevelRoot(p[keyTopLevelRoot]) }
+        .distinctUntilChanged()
+
     suspend fun save(baseUrl: String, token: String) {
         context.dataStore.edit { p ->
             p[keyBaseUrl] = baseUrl.trim().trimEnd('/')
             p[keyToken] = TokenCrypto.encrypt(token.trim())
+        }
+    }
+
+    suspend fun saveTopLevelRoot(root: String) {
+        val normalized = normalizeTopLevelRoot(root)
+        context.dataStore.edit { p ->
+            if (p[keyTopLevelRoot] != normalized) p[keyTopLevelRoot] = normalized
         }
     }
 }

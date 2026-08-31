@@ -6,7 +6,8 @@ import { join } from "path";
 import { llmJson } from "./llm.ts";
 import { appendDaily } from "./obsidian.ts";
 import type { WorkTask } from "./dispatch.ts";
-import { cfg, ensureDir, expandHome, fmt, loadState, log, run, updateState } from "./util.ts";
+import { formatGitSummary, gitSnapshot, type GitIdentity } from "./flight-record.ts";
+import { cfg, ensureDir, expandHome, fmt, loadState, log, updateState } from "./util.ts";
 
 const CLAUDE_PROJECTS = join(homedir(), ".claude", "projects");
 
@@ -51,15 +52,8 @@ function extractConversation(transcriptPath: string, maxChars = 15_000): string 
   return joined;
 }
 
-async function gitSummary(cwd: string): Promise<string> {
-  const status = await run(["git", "-C", cwd, "status", "--short"], { timeoutMs: 15_000 });
-  const logR = await run(["git", "-C", cwd, "log", "--oneline", "-8"], { timeoutMs: 15_000 });
-  const diff = await run(["git", "-C", cwd, "diff", "--stat", "HEAD"], { timeoutMs: 15_000 });
-  return [
-    "## git status --short", status.stdout.slice(0, 1500),
-    "## 最近提交", logR.stdout.slice(0, 800),
-    "## 未提交改动 diff --stat", diff.stdout.slice(0, 1500),
-  ].join("\n");
+async function gitSummary(cwd: string, task?: Pick<WorkTask, "startHead"> & { gitIdentity?: GitIdentity }): Promise<string> {
+  return formatGitSummary(await gitSnapshot({ cwd, startHead: task?.startHead, gitIdentity: task?.gitIdentity }));
 }
 
 /** 旁观会话手动落盘：任意 CC transcript（clawd / Terminal 会话）→ 总结 → vault 笔记 */
@@ -135,8 +129,10 @@ export async function harvestTask(t: WorkTask): Promise<string | null> {
     if (!process_) { log(`harvest [${t.id}]: 无可验证的会话记录`); return null; }
   }
 
+  const gitEvidence = await gitSummary(t.cwd, t);
   const prompt = [
     "把下面这次编码任务的过程总结成一条工作日志。输出严格 JSON（不要代码块）：",
+    "归属规则：files_changed 只采用下方 git 状态中归属于任务身份的提交；已排除提交不得算作本任务工作，当前未提交改动只能注明为未归属现场状态。",
     `{"title": "<简短有辨识度的标题，<=20字，不含特殊字符>",`,
     ` "problem": "<要解决什么问题/做什么改动>",`,
     ` "failed_attempts": "<失败的尝试和原因，没有则空字符串>",`,
@@ -148,7 +144,7 @@ export async function harvestTask(t: WorkTask): Promise<string | null> {
     `结果：${t.exitCode === undefined ? "进行中/手动结束" : t.exitCode === 0 ? "正常退出" : `退出码 ${t.exitCode}`}`,
     "",
     "=== git 状态 ===",
-    await gitSummary(t.cwd),
+    gitEvidence,
     "",
     "=== 过程记录 ===",
     process_,

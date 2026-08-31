@@ -12,13 +12,14 @@ export interface KernelSessionGrants { roots: string[]; access: KernelGrantedAcc
 export interface KernelSessionDto {
   id: string; providerId: SessionProviderId; nativeRef: string | null; cwd: string;
   control: AgentControl; recoverable: boolean; taskIds: string[];
+  model?: string; effort?: string;
   operability: "active" | "read-only"; archiveState?: "orphaned-task-link";
 }
 export interface KernelSessionState {
   messages: DevMsg[]; turn: string; alive: boolean; partial: string; pending: unknown[];
   backend: SessionProviderId; providerId: SessionProviderId; control: AgentControl;
   resume: { id: string; tool: string; cmd: string } | null;
-  queued?: unknown[]; plan?: unknown[]; tokens?: unknown; model?: string; commands?: string[];
+  queued?: unknown[]; plan?: unknown[]; tokens?: unknown; model?: string; effort?: string; commands?: string[];
   ctxTokens?: number; lastActivityAt?: number; fullAccess?: boolean;
   stale?: boolean; errorCode?: string;
   operability?: "active" | "read-only"; archiveState?: "orphaned-task-link";

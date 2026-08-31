@@ -6,6 +6,7 @@ import { homedir } from "os";
 import { join } from "path";
 import type { CcMessage, CcSessionMeta } from "./cc-sessions.ts";
 import { isWithinDataDir } from "./internal-path.ts";
+import { CodexRolloutDecoder, readCodexRolloutWindow } from "./providers/transcript-history.ts";
 import { DATA, log } from "./util.ts";
 
 const HOMES: [string, string][] = [
@@ -13,13 +14,17 @@ const HOMES: [string, string][] = [
   ["codex-alt", join(homedir(), ".codex-alt", "sessions")],
 ];
 
-function readBytes(path: string, from: number, len: number): string {
+function readBuffer(path: string, from: number, len: number): Buffer {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(len);
     const n = readSync(fd, buf, 0, len, from);
-    return buf.subarray(0, n).toString("utf8");
+    return buf.subarray(0, n);
   } finally { closeSync(fd); }
+}
+
+function readBytes(path: string, from: number, len: number): string {
+  return readBuffer(path, from, len).toString("utf8");
 }
 
 export interface CodexMeta extends CcSessionMeta {
@@ -34,6 +39,7 @@ export interface CodexMeta extends CcSessionMeta {
 function headMeta(path: string): { id: string; cwd: string; repoUrl: string; title: string; originator: string } {
   const head = readBytes(path, 0, Math.min(96 * 1024, statSync(path).size));
   let id = "", cwd = "", repoUrl = "", title = "", originator = "";
+  const decoder = new CodexRolloutDecoder(120);
   for (const line of head.split("\n")) {
     if (!line.trim()) continue;
     let e: any;
@@ -45,9 +51,8 @@ function headMeta(path: string): { id: string; cwd: string; repoUrl: string; tit
       repoUrl = p.git?.repository_url || "";
       originator = String(p.originator || "");
     }
-    if (!title && e.type === "event_msg" && p.type === "user_message" && p.message) {
-      title = String(p.message).trim().slice(0, 120);
-    }
+    const message = decoder.decode(e);
+    if (!title && message?.role === "user") title = message.text.trim().slice(0, 120);
     if (id && title) break;
   }
   return { id, cwd, repoUrl, title, originator };
@@ -69,10 +74,11 @@ export function inspectCodexSessionFile(path: string, home: string): CodexMeta {
 
 let listCache: { at: number; items: CodexMeta[] } | null = null;
 
-export function listCodexSessions(limit = 30): CodexMeta[] {
-  if (listCache && Date.now() - listCache.at < 20_000) return listCache.items;
+export function listCodexSessions(limit = 30, homes: ReadonlyArray<readonly [string, string]> = HOMES): CodexMeta[] {
+  const cacheable = homes === HOMES;
+  if (cacheable && listCache && Date.now() - listCache.at < 20_000) return listCache.items;
   const files: { home: string; path: string; mtime: number; size: number }[] = [];
-  for (const [home, root] of HOMES) {
+  for (const [home, root] of homes) {
     if (!existsSync(root)) continue;
     for (const f of readdirSync(root, { recursive: true }) as string[]) {
       if (!f.endsWith(".jsonl")) continue;
@@ -107,6 +113,7 @@ export function listCodexSessions(limit = 30): CodexMeta[] {
         cwd, repoUrl, originator,
         project: cwd ? cwd.split("/").filter(Boolean).pop() || cwd : "codex",
         title: (title || "(codex 会话)").replace(/\s+/g, " ").trim(),  // title 里可能带换行，压平
+        firstUser: title,
         mtime: x.mtime,
         size: x.size,
         active: Date.now() - x.mtime < 120_000,
@@ -115,7 +122,7 @@ export function listCodexSessions(limit = 30): CodexMeta[] {
       });
     } catch { /* 单文件坏不影响 */ }
   }
-  listCache = { at: Date.now(), items };
+  if (cacheable) listCache = { at: Date.now(), items };
   return items;
 }
 
@@ -146,37 +153,23 @@ export function findCodexSessionFresh(stableId: string): { meta: CodexMeta; path
 /** rollout → 消息列表（增量字节读，同 CC 旁观语义）。
  *  顺带抽出最新执行计划（update_plan）+ token 用量（token_count），给进度视图用 */
 export function readCodexMessages(path: string, after = 0): { messages: CcMessage[]; offset: number; truncated: boolean; plan?: { text: string; status: string }[]; tokens?: { input?: number; output?: number; total?: number } } {
-  const size = statSync(path).size;
-  if (size < after) after = 0;
-  let from = after;
-  let truncated = false;
-  const CAP = 256 * 1024;
-  if (from === 0 && size > CAP) { from = size - CAP; truncated = true; }
-  if (from >= size) return { messages: [], offset: size, truncated: false };
-
-  let text = readBytes(path, from, size - from);
-  // skip 必须在切片「之前」量，切片后 text.indexOf 会指到第二个换行、算错 offset
-  let skip = 0;
-  if (truncated) { skip = text.indexOf("\n") + 1; text = text.slice(skip); }
-  const lastNl = text.lastIndexOf("\n");
-  const consumed = lastNl === -1 ? 0 : lastNl + 1;
-  const offset = from + skip + consumed;
+  const window=readCodexRolloutWindow(path,after),offset=window.offset,truncated=window.truncated;
+  if(!window.lines.length)return{messages:[],offset,truncated};
 
   const messages: CcMessage[] = [];
+  const decoder = new CodexRolloutDecoder(4000);
   let plan: { text: string; status: string }[] | undefined;
   let tokens: { input?: number; output?: number; total?: number } | undefined;
-  for (const line of text.slice(0, consumed).split("\n")) {
+  for (const line of window.lines) {
     if (!line.trim()) continue;
     let e: any;
     try { e = JSON.parse(line); } catch { continue; }
     const p = e.payload || {};
     const ts = e.timestamp;
+    const message = decoder.decode(e);
+    if (message) messages.push(message as CcMessage);
     if (e.type === "event_msg") {
-      if (p.type === "user_message" && p.message) {
-        messages.push({ role: "user", text: String(p.message).slice(0, 4000), ts });
-      } else if (p.type === "agent_message" && p.message) {
-        messages.push({ role: "assistant", text: String(p.message).slice(0, 4000), ts });
-      } else if (p.type === "mcp_tool_call_end") {
+      if (p.type === "mcp_tool_call_end") {
         messages.push({ role: "tool", name: `${p.invocation?.server || "mcp"}.${p.invocation?.tool || ""}`, text: JSON.stringify(p.invocation?.arguments || {}).slice(0, 140), ts });
       } else if (p.type === "token_count") {
         // total_token_usage 是本会话累计——直接取最后一份即可

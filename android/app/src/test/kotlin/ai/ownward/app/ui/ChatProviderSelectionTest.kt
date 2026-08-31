@@ -26,4 +26,19 @@ class ChatProviderSelectionTest {
         }.exceptionOrNull()
         assertTrue(error?.message?.contains("当前不可用") == true)
     }
+
+    @Test fun defaultSentinelReopensExistingChatButNewChatUsesFirstExplicitModel() {
+        val providers = linkedMapOf(
+            "codex" to listOf("gpt-5.6-sol", "gpt-5.6-terra", "default"),
+            "claude" to listOf("sonnet", "default"),
+        )
+
+        val existing = selectChatProvider(providers, "codex", "default", existingChat = true)
+        assertEquals("codex", existing.provider)
+        assertEquals("default", existing.model)
+
+        val fresh = selectChatProvider(providers, "codex", "default", existingChat = false)
+        assertEquals("codex", fresh.provider)
+        assertEquals("gpt-5.6-sol", fresh.model)
+    }
 }

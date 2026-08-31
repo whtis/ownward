@@ -65,6 +65,24 @@ describe("read-only inventory", () => {
     expect(items.every((x) => x.state === "external")).toBe(true);
   });
 
+  test("catalog groups copied content by name and digest while keeping conflicts and null digests separate", () => {
+    const home = fixture();
+    skill(join(home, ".claude", "skills", "same"), "same", "one");
+    skill(join(home, ".agents", "skills", "same-copy"), "same", "one");
+    skill(join(home, ".codebuddy", "skills", "same-conflict"), "same", "two");
+    const result = scanSkills({ home }), entries = result.catalog.filter((item) => item.name === "same"), copied = entries.find((item) => item.observationIds.length === 2);
+    expect(entries).toHaveLength(2);
+    expect(copied?.engines).toEqual(["claude", "codex"]);
+    expect(copied?.digest).toBeString();
+
+    const boundedHome = fixture();
+    skill(join(boundedHome, ".claude", "skills", "bounded-a"), "bounded", "x".repeat(100));
+    skill(join(boundedHome, ".agents", "skills", "bounded-b"), "bounded", "x".repeat(100));
+    const bounded = scanSkills({ home: boundedHome, limits: { maxBytesPerSkill: 8 } }).catalog.filter((item) => item.name === "bounded");
+    expect(bounded).toHaveLength(2);
+    expect(bounded.every((item) => item.digest === null && item.observationIds.length === 1)).toBe(true);
+  });
+
   test("redaction does not redact sibling prefixes", () => {
     const home = fixture(); expect(redactHome(`${home}-other/a`, home)).toBe(`${home}-other/a`);
   });

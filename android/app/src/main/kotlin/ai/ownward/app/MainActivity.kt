@@ -29,6 +29,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -41,7 +42,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import ai.ownward.app.data.DEFAULT_TOP_LEVEL_ROOT
 import ai.ownward.app.data.ServerConfig
+import ai.ownward.app.data.normalizeTopLevelRoot
 import ai.ownward.app.ui.AgentScreen
 import ai.ownward.app.ui.AppDrawer
 import ai.ownward.app.ui.ChatDetailScreen
@@ -59,6 +62,7 @@ import ai.ownward.app.ui.SetupScreen
 import ai.ownward.app.ui.TaskDetailScreen
 import ai.ownward.app.ui.glassBar
 import ai.ownward.app.ui.theme.OwnwardTheme
+import kotlinx.coroutines.flow.first
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,42 +70,74 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             OwnwardTheme {
-                Root()
+                Root(restoringActivityState = savedInstanceState != null)
             }
         }
     }
 }
 
 @Composable
-private fun Root() {
+private fun Root(restoringActivityState: Boolean) {
     val app = LocalContext.current.applicationContext as App
     val config by app.settings.config.collectAsState(initial = null)
+    // 只取本次 Activity 启动时的首个值作为 NavHost startDestination；后续持久化不能重建导航图。
+    val topLevelRoot by produceState<String?>(initialValue = null, app.settings) {
+        value = app.settings.topLevelRoot.first()
+    }
     when {
-        config == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        config == null || topLevelRoot == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
         }
 
         !config!!.configured -> SetupScreen(app.settings)
 
-        else -> MainShell(app, config!!)
+        else -> MainShell(app, config!!, topLevelRoot!!, restoringActivityState)
     }
 }
 
 private data class Tab(val route: String, val label: String, val icon: @Composable () -> Unit)
 
+internal fun topLevelRootForRoute(route: String?): String? = when (route) {
+    "inbox", "settings" -> "inbox"
+    "agent", "dispatch", "task/{id}", "observe?id={id}&task={task}" -> "agent"
+    "chat", "chatDetail?id={id}" -> "chat"
+    else -> null
+}
+
+internal fun shouldOpenNewChatOnLaunch(
+    initialTopLevelRoot: String,
+    restoringActivityState: Boolean,
+): Boolean = !restoringActivityState && initialTopLevelRoot == DEFAULT_TOP_LEVEL_ROOT
+
+internal fun navigationGraphRoot(initialTopLevelRoot: String): String =
+    normalizeTopLevelRoot(initialTopLevelRoot)
+
 @Composable
-private fun MainShell(app: App, config: ServerConfig) {
+private fun MainShell(
+    app: App,
+    config: ServerConfig,
+    initialTopLevelRoot: String,
+    restoringActivityState: Boolean,
+) {
     val nav: NavHostController = rememberNavController()
     val client = app.client(config)
+    val graphRoot = navigationGraphRoot(initialTopLevelRoot)
     val tabs = listOf(
         Tab("inbox", "收件箱") { Icon(Icons.Filled.Inbox, null) },
         Tab("agent", "Agent") { Icon(Icons.Filled.SmartToy, null) },
         Tab("chat", "对话") { Icon(Icons.AutoMirrored.Filled.Chat, null) },
     )
-    // 冷启动直达新对话（back 回列表）：打开 app 即可输入，无需先过列表
-    LaunchedEffect(Unit) { nav.navigate("chatDetail") }
+    // 真正冷启动且上次主区域是对话时才直达新对话。旋转/进程恢复由 NavController 恢复原返回栈，
+    // 不能再无条件 push chatDetail，否则会覆盖用户当时所在页面并重复堆栈。
+    LaunchedEffect(graphRoot, restoringActivityState) {
+        if (shouldOpenNewChatOnLaunch(graphRoot, restoringActivityState)) nav.navigate("chatDetail")
+    }
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
+    val currentTopLevelRoot = topLevelRootForRoute(currentRoute)
+    LaunchedEffect(currentTopLevelRoot) {
+        currentTopLevelRoot?.let { app.settings.saveTopLevelRoot(it) }
+    }
     val showBottomBar = currentRoute in tabs.map { it.route }
     val hazeState = remember { HazeState() }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -142,10 +178,10 @@ private fun MainShell(app: App, config: ServerConfig) {
             is DrawerDest.Terminal ->
                 "observe?task=${dest.taskId}" + (dest.ccId?.let { "&id=${Uri.encode(it)}" } ?: "")
         }
-        // 抽屉切页不叠栈：先弹回首页再进新页，返回键永远一步回到对话列表，
+        // 抽屉切页不叠栈：先弹回本次启动的主区域再进新页，返回键永远一步回到该根页，
         // 否则在侧边栏里连点十个会话就攒出十层返回栈
         nav.navigate(route) {
-            popUpTo("chat") { saveState = true }
+            popUpTo(graphRoot) { saveState = true }
             launchSingleTop = true
         }
     }
@@ -177,7 +213,7 @@ private fun MainShell(app: App, config: ServerConfig) {
                                 selected = currentRoute == tab.route,
                                 onClick = {
                                     if (currentRoute != tab.route) nav.navigate(tab.route) {
-                                        popUpTo("inbox") { saveState = true }
+                                        popUpTo(graphRoot) { saveState = true }
                                         launchSingleTop = true
                                         restoreState = true
                                     }
@@ -197,7 +233,7 @@ private fun MainShell(app: App, config: ServerConfig) {
                 CompositionLocalProvider(LocalBottomBarPadding provides padding.calculateBottomPadding()) {
                     NavHost(
                         navController = nav,
-                        startDestination = "chat",  // 首页=对话：打开就能聊（收件箱/Agent 在底栏一步可达）
+                        startDestination = graphRoot,
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         composable("inbox") {

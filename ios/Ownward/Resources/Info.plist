@@ -32,7 +32,7 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>选择图片发给 agent 或 AI 对话</string>
 	<key>OwnwardVersionName</key>
-	<string>0.1.0-alpha.20260823</string>
+	<string>0.1.0-alpha.20260831</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

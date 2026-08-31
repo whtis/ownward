@@ -22,11 +22,12 @@ data class StateSnapshot(
     val dispatchDefaults: DispatchDefaults = DispatchDefaults(), // config dispatch.defaults（派任务预填，前端不硬编码）
 )
 
-/** config dispatch.defaults = {dir, model, permission, codex, provider}，字段全可缺 */
+/** config dispatch.defaults = {dir, model, effort, permission, codex, provider}，字段全可缺 */
 @Serializable
 data class DispatchDefaults(
     val dir: String? = null,
     val model: String? = null,
+    val effort: String? = null,
     val permission: String? = null, // safe | bypass
     val codex: Boolean? = null,     // 旧开关；provider 优先
     val provider: String? = null,   // claude | codex | codebuddy
@@ -199,11 +200,13 @@ data class AgentState(
     val partial: String = "",
     val pending: List<PendingPerm> = emptyList(),
     val backend: String = "claude",
+    val providerId: String? = null,
     val control: String = "ownward", // ownward | external | observing
     val queued: List<QueuedView> = emptyList(),
     val plan: List<PlanStep> = emptyList(),
     val tokens: TokenUsage? = null,
     val model: String? = null,
+    val effort: String? = null,
     // provider init 帧回报的 slash_commands（输入框 / 补全用）；codex 之类不回报时为空表
     val commands: List<String> = emptyList(),
     val ctxTokens: Long? = null,

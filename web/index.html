@@ -6,6 +6,7 @@
 <title>Ownward</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23111720'/%3E%3Cpath d='M4 11 8 4l4 7' stroke='%2363a8ff' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='8' cy='9' r='1.2' fill='%2347c7f4'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/vertical-navigation.css">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" id="meta-theme" content="#e9eef3">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -45,6 +46,7 @@
       <button class="nav-tab" data-tab="roles">角色</button>
       <button class="nav-tab" data-tab="notes">笔记</button>
       <button class="nav-tab" data-tab="settings">设置</button>
+      <span class="vertical-nav-desktop" id="vertical-nav-desktop" aria-label="扩展导航"></span>
     </nav>
     <div class="topbar-actions">
       <button class="status-pill mono" id="hb-pill" title="距下次心跳；点击立即心跳" style="display:none"></button>
@@ -58,6 +60,7 @@
           <button class="mobile-menu-item" data-tab="pr">PR</button>
           <button class="mobile-menu-item" data-tab="roles">角色</button>
           <button class="mobile-menu-item" data-tab="notes">笔记</button>
+          <span class="vertical-nav-mobile" id="vertical-nav-mobile" aria-label="扩展导航"></span>
           <button class="mobile-menu-item" data-tab="feed">通知流 <span class="badge" id="b-feed"></span></button>
           <button data-tab="settings">设置</button>
           <button data-action="triage">立即分流</button>
@@ -147,6 +150,7 @@
     </div>
     <div class="row">
       <label style="margin:0">模型 <select id="w-model" style="width:130px"><option value="">默认</option></select></label>
+      <label style="margin:0">思考深度 <select id="w-effort" style="width:130px"><option value="">默认</option></select></label>
       <label style="margin:0">权限 <select id="w-perm" style="width:110px"><option value="">默认</option><option value="safe">safe（要审批）</option><option value="bypass">bypass</option></select></label>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">后台任务默认 worktree 隔离；terminal 模式会在本机拉起 Terminal 窗口</div>
@@ -249,6 +253,10 @@
     <div class="actions"><button class="button secondary" id="t-close">关闭</button></div>
   </div>
 </div>
+<!-- 任务引擎 / 模型 / 思考深度统一配置 dialog（逻辑在 tasks.js） -->
+<dialog class="control-dialog session-config-dialog" id="session-config-dialog" aria-labelledby="session-config-title">
+  <div id="session-config-body"></div>
+</dialog>
 <!-- 皮肤选择 modal（内容由 skin.js 渲染） -->
 <div class="overlay" id="skin-overlay">
   <div class="modal" style="width:min(680px,96vw)" role="dialog" aria-label="皮肤">
@@ -281,6 +289,7 @@
 <script src="/notes.js"></script>
 <script src="/system.js"></script>
 <script src="/settings.js"></script>
+<script src="/vertical-navigation.js"></script>
 <script>ImageViewer.init();appInit();</script>
 </body>
 </html>

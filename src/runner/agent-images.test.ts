@@ -4,12 +4,18 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { agentImageRoot, readAgentImage, saveAgentImage, saveContentImages } from "./agent-images.ts";
+import { AGENT_IMAGE_MAX_BYTES, AGENT_IMAGE_MAX_PER_MESSAGE, AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, AGENT_IMAGE_TOTAL_BYTES_PER_MESSAGE, agentImageRoot, codexMcpOutputParts, normalizeCodexContentImages, readAgentImage, saveAgentImage, saveContentImages } from "./agent-images.ts";
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const root = () => mkdtempSync(join(tmpdir(), "agimg-"));
 
 describe("agent-images 仓", () => {
+  test("Provider JSONL 半行上限覆盖 8MiB 单消息图片总预算", () => {
+    expect(AGENT_IMAGE_MAX_BYTES).toBe(8 * 1024 * 1024);
+    expect(AGENT_IMAGE_MAX_PER_MESSAGE).toBe(8);
+    expect(AGENT_IMAGE_TOTAL_BYTES_PER_MESSAGE).toBe(8 * 1024 * 1024);
+    expect(AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES).toBe(Math.ceil(AGENT_IMAGE_TOTAL_BYTES_PER_MESSAGE * 4 / 3) + 8 * 1024 * 1024);
+  });
   test("落盘幂等 + URL 稳定 + 路由能读回", () => {
     const data = root();
     const u1 = saveAgentImage(data, "sess-1", PNG_B64);
@@ -47,6 +53,21 @@ describe("agent-images 仓", () => {
     ]);
     expect(urls).toHaveLength(1); // 同一张图去重
     expect(urls[0]).toContain("/api/agent-image/sess-2/");
+  });
+
+  test("Codex MCP ImageContent 脱掉 base64 并保留 text/image 顺序", () => {
+    const data = root(), raw = { result: { Ok: { content: [
+      { type: "text", text: "before" },
+      { type: "image", data: PNG_B64, mimeType: "image/png" },
+      { type: "text", text: "after" },
+    ] } } };
+    const normalized = normalizeCodexContentImages(data, "codex-1", raw);
+    expect(JSON.stringify(normalized)).not.toContain(PNG_B64);
+    expect(codexMcpOutputParts(normalized)).toEqual([
+      { type: "text", text: "before" },
+      { type: "image", url: expect.stringMatching(/^\/api\/agent-image\/codex-1\/[a-f0-9]{16}\.png$/) },
+      { type: "text", text: "after" },
+    ]);
   });
 
   test("全仓配额 GC：超限删 mtime 最老的（观测数据容忍丢失）", () => {

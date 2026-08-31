@@ -778,6 +778,21 @@ textarea { resize: vertical; }
 .handoff-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--accent); font-size: 11px; font-weight: 650; }
 .handoff-divider::before, .handoff-divider::after { content: ""; height: 1px; flex: 1; background: color-mix(in srgb, var(--accent) 35%, var(--border-subtle)); }
 .handoff-divider span { max-width: 72%; text-align: center; }
+.session-config-dialog { width:min(680px,calc(100vw - 32px)); }
+.session-config-current { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px; }
+.session-config-current span { display:grid;gap:4px;min-width:0;padding:10px 12px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary);font:11px/1.35 var(--font-mono); }
+.session-config-current b { color:var(--text-tertiary);font:600 10px/1.2 var(--font-ui);text-transform:uppercase;letter-spacing:.05em; }
+.session-config-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px; }
+.session-config-grid label { display:grid;gap:5px;color:var(--text-secondary);font-size:11px; }
+.session-config-grid select { width:100%;min-width:0; }
+.session-config-status { min-height:34px;padding:9px 11px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-2);color:var(--text-secondary);font-size:11px; }
+.session-config-status[data-state="muted"] { color:var(--text-tertiary); }
+.session-config-status[data-state="busy"] { border-color:var(--accent);color:var(--accent); }
+.session-config-status[data-state="error"] { border-color:var(--danger);background:var(--danger-soft);color:var(--danger); }
+.session-config-status[data-state="success"] { border-color:var(--success);color:var(--success); }
+@media (max-width:640px) {
+  .session-config-current,.session-config-grid { grid-template-columns:minmax(0,1fr); }
+}
 .task-card-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--text-primary) !important; font-size: 13px !important; font-weight: 560; line-height: 1.45 !important; }
 .layout-notes { grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); }
 .layout-system { grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }

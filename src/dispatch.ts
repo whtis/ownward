@@ -6,6 +6,7 @@ import { basename, join } from "path";
 import { DATA, ROOT, SOURCE_ROOT, cfg, ensureDir, expandHome, fmt, log, run } from "./util.ts";
 import { readRunJournalStrictIndexed, reduceRuns } from "./runs/repository.ts";
 import { openAction } from "./actions.ts";
+import { DEFAULT_CODEX_MODEL } from "./session-options.ts";
 
 export interface WorkTask {
   id: string;
@@ -36,6 +37,7 @@ export interface WorkTask {
   pid?: number;
   logFile?: string;
   startHead?: string;     // 派发时冻结的不可变 git 基线（rev-parse HEAD），飞行记录据此出 diff
+  gitIdentity?: { name: string; email: string }; // 派发时冻结的 commit author 身份，收割只归属精确匹配的提交
   startedAt: string;
   endedAt?: string;
   exitCode?: number;
@@ -100,8 +102,8 @@ export interface WorkOptions {
   worktree?: boolean;   // 显式覆盖默认（terminal 默认原地，bg 默认 worktree）
   branch?: string;
   kind?: "evolve";
-  model?: string;       // claude/codex/provider 的模型名（引擎任务生效）
-  effort?: string;      // low | medium | high
+  model?: string;       // Provider 模型名；Codex 支持的模型与默认值见 session-options.ts
+  effort?: string;      // Claude/CodeBuddy 五档；Codex 按所选模型校验（见 session-options.ts）
   permission?: "safe" | "bypass";  // safe=高危 Bash 走审批（默认），bypass=全放行
   extraDirs?: string[];  // 附加项目目录（跨仓库任务，引擎任务生效）
   images?: { media_type: string; data: string }[];  // 首轮附图（base64）；仅 bg 引擎任务支持
@@ -114,6 +116,7 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
   const project = basename(dir);
   const id = `${fmt(new Date(), "date").replaceAll("-", "")}-${Math.random().toString(36).slice(2, 6)}`;
   const provider = opts.provider ?? (opts.codex ? "codex" : "claude");
+  const model = opts.model ?? (provider === "codex" ? (cfg.llm?.codexModel || DEFAULT_CODEX_MODEL) : undefined);
   const mode: WorkTask["mode"] = opts.bg ? (`${provider}-bg` as WorkTask["mode"]) : "terminal";
   // terminal 模式给不了图（交互式 claude 只吃 argv 文本）——显式报错，不许静默丢（守则 9）
   if (opts.images?.length && mode === "terminal") throw new Error("terminal 模式不支持图片，请勾选「后台运行」");
@@ -140,14 +143,22 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
   // 冻结不可变 git 基线：派发时的 HEAD。worktree 刚从主 checkout 拉出，HEAD 即分叉点；
   // 原地任务则是当前 HEAD——在 master 上原地干活也能靠它出 diff（不再退化成 merge-base=HEAD 丢提交）。
   let startHead: string | undefined;
+  let gitIdentity: WorkTask["gitIdentity"];
   try {
-    const rp = await run(["git", "-C", cwd, "rev-parse", "HEAD"], { timeoutMs: 15_000 });
+    const [rp, name, email] = await Promise.all([
+      run(["git", "-C", cwd, "rev-parse", "HEAD"], { timeoutMs: 15_000 }),
+      run(["git", "-C", cwd, "config", "--get", "user.name"], { timeoutMs: 10_000 }),
+      run(["git", "-C", cwd, "config", "--get", "user.email"], { timeoutMs: 10_000 }),
+    ]);
     if (rp.code === 0 && rp.stdout.trim()) startHead = rp.stdout.trim();
+    if (name.code === 0 && email.code === 0 && name.stdout.trim() && email.stdout.trim()) {
+      gitIdentity = { name: name.stdout.trim(), email: email.stdout.trim() };
+    }
   } catch { /* 非 git 仓库/空仓库：无基线，飞行记录按 git 状态标注 */ }
 
   const t: WorkTask = {
     id, project, projectDir: dir, cwd, branch, task, mode, kind: opts.kind,
-    model: opts.model, effort: opts.effort, startHead,
+    model, effort: opts.effort, startHead, gitIdentity,
     extraDirs: extraDirs.length ? extraDirs : undefined,
     startedAt: new Date().toISOString(), status: "running",
   };
@@ -173,7 +184,7 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
     const access = opts.permission === "bypass" ? "full-access" : "workspace";
     const sessions = createNewSessionService(roots);
     try {
-      const session = await sessions.create({ taskId: id, providerId, cwd, control: "ownward", extraDirs, model: opts.model, effort: opts.effort }, { roots, access });
+      const session = await sessions.create({ taskId: id, providerId, cwd, control: "ownward", extraDirs, model, effort: opts.effort }, { roots, access });
       const accepted=await sessions.send(session.id, { text: task, images: opts.images ?? [], clientMutationId: `dispatch:${id}` });
       updateTask(id,{launchState:"accepted",launchAcceptedAt:new Date().toISOString(),commandId:accepted.commandId,runId:accepted.runId});
     } catch (error: any) {
@@ -229,7 +240,7 @@ export async function titleFor(id: string, task: string): Promise<void> {
 // 从 claude 会话里开出来的 Terminal.app 会带上这些 CLAUDE_CODE_* 环境变量，`do script` 的新窗口全部继承。
 // 不清掉的话，terminal 任务的 `claude` 会把自己当成那个父会话的【子会话】，transcript 写进父会话的项目目录
 // （不是本任务 cwd 对应的目录）——于是 ownward 按 cwd 永远找不到它，任务"在 Terminal 正常跑，但工作台看不到"。
-// 新 Terminal 必须与父 Agent 会话隔离，避免 transcript 被错误归属。
+// （实撞过：一个 terminal 任务就这样被父会话收编，工作台里始终显示没启动）
 const CLAUDE_CHILD_ENVS = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH"];
 
 /** 会话上报钩子的局部 settings：只随 ownward 派发的 terminal 任务生效（`claude --settings <file>`），

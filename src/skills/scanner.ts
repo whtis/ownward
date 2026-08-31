@@ -108,8 +108,9 @@ function pluginEntries(root: SkillRoot, limits: Limits, budget: Budget, warnings
 function catalogFor(observations: SkillObservation[]): SkillCatalogEntry[] {
   const groups = new Map<string, SkillObservation[]>();
   for (const item of observations) {
+    const digest = item.targetTreeDigest || item.treeDigest;
     const physical = item.physicalIdentity ? `${item.physicalIdentity.dev}:${item.physicalIdentity.ino}` : null;
-    const key = physical || `${item.name}\0${item.targetTreeDigest || item.treeDigest || item.id}`;
+    const key = digest ? `digest\0${item.name}\0${digest}` : physical ? `physical\0${item.name}\0${physical}` : `observation\0${item.id}`;
     const group = groups.get(key) || []; group.push(item); groups.set(key, group);
   }
   return [...groups.entries()].map(([key, group]) => {

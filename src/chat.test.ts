@@ -6,7 +6,7 @@
 // 角色侧跑在临时 vault（useVaultForTest 只换根）；全局 memoryPack 读真实 vault，
 // 断言一律用临时 vault 里独有的 MARKER，不依赖真实记忆内容。
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -17,14 +17,16 @@ import {
   codexPrompt,
   getChat,
   listChats,
+  providers,
   resolveChatBinding,
   saveChatCandidate,
+  streamChat,
   type AiChat,
 } from "./chat.ts";
 import type { Scope } from "./paths.ts";
 import { archiveRole, createRole, getRole, roleMemoryPack, updateRole, useVaultForTest } from "./roles.ts";
 import type { Fail } from "./roles.ts";
-import { DATA } from "./util.ts";
+import { cfg, DATA } from "./util.ts";
 
 const roots: string[] = [];
 const chatFiles: string[] = [];
@@ -88,6 +90,31 @@ afterEach(() => useVaultForTest(null));
 afterAll(() => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
   for (const f of chatFiles) rmSync(f, { force: true });
+});
+
+async function collectChat(...args:Parameters<typeof streamChat>){const events=[] as any[];for await(const event of streamChat(...args))events.push(event);return events;}
+
+describe("Codex chat model/effort defaults",()=>{
+  test("new chats use gpt-5.6-sol, existing models stay immutable, and unsupported explicit models visibly fall back",async()=>{
+    freshVault();
+    const fixture=mkdtempSync(join(tmpdir(),"ownward-chat-codex-"));roots.push(fixture);const fake=join(fixture,"fake-codex.ts"),calls=join(fixture,"calls.jsonl");
+    writeFileSync(fake,`#!/usr/bin/env bun\nimport {appendFileSync} from "fs";\nappendFileSync(process.env.OWNWARD_CHAT_CALLS!,JSON.stringify(process.argv.slice(2))+"\\n");\nif(process.argv.includes("unsupported-model")){process.stderr.write("model not supported\\n");process.exit(1);}\nprocess.stdout.write("fake reply\\n");\n`);chmodSync(fake,0o755);
+    const oldBin=cfg.llm?.codexBin,oldEffort=cfg.chat?.codexEffort,oldModels=[...cfg.chat.providers.codex],oldCalls=process.env.OWNWARD_CHAT_CALLS;
+    try{
+      cfg.llm.codexBin=fake;cfg.chat.codexEffort="max";cfg.chat.providers.codex=["gpt-5.6-sol","gpt-explicit-alternative","default"];process.env.OWNWARD_CHAT_CALLS=calls;
+      const defaults=JSON.parse(readFileSync(join(import.meta.dir,"../config.default.json"),"utf8"));expect(defaults.chat.providers.codex).toEqual(["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","gpt-5.4","default"]);expect(defaults.llm.codexModel).toBe("gpt-5.6-sol");expect(providers().codex).toEqual(["gpt-5.6-sol","gpt-explicit-alternative","default"]);
+
+      let events=await collectChat("new",undefined,"codex"),done=events.find(event=>event.type==="done");expect(done.chat.model).toBe("gpt-5.6-sol");chatFiles.push(join(DATA,"chats",`${done.chat.id}.json`));let argv=JSON.parse(readFileSync(calls,"utf8").trim());expect(argv).toEqual(expect.arrayContaining(["-m","gpt-5.6-sol","-c",'model_reasoning_effort="max"']));
+
+      writeFileSync(calls,"");const existingId=writeChatFile({id:`test-codex-existing-${Math.random().toString(36).slice(2,8)}`,title:"existing",provider:"codex",model:"gpt-existing",createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z",messages:[]});events=await collectChat("continue",existingId);done=events.find(event=>event.type==="done");expect(done.chat.model).toBe("gpt-existing");argv=JSON.parse(readFileSync(calls,"utf8").trim());expect(argv).toEqual(expect.arrayContaining(["-m","gpt-existing"]));expect(argv).not.toContain("-c");
+
+      writeFileSync(calls,"");cfg.chat.codexEffort="ultra";events=await collectChat("invalid effort stays local",existingId);expect(events.some(event=>event.type==="done")).toBeTrue();argv=JSON.parse(readFileSync(calls,"utf8").trim());expect(argv).not.toContain("-c");expect(argv.some((part:string)=>part.startsWith("model_reasoning_effort="))).toBeFalse();cfg.chat.codexEffort="max";
+
+      writeFileSync(calls,"");events=await collectChat("fallback",undefined,"codex","unsupported-model");done=events.find(event=>event.type==="done");expect(done.chat.model).toBe("default");chatFiles.push(join(DATA,"chats",`${done.chat.id}.json`));const attempts=readFileSync(calls,"utf8").trim().split("\n").map(line=>JSON.parse(line));expect(attempts).toHaveLength(2);expect(attempts[0]).toEqual(expect.arrayContaining(["-m","unsupported-model"]));expect(attempts[1]).not.toContain("unsupported-model");expect(attempts.every(args=>!args.includes("-c")&&!args.some((part:string)=>part.startsWith("model_reasoning_effort=")))).toBeTrue();
+    }finally{
+      cfg.llm.codexBin=oldBin;cfg.chat.codexEffort=oldEffort;cfg.chat.providers.codex=oldModels;if(oldCalls===undefined)delete process.env.OWNWARD_CHAT_CALLS;else process.env.OWNWARD_CHAT_CALLS=oldCalls;
+    }
+  });
 });
 
 describe("旧对话 JSON 兼容", () => {

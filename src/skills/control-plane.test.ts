@@ -72,13 +72,13 @@ describe("Skill control plane safety", () => {
 
   test("adopt is approval-bound, journaled, idempotent, and conditionally rollbackable", async () => {
     const options = fixture(), claude = join(options.home, ".claude", "skills", "shared"), codex = join(options.home, ".agents", "skills", "shared"); skill(claude, "shared"); skill(codex, "shared");
-    const service = new SkillInventoryService(options), inventory = await service.scan(), ids = inventory.observations.filter((x) => x.name === "shared").map((x) => x.id), plan = service.plan({ expectedRevision: inventory.revision, actions: [{ kind: "adopt", observationIds: ids }] });
-    expect(plan.effects.some((x) => x.kind === "replace-with-link" && x.destructive)).toBeTrue();
+    const service = new SkillInventoryService(options), inventory = await service.scan(), catalog = inventory.catalog.find((x) => x.name === "shared")!, ids = catalog.observationIds, plan = service.plan({ expectedRevision: inventory.revision, actions: [{ kind: "adopt", observationIds: ids }] });
+    expect(ids).toHaveLength(2); expect(plan.effects.filter((x) => x.kind === "replace-with-link" && x.destructive)).toHaveLength(2);
     await expect(service.apply({ planId: plan.id, expectedPlanDigest: plan.digest, expectedRevision: inventory.revision, idempotencyKey: "adopt-without-approval" })).rejects.toThrow("需要人工审批");
     const session = "browser-session-123456789", approval = service.mintApproval(plan.id, plan.digest, session), idempotencyKey = "adopt-shared-12345";
     const tx = await service.apply({ planId: plan.id, expectedPlanDigest: plan.digest, expectedRevision: inventory.revision, idempotencyKey, approval: { ...approval, browserSession: session } });
     expect(tx.phase).toBe("committed"); expect(readlinkSync(claude)).toBe(readlinkSync(codex)); const managed = readlinkSync(claude); expect(existsSync(join(managed, "SKILL.md"))).toBeTrue();
-    const registry = JSON.parse(readFileSync(join(options.storeRoot!, "registry.json"), "utf8")); expect(registry.skills).toHaveLength(1); expect(registry.skills[0].lastVerifiedTransaction).toBe(plan.transactionId); expect(tx.id).toBe(plan.transactionId);
+    const registry = JSON.parse(readFileSync(join(options.storeRoot!, "registry.json"), "utf8")); expect(registry.skills).toHaveLength(1); expect(registry.skills[0].sources).toHaveLength(2); expect(registry.skills[0].lastVerifiedTransaction).toBe(plan.transactionId); expect(tx.id).toBe(plan.transactionId);
     expect(JSON.stringify(service.publicRegistry())).not.toContain(options.home); const rollbackPreview = service.rollbackPreview(tx.id); expect(rollbackPreview.effects.length).toBeGreaterThan(0); expect(JSON.stringify(rollbackPreview)).not.toContain(options.home);
     const replay = await service.apply({ planId: plan.id, expectedPlanDigest: plan.digest, expectedRevision: inventory.revision, idempotencyKey, approval: { ...approval, browserSession: session } }); expect(replay.id).toBe(tx.id);
     const fresh = await service.scan(), rollbackApproval = service.mintRollbackApproval(tx.id, fresh.revision, session), rolled = service.rollback({ transactionId: tx.id, expectedRevision: fresh.revision, approval: { id: rollbackApproval.id, nonce: rollbackApproval.nonce, browserSession: session } });

@@ -4,6 +4,7 @@ import { isAbsolute, relative } from "path";
 import { expandCodexHome } from "../../sessions/provider-home.ts";
 import { RunnerClient } from "../../runner/client.ts";
 import { stageRunnerAttachment } from "../../runner/attachments.ts";
+import { codexMcpOutputParts, contentImageUrls } from "../../runner/agent-images.ts";
 import type { DevMsg } from "./types.ts";
 import { RunnerCommandJournal, RunnerEventJournal, type RunnerCommandRecord, type RunnerEventRecord } from "../../runner/journals.ts";
 import { RunRepository, type RunEvent } from "../../runs/repository.ts";
@@ -194,7 +195,7 @@ export class RunnerAgentStateProjector {
   private applyMessage(body: any, at: string): void {
     if (!body || typeof body !== "object") { const text = typeof body === "string" ? body : ""; if (text) this.messages.push({ role: "assistant", text, ts: at }); this.partial = ""; return; }
     // claude 工具报错（adapter 既有 payload：{role:"tool",error:true,content[]}）
-    if (body.role === "tool" && body.error) { const txt = (Array.isArray(body.content) ? body.content.map(flatContent).join("\n") : flatContent(body.content)).trim(); if (txt) this.messages.push({ role: "tool", name: "⚠️ 出错", text: txt.slice(0, 500), ts: at }); return; }
+    if (body.role === "tool" && body.error) { const txt = (Array.isArray(body.content) ? body.content.map(flatContent).join("\n") : flatContent(body.content)).trim(),images=contentImageUrls(body.content).filter(url=>/^\/api\/agent-image\/[A-Za-z0-9][A-Za-z0-9._-]{0,79}\/[a-f0-9]{16}\.(?:png|jpg|webp|gif)$/.test(url)).slice(0,8); if (txt||images.length) this.messages.push({ role: "tool", name: "⚠️ 出错", text: txt?txt.slice(0,500):`🖼 图片 ×${images.length}`, ...(images.length?{images}:{}), ts: at }); return; }
     // claude 成功工具结果（payload：{role:"tool-result",results:[{name,content,images?}]}）
     if (body.role === "tool-result" && Array.isArray(body.results)) {
       for (const r of body.results.slice(0, 20)) {
@@ -242,6 +243,18 @@ export class RunnerAgentStateProjector {
     }
     if (kind === "file_change") { const changes = Array.isArray(item.changes) ? item.changes.map((c: any) => `${c?.kind ?? ""} ${c?.path ?? ""}`.trim()).filter(Boolean).join("\n") : ""; this.messages.push({ role: "tool", name: "✎ 文件", text: (changes || JSON.stringify(item).slice(0, 500)), ts: at }); return; }
     if (kind === "web_search") { this.messages.push({ role: "tool", name: "🔎 搜索", text: String(item.query ?? "").slice(0, 200), ts: at }); return; }
+    if (kind === "mcp_tool_call") {
+      const invocation = item.invocation && typeof item.invocation === "object" ? item.invocation : item;
+      const server = String(invocation.server ?? item.server ?? "").slice(0, 60), tool = String(invocation.tool ?? item.tool ?? item.name ?? "MCP").slice(0, 80);
+      const name = [server, tool].filter(Boolean).join("/");
+      const parts = codexMcpOutputParts(item);
+      let projected = false;
+      for (const part of parts) {
+        if (part.type === "image") { this.messages.push({ role: "tool", name: "image", text: "🖼 图片 ×1", images: [part.url], ts: at }); projected = true; }
+        else if (part.text.trim()) { this.messages.push({ role: "tool", name: `↳ ${name || "MCP"}`, text: part.text.slice(0, 2000), ts: at }); projected = true; }
+      }
+      if (projected) return;
+    }
     this.messages.push({ role: "tool", name: kind, text: JSON.stringify(item).slice(0, 500), ts: at });  // mcp_tool_call 等：有界兜底展示
   }
   /** provider-notice 透出为 system 消息——限流/登录过期/压缩中/压缩失败/stderr。

@@ -1,6 +1,9 @@
 // 飞行记录装配的单测：锁死纯逻辑（prompts/命令去重/审批筛选/未完成项/双链/frontmatter/
 // git 状态分类/命令名规范化/canonical 首 prompt 兜底/带 scope 双链路径）。
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { DevMsg, PlanStep } from "./agent-session.ts";
 import type { DecisionAudit } from "./approval.ts";
 import {
@@ -12,11 +15,47 @@ import {
   extractPrompts,
   extractUnfinished,
   filterAudit,
+  gitSnapshot,
   isCommandTool,
   projectLink,
   slugOf,
   type GitInfo,
 } from "./flight-record.ts";
+
+const tempRepos: string[] = [];
+afterEach(() => {
+  for (const repo of tempRepos.splice(0)) rmSync(repo, { recursive: true, force: true });
+});
+
+function git(repo: string, ...args: string[]): string {
+  const result = Bun.spawnSync(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+  return new TextDecoder().decode(result.stdout).trim();
+}
+
+function attributionRepo() {
+  const repo = mkdtempSync(join(tmpdir(), "ownward-flight-git-"));
+  tempRepos.push(repo);
+  git(repo, "init", "-q");
+  git(repo, "config", "user.name", "Owner");
+  git(repo, "config", "user.email", "owner@example.com");
+  writeFileSync(join(repo, "base.txt"), "base\n");
+  git(repo, "add", "base.txt");
+  git(repo, "commit", "-q", "-m", "base");
+  const startHead = git(repo, "rev-parse", "HEAD");
+
+  writeFileSync(join(repo, "owner.txt"), "owner\n");
+  git(repo, "add", "owner.txt");
+  git(repo, "commit", "-q", "-m", "owner change");
+
+  writeFileSync(join(repo, "foreign.txt"), "foreign\n");
+  git(repo, "add", "foreign.txt");
+  git(repo, "-c", "user.name=Foreign", "-c", "user.email=foreign@example.com", "commit", "-q", "-m", "foreign change");
+
+  writeFileSync(join(repo, "owner.txt"), "owner\nworking tree\n");
+  writeFileSync(join(repo, "scratch.txt"), "untracked\n");
+  return { repo, startHead };
+}
 
 const now = new Date("2026-07-22T10:30:00+08:00");
 
@@ -130,7 +169,54 @@ describe("classifyGit 基线状态分类", () => {
   test("有 diff / commit / untracked 任一 → dirty", () => {
     expect(probe({ diffStat: " a | 1 +" })).toBe("dirty");
     expect(probe({ commits: "abc x" })).toBe("dirty");
+    expect(probe({ workingTreeStat: " b | 1 +" })).toBe("dirty");
     expect(probe({ untracked: ["new.ts"] })).toBe("dirty");
+  });
+});
+
+describe("gitSnapshot 任务作者归属", () => {
+  test("只计入冻结身份的提交，保留作者审计信息并单列当前未提交改动", async () => {
+    const { repo, startHead } = attributionRepo();
+    const snapshot = await gitSnapshot({
+      cwd: repo,
+      startHead,
+      gitIdentity: { name: "Owner", email: "owner@example.com" },
+    });
+
+    expect(snapshot.identitySource).toBe("frozen");
+    expect(snapshot.commits).toContain("Owner <owner@example.com>");
+    expect(snapshot.commits).toContain("owner change");
+    expect(snapshot.commits).not.toContain("foreign change");
+    expect(snapshot.diffStat).toContain("owner.txt");
+    expect(snapshot.diffStat).not.toContain("foreign.txt");
+    expect(snapshot.workingTreeStat).toContain("owner.txt");
+    expect(snapshot.untracked).toEqual(["scratch.txt"]);
+    expect(snapshot.excludedCommitCount).toBe(1);
+  });
+
+  test("历史任务没有冻结身份时显式使用仓库配置，不从提交历史猜作者", async () => {
+    const { repo, startHead } = attributionRepo();
+    const snapshot = await gitSnapshot({ cwd: repo, startHead });
+
+    expect(snapshot.identitySource).toBe("repository-config");
+    expect(snapshot.identity).toEqual({ name: "Owner", email: "owner@example.com" });
+    expect(snapshot.commits).toContain("owner change");
+    expect(snapshot.commits).not.toContain("foreign change");
+    expect(snapshot.diffStat).not.toContain("foreign.txt");
+  });
+
+  test("历史任务且仓库身份不可用时不归属任何提交", async () => {
+    const { repo, startHead } = attributionRepo();
+    git(repo, "config", "user.name", "");
+    git(repo, "config", "user.email", "");
+    const snapshot = await gitSnapshot({ cwd: repo, startHead });
+
+    expect(snapshot.identitySource).toBe("unavailable");
+    expect(snapshot.identity).toBeUndefined();
+    expect(snapshot.commits).toBe("");
+    expect(snapshot.diffStat).toBe("");
+    expect(snapshot.excludedCommitCount).toBe(2);
+    expect(snapshot.workingTreeStat).toContain("owner.txt");
   });
 });
 
@@ -204,7 +290,7 @@ describe("assembleFlightRecord git 状态占位", () => {
 
   test("clean 不写「无改动或无 git」歧义文案", () => {
     const rec = assembleFlightRecord({ ...base, git: { status: "clean", base: "abc", diffStat: "", commits: "", untracked: [] } });
-    expect(rec.content).toContain("(工作树干净，无改动)");
+    expect(rec.content).toContain("(未发现归属于任务身份的提交或当前未提交改动)");
     expect(rec.content).toContain("(无高危操作或未触发审批)");
     expect(rec.content).toContain("(计划全部完成或无计划)");
     expect(rec.content).toContain("backend: claude"); // 默认 backend

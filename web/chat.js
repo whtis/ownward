@@ -79,6 +79,7 @@ TABS.chat = {
       Chat.openSeq++; Chat.sel = null; Chat.msgs = []; Chat.binding = null;
       Chat.newRole = ""; Chat.newProjects = [];
       restoreChatComposer();
+      fillModels();
       root.dataset.mobileView = "detail";
       renderChatMsgs(); renderChatList(); renderChatBind(); $("#ch-input").focus();
     });
@@ -123,8 +124,16 @@ async function loadProviders() {
 }
 function fillModels() {
   const models = Chat.providers[Chat.provider] || [];
+  if (!models.length) return;
+  Chat.model = chatModelSelection(models, Chat.model, !!Chat.sel);
   $("#ch-model").innerHTML = models.map((m) => `<option ${m === Chat.model ? "selected" : ""}>${esc(m)}</option>`).join("");
-  if (!models.includes(Chat.model)) Chat.model = models[0] || "";
+  $("#ch-provider").disabled = !!Chat.sel;
+  $("#ch-model").disabled = !!Chat.sel;
+}
+function chatModelSelection(models, requested, existingChat) {
+  if (existingChat) return models.includes(requested) ? requested : "";
+  const explicit = models.filter((model) => model !== "default");
+  return explicit.includes(requested) ? requested : explicit[0] || models[0] || "";
 }
 async function loadChatList() {
   Chat.listError = "";
@@ -155,6 +164,10 @@ async function openChat(id) {
   const c = await getJSON(`/api/chat/messages?id=${encodeURIComponent(id)}`).catch(() => null);
   if (seq !== Chat.openSeq || Chat.sel !== id) return;
   if (!c) { $("#ch-scroll").innerHTML = stateBox("会话暂时无法载入", "error"); renderChatList(); return; }
+  Chat.provider = c.provider || Chat.provider;
+  Chat.model = c.model || Chat.model;
+  $("#ch-provider").value = Chat.provider;
+  fillModels();
   Chat.msgs = c?.messages || [];
   Chat.binding = c?.binding || null;
   renderChatList(); renderChatMsgs(); renderChatBind();

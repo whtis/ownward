@@ -139,9 +139,19 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
     suspend fun devInterrupt(id: String): OkMsg =
         post("/api/dev/interrupt", buildJsonObject { put("id", id) })
 
-    suspend fun devHandoff(id: String, providerId: String, confirmUnknownOutcome: Boolean = false): OkMsg =
+    suspend fun devHandoff(
+        id: String,
+        providerId: String,
+        confirmUnknownOutcome: Boolean = false,
+        model: String? = null,
+        effort: String? = null,
+        reason: String = "manual",
+    ): OkMsg =
         post("/api/dev/handoff", buildJsonObject {
-            put("id", id); put("providerId", providerId); put("reason", "manual")
+            put("id", id); put("providerId", providerId)
+            if (!model.isNullOrEmpty()) put("model", model)
+            if (!effort.isNullOrEmpty()) put("effort", effort)
+            put("reason", reason)
             put("confirmUnknownOutcome", confirmUnknownOutcome)
         })
 
@@ -301,11 +311,12 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
      */
     suspend fun dispatchWork(
         dir: String, task: String, provider: String, worktree: Boolean,
-        model: String?, permission: String?, images: List<OutImage> = emptyList(),
+        model: String?, effort: String? = null, permission: String?, images: List<OutImage> = emptyList(),
     ): DispatchResult = post("/api/work", buildJsonObject {
         put("dir", dir); put("task", task); put("bg", true)
         put("provider", provider); put("worktree", worktree)
         if (!model.isNullOrBlank()) put("model", model)
+        if (!effort.isNullOrBlank()) put("effort", effort)
         if (!permission.isNullOrBlank()) put("permission", permission)
         if (images.isNotEmpty()) put("images", buildJsonArray {
             images.forEach { img ->

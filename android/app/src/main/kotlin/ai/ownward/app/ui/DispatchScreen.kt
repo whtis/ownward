@@ -79,10 +79,62 @@ private val ENGINES = listOf("claude" to "Claude", "codex" to "Codex", "codebudd
 
 /** 服务端 chat.providers 没配该引擎时的兜底型号表（与 web/app.js 同一份） */
 private val FALLBACK_MODELS = mapOf(
-    "claude" to listOf("opus", "sonnet", "haiku"),
-    "codex" to listOf("gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-5.5-pro"),
+    "claude" to listOf("fable", "opus", "sonnet", "haiku"),
+    "codex" to listOf("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"),
     "codebuddy" to listOf("hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"),
 )
+
+private val WORK_PROVIDER_EFFORTS = mapOf(
+    "claude" to listOf("low", "medium", "high", "xhigh", "max"),
+    "codebuddy" to listOf("low", "medium", "high", "xhigh", "max"),
+)
+
+internal val WORK_CODEX_MODEL_EFFORTS = linkedMapOf(
+    "gpt-5.6-sol" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
+    "gpt-5.6-terra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
+    "gpt-5.6-luna" to listOf("low", "medium", "high", "xhigh", "max"),
+    "gpt-5.5" to listOf("low", "medium", "high", "xhigh"),
+    "gpt-5.4" to listOf("low", "medium", "high", "xhigh"),
+)
+
+internal fun workProviderDefaultModel(provider: String): String =
+    if (provider == "codex") "gpt-5.6-sol" else ""
+
+internal fun workProviderHandoffModel(provider: String): String = when (provider) {
+    "codex" -> "gpt-5.6-sol"
+    "codebuddy" -> "hy3"
+    else -> "sonnet"
+}
+
+internal fun workProviderModels(provider: String, providers: Map<String, List<String>>): List<String> =
+    if (provider == "codex") FALLBACK_MODELS[provider].orEmpty()
+    else (providers[provider].orEmpty() + FALLBACK_MODELS[provider].orEmpty()).distinct()
+
+internal fun workProviderEfforts(provider: String, model: String): List<String> =
+    if (provider == "codex") WORK_CODEX_MODEL_EFFORTS[model.ifBlank { workProviderDefaultModel(provider) }].orEmpty()
+    else WORK_PROVIDER_EFFORTS[provider].orEmpty()
+
+internal fun workProviderDefaultEffort(provider: String, model: String): String =
+    workProviderEfforts(provider, model).let { if ("medium" in it) "medium" else it.firstOrNull().orEmpty() }
+
+internal fun workProviderSelectionIsValid(
+    provider: String,
+    model: String,
+    effort: String,
+    allowOmitted: Boolean = false,
+): Boolean {
+    if (!allowOmitted && (model.isBlank() || effort.isBlank())) return false
+    val effectiveModel = model.ifBlank { workProviderDefaultModel(provider) }
+    val modelValid = model.isBlank() || provider != "codex" || effectiveModel in WORK_CODEX_MODEL_EFFORTS
+    val effortValid = effort.isBlank() || effort in workProviderEfforts(provider, effectiveModel)
+    return modelValid && effortValid
+}
+
+internal fun normalizedDispatchDefaultEffort(provider: String, model: String, configured: String?): String = when {
+    configured.isNullOrEmpty() -> ""
+    configured in workProviderEfforts(provider, model) -> configured
+    else -> workProviderDefaultEffort(provider, model)
+}
 
 internal data class DirPickerNav(
     val requestedPath: String?,
@@ -114,11 +166,13 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
     var task by rememberSaveable { mutableStateOf("") }
     var provider by rememberSaveable { mutableStateOf("claude") }
     var model by rememberSaveable { mutableStateOf("") }          // "" = 引擎默认
+    var effort by rememberSaveable { mutableStateOf("") }         // "" = Provider 默认
     var permission by rememberSaveable { mutableStateOf("safe") } // safe | bypass
     var worktree by rememberSaveable { mutableStateOf(true) }
     var defaultsApplied by rememberSaveable { mutableStateOf(false) } // 旋转/返回不重复覆盖用户已改的值
     var pendingImages by remember { mutableStateOf<List<Pair<Uri, OutImage>>>(emptyList()) }
     var modelMenu by remember { mutableStateOf(false) }
+    var effortMenu by remember { mutableStateOf(false) }
     var browsing by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -137,7 +191,8 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
                     d.provider != null && ENGINES.any { it.first == d.provider } -> provider = d.provider
                     d.codex != null -> provider = if (d.codex) "codex" else "claude"
                 }
-                if (!d.model.isNullOrBlank()) model = d.model
+                model = d.model?.takeIf { it.isNotBlank() } ?: workProviderDefaultModel(provider)
+                effort = normalizedDispatchDefaultEffort(provider, model, d.effort)
                 if (d.permission == "safe" || (d.permission == "bypass" && s.allowFullAccess)) permission = d.permission
                 defaultsApplied = true
             }
@@ -146,7 +201,8 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
         }.onFailure { error = it.message }
     }
 
-    val models = providers[provider]?.takeIf { it.isNotEmpty() } ?: FALLBACK_MODELS[provider].orEmpty()
+    val models = workProviderModels(provider, providers)
+    val efforts = workProviderEfforts(provider, model)
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(ImageEncoder.MAX_IMAGES)
@@ -161,6 +217,9 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
     fun submit() {
         val d = dir.trim()
         if (d.isBlank()) { error = "先选项目目录"; return }
+        if (effort.isNotBlank() && effort !in workProviderEfforts(provider, model)) {
+            error = "所选模型不支持这个思考深度"; return
+        }
         if (submitting) return
         submitting = true
         error = null
@@ -172,6 +231,7 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
                     provider = provider,
                     worktree = worktree,
                     model = model.ifBlank { null },
+                    effort = effort.ifBlank { null },
                     permission = permission,
                     images = pendingImages.map { it.second },
                 )
@@ -261,11 +321,41 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
                     SegmentedButton(
                         selected = provider == key,
                         onClick = {
-                            if (provider != key) { provider = key; model = "" } // 型号表随引擎切换，旧值不跨引擎
+                            if (provider != key) {
+                                provider = key
+                                model = workProviderDefaultModel(key)
+                                effort = workProviderDefaultEffort(key, model)
+                            }
                         },
                         shape = SegmentedButtonDefaults.itemShape(index = i, count = ENGINES.size),
                         label = { Text(label) },
                     )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Box {
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth().clickable { effortMenu = true },
+                ) {
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("思考深度", style = MaterialTheme.typography.bodyMedium)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            effort.ifBlank { "默认" },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Icon(Icons.Filled.ArrowDropDown, null, tint = ownwardColors.TextDim, modifier = Modifier.size(20.dp))
+                    }
+                }
+                DropdownMenu(expanded = effortMenu, onDismissRequest = { effortMenu = false }) {
+                    DropdownMenuItem(text = { Text("默认") }, onClick = { effort = ""; effortMenu = false })
+                    efforts.forEach { item ->
+                        DropdownMenuItem(text = { Text(item) }, onClick = { effort = item; effortMenu = false })
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -287,9 +377,17 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
                     }
                 }
                 DropdownMenu(expanded = modelMenu, onDismissRequest = { modelMenu = false }) {
-                    DropdownMenuItem(text = { Text("默认") }, onClick = { model = ""; modelMenu = false })
+                    DropdownMenuItem(text = { Text("默认") }, onClick = {
+                        model = ""
+                        effort = effort.takeIf { it in workProviderEfforts(provider, model) } ?: workProviderDefaultEffort(provider, model)
+                        modelMenu = false
+                    })
                     models.forEach { m ->
-                        DropdownMenuItem(text = { Text(m) }, onClick = { model = m; modelMenu = false })
+                        DropdownMenuItem(text = { Text(m) }, onClick = {
+                            model = m
+                            effort = effort.takeIf { it in workProviderEfforts(provider, model) } ?: workProviderDefaultEffort(provider, model)
+                            modelMenu = false
+                        })
                     }
                 }
             }

@@ -21,6 +21,21 @@ if (fakePrompt === "LONG") { await Bun.sleep(30_000); process.exit(0); }
 if (fakePrompt === "CHILD_HANG") { const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }); send({ type: "item.completed", item: { id: "child", type: "agent_message", text: `child:${child.pid}` } }); await Bun.sleep(30_000); process.exit(0); }
 if (fakePrompt === "ONE_BAD") process.stdout.write("bad\n");
 if (fakePrompt === "CHUNKED") { const line = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "chunked" } }) + "\n"; process.stdout.write(line.slice(0, 9)); await Bun.sleep(5); process.stdout.write(line.slice(9)); }
+else if (fakePrompt === "MCP_IMAGES") {
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(3 * 1024 * 1024)]).toString("base64");
+  send({ type: "item.completed", item: { id: "mcp-image", type: "mcp_tool_call", server: "image-server", tool: "render", arguments: { prompt: "fixture" }, result: { content: [{ type: "text", text: "before" }, { type: "image", data: png, mimeType: "image/png" }, { type: "text", text: "after" }] } } });
+}
+else if (fakePrompt === "MCP_MULTI_IMAGES") {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const images = Array.from({ length: 8 }, (_, index) => ({ type: "image", data: Buffer.concat([signature, Buffer.alloc(1024 * 1024 - signature.length, index + 1)]).toString("base64"), mimeType: "image/png" }));
+  send({ type: "item.completed", item: { id: "mcp-multi-image", type: "mcp_tool_call", server: "image-server", tool: "render-many", result: { content: [{ type: "text", text: "before" }, ...images, { type: "text", text: "after" }] } } });
+}
+else if (fakePrompt === "MCP_IMAGE_OVERFLOW") {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const size = 1152 * 1024;
+  const images = Array.from({ length: 8 }, (_, index) => ({ type: "image", data: Buffer.concat([signature, Buffer.alloc(size - signature.length, index + 1)]).toString("base64"), mimeType: "image/png" }));
+  send({ type: "item.completed", item: { id: "mcp-overflow", type: "mcp_tool_call", server: "image-server", tool: "overflow", result: { content: images } } });
+}
 else {
   send({ type: "item.started", item: { id: "message-1", type: "agent_message", text: "par" } });
   send({ type: "item.updated", item: { id: "message-1", type: "agent_message", text: "partial" } });

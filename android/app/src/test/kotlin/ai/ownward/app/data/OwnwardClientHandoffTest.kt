@@ -42,4 +42,57 @@ class OwnwardClientHandoffTest {
             server.takeRequest().body.readUtf8(),
         )
     }
+
+    @Test fun reconfigurePostsProviderModelAndEffort() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"ok":true,"msg":"ok"}"""))
+
+        client.devHandoff(
+            id = "task 1",
+            providerId = "codex",
+            model = "gpt-5.6-sol",
+            effort = "xhigh",
+            reason = "manual-reconfigure",
+        )
+
+        assertEquals(
+            """{"id":"task 1","providerId":"codex","model":"gpt-5.6-sol","effort":"xhigh","reason":"manual-reconfigure","confirmUnknownOutcome":false}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
+    @Test fun reconfigureOmitsProviderDefaultSentinels() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"ok":true,"msg":"ok"}"""))
+
+        client.devHandoff(
+            id = "task 1",
+            providerId = "codex",
+            model = "",
+            effort = "high",
+            reason = "manual-reconfigure",
+        )
+
+        assertEquals(
+            """{"id":"task 1","providerId":"codex","effort":"high","reason":"manual-reconfigure","confirmUnknownOutcome":false}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
+    @Test fun dispatchPostsSelectedEffort() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"ok":true,"msg":"ok"}"""))
+
+        client.dispatchWork(
+            dir = "/repo",
+            task = "work",
+            provider = "codex",
+            worktree = true,
+            model = "gpt-5.6-sol",
+            effort = "ultra",
+            permission = "safe",
+        )
+
+        assertEquals(
+            """{"dir":"/repo","task":"work","bg":true,"provider":"codex","worktree":true,"model":"gpt-5.6-sol","effort":"ultra","permission":"safe"}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
 }

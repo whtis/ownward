@@ -17,14 +17,20 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,13 +77,22 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
     var input by remember { mutableStateOf("") }
     var pendingImages by remember { mutableStateOf<List<Pair<Uri, OutImage>>>(emptyList()) }
     var sending by remember { mutableStateOf(false) }
+    var providers by remember { mutableStateOf(mapOf<String, List<String>>()) }
     var handoffTarget by remember { mutableStateOf<String?>(null) }
+    var handoffProvider by remember { mutableStateOf("") }
+    var handoffModel by remember { mutableStateOf("") }
+    var handoffEffort by remember { mutableStateOf("") }
+    var handoffError by remember { mutableStateOf<String?>(null) }
     var confirmUnknownHandoff by remember { mutableStateOf(false) }
     var switching by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val snackbar = remember { SnackbarHostState() }
+
+    LaunchedEffect(Unit) {
+        runCatching { client.chatProviders() }.onSuccess { providers = it }
+    }
 
     suspend fun refresh() {
         try {
@@ -176,7 +191,16 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                     },
                     navigationIcon = { DrawerOrBackButton(onBack) },
                     actions = {
-                        IconButton(onClick = { showInfo = true }) { Icon(Icons.Filled.Info, "详情") }
+                        IconButton(onClick = {
+                            state?.let { s ->
+                                val currentProvider = agentProvider(s)
+                                handoffProvider = currentProvider
+                                handoffModel = s.model.orEmpty()
+                                handoffEffort = s.effort.orEmpty()
+                                handoffError = null
+                            }
+                            showInfo = true
+                        }) { Icon(Icons.Filled.Info, "详情") }
                     },
                     colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent),
                 )
@@ -308,8 +332,16 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
         val s = state!!
         val clipboard = LocalClipboardManager.current
         ModalBottomSheet(onDismissRequest = { showInfo = false }) {
-            Column(Modifier.padding(horizontal = 24.dp).navigationBarsPadding()) {
-                InfoRow("引擎", s.backend + (s.model?.let { " · $it" } ?: ""))
+            Column(
+                Modifier
+                    .padding(horizontal = 24.dp)
+                    .navigationBarsPadding()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                val currentProvider = agentProvider(s)
+                InfoRow("Provider", currentProvider)
+                InfoRow("模型", s.model?.takeIf { it.isNotBlank() } ?: "Provider 默认")
+                InfoRow("思考深度", s.effort?.takeIf { it.isNotBlank() } ?: "Provider 默认")
                 InfoRow("控制权", when (s.control) {
                     "ownward" -> "ownward（可输入）"
                     "external" -> "桌面终端"
@@ -321,21 +353,102 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                 }
                 s.ctxTokens?.let { InfoRow("上下文", "%.1fk".format(it / 1000.0)) }
                 InfoRow("最近活动", timeAgo(s.lastActivityAt))
-                Text("切换引擎", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp))
+                Text("会话配置", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp))
                 val handoffBlock = handoffBlockReason(s)
                 Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("claude", "codex", "codebuddy").filter { it != s.backend }.forEach { provider ->
-                        OutlinedButton(
+                    listOf("claude", "codex", "codebuddy").forEach { provider ->
+                        val selectProvider = {
+                            handoffProvider = provider
+                            if (provider == currentProvider) {
+                                handoffModel = s.model.orEmpty()
+                                handoffEffort = s.effort.orEmpty()
+                            } else {
+                                handoffModel = workProviderHandoffModel(provider)
+                                handoffEffort = workProviderDefaultEffort(provider, handoffModel)
+                            }
+                            handoffError = null
+                        }
+                        val content = @Composable { Text(provider) }
+                        if (handoffProvider == provider) Button(
                             enabled = handoffBlock == null && !switching,
-                            onClick = { confirmUnknownHandoff = false; handoffTarget = provider },
-                        ) { Text(provider) }
+                            onClick = selectProvider,
+                            content = { content() },
+                        ) else OutlinedButton(
+                            enabled = handoffBlock == null && !switching,
+                            onClick = selectProvider,
+                            content = { content() },
+                        )
                     }
                 }
+                val sameProvider = handoffProvider == currentProvider
+                val modelOptions = buildList {
+                    if (sameProvider && s.model.isNullOrBlank()) add("")
+                    addAll(workProviderModels(handoffProvider, providers))
+                    if (handoffModel.isNotBlank()) add(handoffModel)
+                }.distinct()
+                SessionConfigPicker(
+                    label = "模型",
+                    value = handoffModel,
+                    options = modelOptions,
+                    emptyLabel = "Provider 默认",
+                    onSelect = {
+                        handoffModel = it
+                        if (!(sameProvider && handoffEffort.isBlank())) {
+                            handoffEffort = handoffEffort.takeIf { value -> value in workProviderEfforts(handoffProvider, it) }
+                                ?: workProviderDefaultEffort(handoffProvider, it)
+                        }
+                        handoffError = null
+                    },
+                )
+                val allowedEfforts = workProviderEfforts(handoffProvider, handoffModel)
+                val effortOptions = buildList {
+                    if (sameProvider && s.effort.isNullOrBlank()) add("")
+                    if (handoffEffort.isNotBlank() && handoffEffort !in allowedEfforts) add(handoffEffort)
+                    addAll(allowedEfforts)
+                }
+                SessionConfigPicker(
+                    label = "思考深度",
+                    value = handoffEffort,
+                    options = effortOptions,
+                    emptyLabel = "Provider 默认",
+                    onSelect = { handoffEffort = it; handoffError = null },
+                )
+                val configNoop = sessionConfigIsNoop(
+                    currentProvider, s.model.orEmpty(), s.effort.orEmpty(),
+                    handoffProvider, handoffModel, handoffEffort,
+                )
+                val configValid = handoffProvider.isNotBlank() &&
+                    workProviderSelectionIsValid(handoffProvider, handoffModel, handoffEffort, allowOmitted = sameProvider)
+                Button(
+                    enabled = handoffBlock == null && !switching && configValid && !configNoop,
+                    onClick = {
+                        confirmUnknownHandoff = false
+                        handoffError = null
+                        handoffTarget = handoffProvider
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) { Text(if (sameProvider) "应用配置" else "切换引擎并应用") }
                 if (handoffBlock != null) {
                     Text(
                         handoffBlock,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                if (configNoop && handoffBlock == null) {
+                    Text(
+                        "请选择不同的模型、思考深度或 Provider",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                handoffError?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(top = 4.dp),
                     )
                 }
@@ -374,11 +487,12 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
     handoffTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { if (!switching) { handoffTarget = null; confirmUnknownHandoff = false } },
-            title = { Text(if (confirmUnknownHandoff) "确认未知副作用后切换？" else "切换到 $target？") },
+            title = { Text(if (confirmUnknownHandoff) "确认未知副作用后切换？" else if (target == state?.let(::agentProvider)) "应用会话配置？" else "切换到 $target？") },
             text = {
                 Text(if (confirmUnknownHandoff)
                     "旧 Run 的执行结果未知，可能已经产生文件或命令副作用。继续接力不会重放旧命令，请先核对工作区状态。"
-                else "当前会话会保留，新引擎将接力继续这个任务。")
+                else if (target == state?.let(::agentProvider)) "当前会话的有界历史会保留，新的模型和思考深度从下一轮生效。"
+                else "当前会话的有界历史会保留，新引擎将接力继续这个任务。")
             },
             dismissButton = { TextButton(enabled = !switching, onClick = { handoffTarget = null; confirmUnknownHandoff = false }) { Text("取消") } },
             confirmButton = {
@@ -386,7 +500,31 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                     switching = true
                     scope.launch {
                         try {
-                            client.devHandoff(taskId, target, confirmUnknownHandoff)
+                            val currentProvider = state?.let(::agentProvider).orEmpty()
+                            if (sessionConfigIsNoop(
+                                    currentProvider, state?.model.orEmpty(), state?.effort.orEmpty(),
+                                    target, handoffModel, handoffEffort,
+                                )) {
+                                handoffTarget = null
+                                handoffError = "配置没有变化"
+                                return@launch
+                            }
+                            if (!workProviderSelectionIsValid(
+                                    target, handoffModel, handoffEffort,
+                                    allowOmitted = target == currentProvider,
+                                )) {
+                                handoffTarget = null
+                                handoffError = "所选模型不支持这个思考深度"
+                                return@launch
+                            }
+                            client.devHandoff(
+                                id = taskId,
+                                providerId = target,
+                                confirmUnknownOutcome = confirmUnknownHandoff,
+                                model = handoffModel,
+                                effort = handoffEffort,
+                                reason = if (target == currentProvider) "manual-reconfigure" else "manual-handoff",
+                            )
                             handoffTarget = null
                             confirmUnknownHandoff = false
                             showInfo = false
@@ -395,7 +533,8 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                             if (needsUnknownHandoffConfirmation(e)) {
                                 confirmUnknownHandoff = true
                             } else {
-                                error = e.message
+                                handoffTarget = null
+                                handoffError = e.message ?: "应用配置失败"
                             }
                         } finally {
                             switching = false
@@ -417,6 +556,51 @@ fun handoffBlockReason(state: AgentState): String? = when {
     state.queued.isNotEmpty() -> "有排队消息，请先等待发送或撤回"
     state.operability == "read-only" -> "会话已归档，不能切换"
     else -> null
+}
+
+fun agentProvider(state: AgentState): String =
+    state.providerId?.takeIf { it.isNotBlank() } ?: state.backend.ifBlank { "claude" }
+
+fun sessionConfigIsNoop(
+    currentProvider: String,
+    currentModel: String,
+    currentEffort: String,
+    provider: String,
+    model: String,
+    effort: String,
+): Boolean = currentProvider == provider && currentModel == model && currentEffort == effort
+
+@Composable
+private fun SessionConfigPicker(
+    label: String,
+    value: String,
+    options: List<String>,
+    emptyLabel: String,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Surface(
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth().clickable { expanded = true },
+        ) {
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(label, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.weight(1f))
+                Text(value.ifBlank { emptyLabel }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                Icon(Icons.Filled.ArrowDropDown, null, modifier = Modifier.size(20.dp))
+            }
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.distinct().forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.ifBlank { emptyLabel }) },
+                    onClick = { onSelect(option); expanded = false },
+                )
+            }
+        }
+    }
 }
 
 @Composable

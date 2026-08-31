@@ -1,10 +1,12 @@
+import { appendFileSync } from "fs";
 export {};
 if (process.env.NODE_ENV !== "test" || process.env.OWNWARD_CLAUDE_FAKE !== "1") throw new Error("fake Claude CLI 需要显式 test 双门");
 const args = process.argv.slice(2);
 // 模拟 commander：不认识的旗标即刻报错退出；认识但缺值的旗标报 argument missing——与真 CLI 行为一致（probe 靠 stderr 文本区分）
 if(process.env.FAKE_CLAUDE_PERMISSION_PROMPT_TOOL==="0"&&args.includes("--permission-prompt-tool")){console.error("error: unknown option '--permission-prompt-tool'");process.exit(1);}
 {const ppIdx=args.indexOf("--permission-prompt-tool");if(ppIdx>=0&&(ppIdx===args.length-1||args[ppIdx+1].startsWith("-"))){console.error("error: option '--permission-prompt-tool <tool>' argument missing");process.exit(1);}}
-if(args.includes("--help")){const delay=Number(process.env.FAKE_CLAUDE_HELP_DELAY_MS||0);if(delay>0)await Bun.sleep(delay);console.log(process.env.FAKE_CLAUDE_EFFORT==="0"?"fake help":"fake help --effort <level>");process.exit(0);}
+if(args.includes("--help")){const delay=Number(process.env.FAKE_CLAUDE_HELP_DELAY_MS||0);if(delay>0)await Bun.sleep(delay);if(process.env.FAKE_CLAUDE_HELP_FAIL==="1"){console.error("fake help failed");process.exit(9);}console.log(process.env.FAKE_CLAUDE_EFFORT==="0"?"fake help":"fake help --effort <level>");process.exit(0);}
+if(process.env.FAKE_CLAUDE_SPAWN_RECORD)appendFileSync(process.env.FAKE_CLAUDE_SPAWN_RECORD,JSON.stringify(args)+"\n");
 const sessionId = process.env.FAKE_CLAUDE_SESSION_ID || `fake-session-${process.pid}`;
 let initialized = false;
 let waiting: "approval" | "long" | "long-noack" | null = null;
@@ -29,6 +31,30 @@ function onFrame(frame: any) {
     if (text === "GIANT_HALF") { process.stdout.write("x".repeat(4096)); return; }
     if (text === "MULTI_DELTA") { write({ type: "stream_event", event: { delta: { type: "text_delta", text: "a" } } }); write({ type: "stream_event", event: { delta: { type: "text_delta", text: "b" } } }); write({ type: "stream_event", event: { delta: { type: "text_delta", text: "c" } } }); completeWithUsage("abc", { input_tokens: 1, output_tokens: 1 }); return; }
     if (text === "NOTICES") { write({ type: "system", subtype: "status", status: "compacting" }); write({ type: "system", subtype: "status", compact_result: "failed", compact_error: "compact boom" }); write({ type: "system", subtype: "status", compact_result: "success" }); write({ type: "system", subtype: "status", status: "some_future_status" }); write({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "rate limit exceeded" }] } }); write({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "authentication token expired" }] } }); write({ type: "assistant", isSidechain: true, message: { model: "fake", content: [{ type: "text", text: "hidden" }] } }); write({ type: "user", message: { content: [{ type: "tool_result", is_error: true, content: "tool failed" }] } }); complete("notice-done"); return; }
+    if (text === "LARGE_TOOL_IMAGE") {
+      const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(3 * 1024 * 1024)]).toString("base64");
+      write({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "large-image", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: png } }] }] } });
+      complete("large-image-done"); return;
+    }
+    if (text === "MULTI_TOOL_IMAGES") {
+      const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const images = Array.from({ length: 8 }, (_, index) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.concat([signature, Buffer.alloc(1024 * 1024 - signature.length, index + 1)]).toString("base64") } }));
+      write({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "multi-image", content: images }] } });
+      complete("multi-image-done"); return;
+    }
+    if (text === "TOOL_IMAGE_OVERFLOW") {
+      const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const size = 1152 * 1024;
+      const images = Array.from({ length: 8 }, (_, index) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.concat([signature, Buffer.alloc(size - signature.length, index + 1)]).toString("base64") } }));
+      write({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "overflow", content: images }] } });
+      complete("overflow-done"); return;
+    }
+    if (text === "ERROR_TOOL_IMAGES") {
+      const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const small = Buffer.concat([signature, Buffer.alloc(1024, 1)]).toString("base64"), large = Buffer.concat([signature, Buffer.alloc(3 * 1024 * 1024, 2)]).toString("base64");
+      write({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "error-images", is_error: true, content: [{ type: "text", text: "boom-visible" }, { type: "image", source: { type: "base64", media_type: "image/png", data: small } }, { type: "image", source: { type: "base64", media_type: "image/png", data: large } }] }] } });
+      complete("error-images-done"); return;
+    }
     if (text === "TOOL_RESULTS") {
       write({ type: "assistant", message: { model: "fake-claude", usage: { input_tokens: 1, output_tokens: 1 }, content: [{ type: "thinking", thinking: "let me look" }, { type: "tool_use", id: "tu-1", name: "Bash", input: { command: "ls" } }] } });
       const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";

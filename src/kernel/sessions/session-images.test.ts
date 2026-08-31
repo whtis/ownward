@@ -24,7 +24,7 @@ describe("session-scoped Runner upload images", () => {
     const root = fresh(), cwd = join(root, "repo"), repo = new SessionRepository(root); mkdirSync(cwd);
     const first = repo.reserve({ taskId: "task", providerId: "claude", cwd });
     const old = command(root, first.id, "old-command", "old image");
-    const current = repo.handoff({ taskId: "task", providerId: "codex", reason: "quota" }).current;
+    const current = repo.handoff({ taskId: "task", expectedSessionId: first.id, providerId: "codex", reason: "quota" }).current;
     const now = command(root, current.id, "new-command", "new image");
     const state = await new KernelSessionService(root).state("task"), users = state.messages.filter((message) => message.role === "user");
     expect(users.map((message) => message.images)).toEqual([

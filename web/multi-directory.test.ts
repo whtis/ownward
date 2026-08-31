@@ -16,7 +16,8 @@ describe("multi-directory UI contract", () => {
     expect(app).toContain("workExtraDirs.splice(+b.dataset.i, 1)");
     expect(app).toContain('const removeLabel = `移除附加目录：${name}`');
     expect(app).toContain('aria-label="${esc(removeLabel)}"');
-    expect(app).toContain("extraDirs: workExtraDirs.length ? [...workExtraDirs] : undefined");
+    expect(app).toContain("const submitExtraDirs = [...new Set(workExtraDirs)].filter((d) => d !== dir)");
+    expect(app).toContain("extraDirs: submitExtraDirs.length ? submitExtraDirs : undefined");
     expect(app).toContain('const closeWork = () => { overlay.dataset.open = "false"; workExtraDirs = []; renderWorkExtraDirs(); }');
   });
 

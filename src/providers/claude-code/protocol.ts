@@ -1,5 +1,9 @@
 import { isAbsolute } from "path";
 import type { RunnerAttachmentRef } from "../../runner/attachments.ts";
+import { CLAUDE_EFFORTS, type ClaudeEffort } from "../../session-options.ts";
+
+export { CLAUDE_EFFORTS } from "../../session-options.ts";
+export type { ClaudeEffort } from "../../session-options.ts";
 
 export const CLAUDE_PROVIDER_ID = "claude" as const;
 export const CLAUDE_PROVIDER_CAPABILITIES = new Set([
@@ -7,7 +11,6 @@ export const CLAUDE_PROVIDER_CAPABILITIES = new Set([
 ] as const);
 
 export type ClaudeAccess = "standard" | "bypass";
-export type ClaudeEffort = "low" | "medium" | "high";
 export type ClaudeImage = { mediaType: string; blob: RunnerAttachmentRef };
 export type ClaudeMaterializedImage = { mediaType: string; data: string };
 export type ClaudeSessionOptions = { model?: string; effort?: ClaudeEffort; access: ClaudeAccess; extraDirs: string[] };
@@ -34,8 +37,8 @@ const model = (value: unknown): string => {
   return result;
 };
 const effort = (value: unknown): ClaudeEffort => {
-  if (value !== "low" && value !== "medium" && value !== "high") throw new Error("effort 非法");
-  return value;
+  if (!CLAUDE_EFFORTS.includes(value as ClaudeEffort)) throw new Error("effort 非法");
+  return value as ClaudeEffort;
 };
 function parseImages(value: unknown): ClaudeImage[] {
   if (!Array.isArray(value) || value.length > 20) throw new Error("images 非法");

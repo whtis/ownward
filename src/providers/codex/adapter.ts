@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { readRunnerAttachment } from "../../runner/attachments.ts";
+import { AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, normalizeCodexContentImages } from "../../runner/agent-images.ts";
 import type { RunnerCommandRecord, RunnerReasonCode } from "../../runner/journals.ts";
 import type { ProviderEventInput, RunnerProvider } from "../../runner/server.ts";
 import { readCodexTranscriptAsync } from "../transcript-history-async.ts";
@@ -26,7 +27,7 @@ export class CodexRunnerProvider implements RunnerProvider {
   private options: Required<Omit<CodexProviderOptions, "dataRoot">> & { dataRoot?: string };
   constructor(private command: readonly string[] = ["codex"], private env: Record<string, string | undefined> = process.env, options: CodexProviderOptions = {}) {
     if (!command.length || command.some((x) => !x)) throw new Error("Codex command 非法");
-    this.options = { maxInvalidLines: options.maxInvalidLines ?? 3, maxStdoutBufferBytes: options.maxStdoutBufferBytes ?? 2 * 1024 * 1024, stderrRingBytes: options.stderrRingBytes ?? 16 * 1024, processExitGraceMs: options.processExitGraceMs ?? 5_000, idleTimeoutMs: options.idleTimeoutMs ?? 15 * 60_000, interruptGraceMs: options.interruptGraceMs ?? 5_000, dataRoot: options.dataRoot };
+    this.options = { maxInvalidLines: options.maxInvalidLines ?? 3, maxStdoutBufferBytes: options.maxStdoutBufferBytes ?? AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, stderrRingBytes: options.stderrRingBytes ?? 16 * 1024, processExitGraceMs: options.processExitGraceMs ?? 5_000, idleTimeoutMs: options.idleTimeoutMs ?? 15 * 60_000, interruptGraceMs: options.interruptGraceMs ?? 5_000, dataRoot: options.dataRoot };
   }
   readHistory(input: { nativeRef: string; providerHome?: string }) { return readCodexTranscriptAsync(input.nativeRef, input.providerHome, this.env.HOME); }
   async close() { await this.shutdown(); }
@@ -86,7 +87,10 @@ export class CodexRunnerProvider implements RunnerProvider {
     if (frameType !== "item.completed") return;
     if (kind === "error") { this.metrics.notices++; t.queue.push(this.event(c, "provider-notice", { payload: JSON.stringify({ category: "provider_warning", message: typeof item.message === "string" ? item.message : "Codex item error" }) }, "best-effort")); return; }
     const roles: Record<string, string> = { reasoning: "thinking", command_execution: "tool", file_change: "tool", mcp_tool_call: "tool", web_search: "tool", todo_list: "plan", plan: "plan", plan_update: "plan" };
-    const role = roles[kind]; if (role) { t.queue.push(this.event(c, "message-completed", { payload: JSON.stringify({ role, type: kind, item }) })); return; }
+    const role = roles[kind]; if (role) {
+      const normalized = kind === "mcp_tool_call" ? normalizeCodexContentImages(this.options.dataRoot, c.sessionId, item) : item;
+      t.queue.push(this.event(c, "message-completed", { payload: JSON.stringify({ role, type: kind, item: normalized }) })); return;
+    }
     this.metrics.droppedFrames++; this.logDrop(t, `unknown-item:${kind}`);
   }
   private flushStderr(t: Turn): void { if (!t.stderrTail || t.stderrEmitted || t.terminal) return; t.stderrEmitted = true; this.metrics.notices++;

@@ -13,6 +13,19 @@ struct ApiError: LocalizedError, Sendable, Equatable {
     var errorDescription: String? { message }
 }
 
+func devHandoffBody(
+    id: String, providerId: String, confirmUnknownOutcome: Bool,
+    model: String?, effort: String?, reason: String
+) -> [String: JSONValue] {
+    var body: [String: JSONValue] = [
+        "id": .string(id), "providerId": .string(providerId),
+        "reason": .string(reason), "confirmUnknownOutcome": .bool(confirmUnknownOutcome),
+    ]
+    if let model, !model.isEmpty { body["model"] = .string(model) }
+    if let effort, !effort.isEmpty { body["effort"] = .string(effort) }
+    return body
+}
+
 extension Error {
     /// 给 UI 看的一句话：服务端 msg 原样；网络层错误翻成人话
     var userMessage: String {
@@ -157,14 +170,14 @@ final class OwnwardClient: Sendable {
     }
     func devInterrupt(id: String) async throws -> OkMsg { try await post("/api/dev/interrupt", ["id": .string(id)]) }
 
-    /// 跨引擎接力：当前会话保留，新引擎接力续跑（POST /api/dev/handoff，reason 固定 manual）。
+    /// 跨引擎接力或同引擎重配：保留历史，下一轮使用新的 provider/model/effort。
     /// 旧 Run 结果未知时服务端回 errorCode=SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED，
     /// 用户确认后带 confirmUnknownOutcome=true 重发（android data/OwnwardClient.kt 同款）。
-    func devHandoff(id: String, providerId: String, confirmUnknownOutcome: Bool = false) async throws -> OkMsg {
-        try await post("/api/dev/handoff", [
-            "id": .string(id), "providerId": .string(providerId),
-            "reason": .string("manual"), "confirmUnknownOutcome": .bool(confirmUnknownOutcome),
-        ])
+    func devHandoff(id: String, providerId: String, confirmUnknownOutcome: Bool = false,
+                    model: String? = nil, effort: String? = nil, reason: String = "manual") async throws -> OkMsg {
+        try await post("/api/dev/handoff", devHandoffBody(
+            id: id, providerId: providerId, confirmUnknownOutcome: confirmUnknownOutcome,
+            model: model, effort: effort, reason: reason))
     }
 
     /// 接管租约：take = 取得输入权（ownward），release = 交还只旁观（observing）。
@@ -220,12 +233,13 @@ final class OwnwardClient: Sendable {
     /// 固定 bg=true：手机端没有 terminal 通道。provider 只认 claude/codex/codebuddy；
     /// 成功体 {ok, msg, task}，task 形状随服务端演进，只取 id（taskId）。
     func dispatchWork(dir: String, task: String, provider: String, worktree: Bool,
-                      model: String?, permission: String?, images: [OutImage] = []) async throws -> DispatchResult {
+                      model: String?, effort: String? = nil, permission: String?, images: [OutImage] = []) async throws -> DispatchResult {
         var body: [String: JSONValue] = [
             "dir": .string(dir), "task": .string(task), "bg": .bool(true),
             "provider": .string(provider), "worktree": .bool(worktree),
         ]
         if let model, !model.isEmpty { body["model"] = .string(model) }
+        if let effort, !effort.isEmpty { body["effort"] = .string(effort) }
         if let permission, !permission.isEmpty { body["permission"] = .string(permission) }
         if !images.isEmpty { body["images"] = Self.imagesJSON(images) }
         return try await post("/api/work", body)

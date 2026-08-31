@@ -59,9 +59,15 @@ additive Kernel capabilities, and a major release only for a breaking contract.
 Increment `KERNEL_API_VERSION` only when an existing extension contract becomes
 incompatible.
 
+The public repository carries the same version as the private one. There is no
+separate public patch line: a fix released privately as `x.y.z` is published as
+`x.y.z` here too.
+
 After a successful public snapshot push, create the matching `vX.Y.Z` tag in
-`whtis/ownward`. Update Desk's `ownward.lock.json` with the public repository,
-the public commit containing the release, and the same version. Keep Desk's
+`whtis/ownward`. Desk locks to the private repository rather than to this
+mirror, so its `ownward.lock.json` records the private commit it is built
+against and that checkout's `package.json` version; the Desk packager enforces
+both against the checkout and does not read the repository field. Keep Desk's
 `minKernelVersion` unchanged unless Desk actually uses an API introduced in the
 new kernel; a compatible Kernel release does not require a Desk manifest change.
 

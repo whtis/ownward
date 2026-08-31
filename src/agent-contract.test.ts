@@ -95,7 +95,7 @@ describe("AgentState runtime compatibility", () => {
     const consumed = [...source.matchAll(/\bdev\??\.([A-Za-z_][A-Za-z0-9_]*)/g)]
       .map((m) => m[1]).filter((v, i, all) => all.indexOf(v) === i).sort();
     expect(consumed).toEqual([
-      "backend", "commands", "control", "ctxTokens", "cwd", "extraDirs", "fullAccess", "messages", "model", "partial",
+      "backend", "commands", "control", "ctxTokens", "cwd", "effort", "extraDirs", "fullAccess", "messages", "model", "partial",
       "pending", "plan", "providerId", "queued", "resume", "tokens", "turn",
     ]);
   });

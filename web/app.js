@@ -8,6 +8,45 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 /** 内联 onclick 的字符串参数编码：反斜杠/引号/换行都要处理——esc() 只管 HTML，
  *  标题/路径里一个尾部反斜杠就能改写 JS 字符串边界（codex 对抗审查实证过） */
 const jsq = (s) => esc(String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/[\n\r\u2028\u2029]/g, " "));
+// 派发与会话重配共用同一份能力表。efforts 必须与 Runner provider protocol 的白名单一致，
+// 不能把某家 CLI 不认识的档位画进下拉框后再寄希望于后端兜底。
+const WORK_PROVIDER_CAPABILITIES = Object.freeze({
+  claude: Object.freeze({
+    label: "Claude Code",
+    models: Object.freeze(["fable", "opus", "sonnet", "haiku"]),
+    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+    defaultModel: "", handoffModel: "sonnet", handoffEffort: "medium",
+  }),
+  codex: Object.freeze({
+    label: "Codex",
+    models: Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]),
+    defaultModel: "gpt-5.6-sol", handoffModel: "gpt-5.6-sol", handoffEffort: "medium",
+  }),
+  codebuddy: Object.freeze({
+    label: "CodeBuddy",
+    models: Object.freeze(["hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"]),
+    // CodeBuddy 复用 Claude provider protocol，不能暴露 Codex-only 档位。
+    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+    defaultModel: "", handoffModel: "hy3", handoffEffort: "medium",
+  }),
+});
+const WORK_CODEX_MODEL_EFFORTS = Object.freeze({
+  "gpt-5.6-sol": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+  "gpt-5.6-terra": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+  "gpt-5.6-luna": Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+  "gpt-5.5": Object.freeze(["low", "medium", "high", "xhigh"]),
+  "gpt-5.4": Object.freeze(["low", "medium", "high", "xhigh"]),
+});
+const WORK_EFFORT_LABELS = Object.freeze({ low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max", ultra: "ultra" });
+function workProviderCapability(providerId) { return WORK_PROVIDER_CAPABILITIES[providerId] || WORK_PROVIDER_CAPABILITIES.claude; }
+function workProviderEfforts(providerId, model) {
+  const capability = workProviderCapability(providerId);
+  return providerId === "codex" ? (WORK_CODEX_MODEL_EFFORTS[model || capability.defaultModel] || []) : capability.efforts;
+}
+function workProviderDefaultEffort(providerId, model) {
+  const efforts = workProviderEfforts(providerId, model);
+  return efforts.includes("medium") ? "medium" : efforts[0] || "";
+}
 /** 外部可控 URL 只放行 http(s)：feed/action/会议链接是 triage 从邮件/飞书内容里提的，
  *  javascript:/data: 一点就在本页源里执行 = 打穿 localhost API（esc 防不了这个） */
 function safeUrl(u) {
@@ -534,15 +573,39 @@ function bindTopbar() {
     $("#w-extra-disabled").hidden = enabled;
     if (!enabled && workExtraDirs.length) { workExtraDirs = []; renderWorkExtraDirs(); toast("terminal 模式已清除附加目录"); }
   };
+  const fillWorkProviderOptions = (selection = {}) => {
+    const providerId = $("#w-engine").value;
+    const capability = workProviderCapability(providerId);
+    const requestedModel = selection.model ?? $("#w-model").value;
+    const explicitModel = Object.prototype.hasOwnProperty.call(selection, "model") && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(requestedModel);
+    const model = capability.models.includes(requestedModel)
+      ? requestedModel
+      : explicitModel ? requestedModel
+      : providerId === "codex" && selection.useProviderDefault !== false ? capability.defaultModel : "";
+    const customModel = explicitModel && !capability.models.includes(requestedModel) ? [requestedModel] : [];
+    $("#w-model").innerHTML = `<option value="">默认</option>` + [...customModel, ...capability.models].map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join("");
+    $("#w-model").value = model;
+
+    const efforts = workProviderEfforts(providerId, model);
+    const requestedEffort = selection.effort ?? $("#w-effort").value;
+    const effort = efforts.includes(requestedEffort)
+      ? requestedEffort
+      : Object.prototype.hasOwnProperty.call(selection, "effort") && !requestedEffort ? "" : workProviderDefaultEffort(providerId, model);
+    $("#w-effort").innerHTML = `<option value="">默认</option>` + efforts.map((item) => `<option value="${esc(item)}">${esc(WORK_EFFORT_LABELS[item] || item)}</option>`).join("");
+    $("#w-effort").value = effort;
+  };
   const openWork = (dir) => {
     overlay.dataset.open = "true";
-    // 默认值由服务端下发（config dispatch.defaults）：目录/模型/权限预填好，
+    // 默认值由服务端下发（config dispatch.defaults）：目录/引擎/模型/思考深度/权限预填好，
     // 描述可留空直接派——开一个"待命会话"再慢慢说要干啥
     const d = S.state?.dispatchDefaults || {};
     if (dir) $("#w-dir").value = dir;
     else if (!$("#w-dir").value && d.dir) $("#w-dir").value = d.dir;
-    if (!$("#w-task").value) { if (d.provider) $("#w-engine").value = d.provider; else if (d.codex !== undefined) $("#w-engine").value = d.codex ? "codex" : "claude"; }
-    if (d.model && !$("#w-model").value) { $("#w-engine").dispatchEvent(new Event("change")); $("#w-model").value = d.model; }
+    if (!$("#w-task").value) {
+      if (d.provider) $("#w-engine").value = d.provider;
+      else if (d.codex !== undefined) $("#w-engine").value = d.codex ? "codex" : "claude";
+      fillWorkProviderOptions({ model: d.model || "", effort: d.effort || "", useProviderDefault: !d.model });
+    } else fillWorkProviderOptions();
     const options = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
     $("#w-dir-list").innerHTML = options;
     const bypass=$("#w-perm option[value=bypass]");if(bypass){bypass.disabled=S.state?.allowFullAccess!==true;bypass.hidden=S.state?.allowFullAccess!==true;if(bypass.disabled&&$("#w-perm").value==="bypass")$("#w-perm").value="";}
@@ -602,18 +665,10 @@ function bindTopbar() {
     if (e.key === "Enter") { e.preventDefault(); submitAddDir(); }
   });
 
-  // 模型选单随引擎切换：claude 走别名，codex 走 gpt-5.x 型号，codebuddy 走腾讯网关型号（值原样透传 --model / -m）
-  const CLAUDE_MODELS = ["fable", "opus", "sonnet", "haiku"];
-  const CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-5.5-pro"];
-  const CODEBUDDY_MODELS = ["hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"];
-  const fillModels = () => {
-    const keep = $("#w-model").value;
-    const list = { codex: CODEX_MODELS, codebuddy: CODEBUDDY_MODELS }[$("#w-engine").value] || CLAUDE_MODELS;
-    $("#w-model").innerHTML = `<option value="">默认</option>` + list.map((m) => `<option>${m}</option>`).join("");
-    if (list.includes(keep)) $("#w-model").value = keep;
-  };
-  $("#w-engine").addEventListener("change", fillModels);
-  fillModels();
+  // 模型和思考深度一起随 Provider 切换；Codex 没有显式配置时在 UI 里明确落到 5.6-sol。
+  $("#w-engine").addEventListener("change", () => fillWorkProviderOptions());
+  $("#w-model").addEventListener("change", () => fillWorkProviderOptions({ model: $("#w-model").value }));
+  fillWorkProviderOptions();
 
   // 派发附图：粘贴/拖入/选文件 → base64 暂存，随 /api/work 发出（派发成功才清，失败留着重试）
   let workImgs = [];   // [{media_type, data(base64)}]
@@ -652,6 +707,10 @@ function bindTopbar() {
     if (!dir || !task) { toast(dir ? "terminal 模式必须写任务描述" : "先选项目目录"); return; }
     if (workImgs.length && !$("#w-bg").checked) { toast("terminal 模式不支持图片——勾选「后台运行」"); return; }
     if (workExtraDirs.length && !$("#w-bg").checked) { toast("terminal 模式不支持附加目录——勾选「后台运行」"); return; }
+    const selectedProvider = $("#w-engine").value, selectedModel = $("#w-model").value, selectedEffort = $("#w-effort").value;
+    if (selectedEffort && !workProviderEfforts(selectedProvider, selectedModel).includes(selectedEffort)) {
+      toast("所选模型不支持这个思考深度，请重新选择"); return;
+    }
     // 附加目录去重只在「添加时」挡过主目录，之后主目录可能被改成某个附加目录——提交前再滤一次，
     // 别把主目录当附加目录重复下发（后端也会拒，但这里先把用户能改的重复挡掉）。
     const submitExtraDirs = [...new Set(workExtraDirs)].filter((d) => d !== dir);
@@ -659,7 +718,7 @@ function bindTopbar() {
     const res = await post("/api/work", {
       dir, task,
       bg: $("#w-bg").checked, provider: $("#w-engine").value || undefined, worktree: $("#w-worktree").checked,
-      model: $("#w-model").value || undefined, permission: $("#w-perm").value || undefined,
+      model: $("#w-model").value || undefined, effort: $("#w-effort").value || undefined, permission: $("#w-perm").value || undefined,
       extraDirs: submitExtraDirs.length ? submitExtraDirs : undefined,
       images: workImgs.length ? workImgs : undefined,
     });

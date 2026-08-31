@@ -93,12 +93,23 @@ export function filterAudit(audit: DecisionAudit[], taskId: string): DecisionAud
 // git 快照状态：区分几种情形，别把空仓库/非 git 目录误写成「无改动」
 export type GitStatus = "clean" | "dirty" | "not-a-repo" | "empty-repo" | "error";
 
+export interface GitIdentity {
+  name: string;
+  email: string;
+}
+
+export type GitIdentitySource = "frozen" | "repository-config" | "unavailable";
+
 export interface GitInfo {
   status: GitStatus;
   base: string;         // 用作基线的 commit（startHead / merge-base），空=无基线
-  diffStat: string;     // git diff --stat <base>（改了哪些 tracked 文件）
-  commits: string;      // git log <base>..HEAD --oneline
+  diffStat: string;     // 归属于任务身份的 commits 聚合文件统计（不含他人 commit）
+  commits: string;      // 归属于任务身份的 commit，保留 author/email/date 供审计
   untracked: string[];  // git status --porcelain 里的未跟踪文件（旧版漏了）
+  workingTreeStat?: string;       // 当前未提交 tracked 改动，独立展示且不声称作者归属
+  identity?: GitIdentity;         // 用于过滤 commit author 的身份
+  identitySource?: GitIdentitySource;
+  excludedCommitCount?: number;   // 基线范围内因 author 不匹配/身份不可用而排除的 commit 数
 }
 
 /** 纯分类：据 git 探针信号判定快照状态。error > not-a-repo > empty-repo > dirty/clean */
@@ -109,11 +120,12 @@ export function classifyGit(probe: {
   diffStat: string;
   commits: string;
   untracked: string[];
+  workingTreeStat?: string;
 }): GitStatus {
   if (probe.error) return "error";
   if (!probe.isRepo) return "not-a-repo";
   if (!probe.hasHead) return "empty-repo";
-  const changed = !!probe.diffStat.trim() || !!probe.commits.trim() || probe.untracked.length > 0;
+  const changed = !!probe.diffStat.trim() || !!probe.commits.trim() || !!probe.workingTreeStat?.trim() || probe.untracked.length > 0;
   return changed ? "dirty" : "clean";
 }
 
@@ -233,6 +245,13 @@ export function assembleFlightRecord(input: FlightInput): FlightRecord {
   return { slug, filename, content: `${fm}\n\n${body.join("\n")}` };
 }
 
+/** 供 harvest prompt 和飞行记录共用同一份、已做作者归属的 git 证据。 */
+export function formatGitSummary(g: GitInfo): string {
+  const body: string[] = [];
+  renderGit(body, g);
+  return body.join("\n");
+}
+
 /** 「改动」小节渲染：区分 clean / dirty / not-a-repo / empty-repo / error */
 function renderGit(body: string[], g: GitInfo) {
   if (g.status === "not-a-repo") {
@@ -251,20 +270,33 @@ function renderGit(body: string[], g: GitInfo) {
     }
     return;
   }
+  if (g.identity) {
+    const source = g.identitySource === "frozen" ? "派发时冻结" : "历史任务兜底：收割时仓库配置";
+    body.push(`> 提交归属身份：\`${g.identity.name} <${g.identity.email}>\`（${source}）`);
+  } else if (g.identitySource === "unavailable") {
+    body.push("> 未取得可靠 Git 作者身份；为避免误归属，不计入基线后的任何提交。");
+  }
+  if (g.excludedCommitCount) {
+    body.push(`> 已排除 ${g.excludedCommitCount} 条不属于该身份或无法可靠归属的提交。`);
+  }
   if (g.status === "clean") {
-    body.push("(工作树干净，无改动)");
+    body.push("(未发现归属于任务身份的提交或当前未提交改动)");
     if (g.base) body.push("", `> 基线：\`${g.base.slice(0, 12)}\``);
     return;
   }
   // dirty
-  body.push("### 文件（diff --stat）");
-  body.push(g.diffStat.trim() ? codeBlock(g.diffStat.trim()) : "(无 tracked 改动)");
+  body.push("### 任务身份提交的文件统计");
+  body.push(g.diffStat.trim() ? codeBlock(g.diffStat.trim()) : "(无归属于任务身份的已提交改动)");
+  if (g.workingTreeStat?.trim()) {
+    body.push("### 当前未提交改动（不做作者归属）");
+    body.push(codeBlock(g.workingTreeStat.trim()));
+  }
   if (g.untracked.length) {
-    body.push("### 未跟踪文件（untracked）");
+    body.push("### 当前未跟踪文件（不做作者归属）");
     body.push(codeBlock(g.untracked.join("\n")));
   }
-  body.push("### 提交（commit）");
-  body.push(g.commits.trim() ? codeBlock(g.commits.trim()) : "(无新提交)");
+  body.push("### 归属该身份的提交（commit）");
+  body.push(g.commits.trim() ? codeBlock(g.commits.trim()) : "(无归属于任务身份的新提交)");
   if (g.base) body.push("", `> 基线：\`${g.base.slice(0, 12)}\``);
 }
 
@@ -290,9 +322,79 @@ function readAudit(): DecisionAudit[] {
   } catch { return []; }
 }
 
-/** 冻结 git 快照：优先用派发时持久化的 startHead 作基线（在 master 原地干活也不丢提交），
- *  退而求其次 merge-base master/main。出 diff --stat + commit 列表 + untracked，并分类状态。 */
-async function gitSnapshot(cwd: string, startHead?: string): Promise<GitInfo> {
+export interface TaskGitContext {
+  cwd: string;
+  startHead?: string;
+  gitIdentity?: GitIdentity;
+}
+
+interface GitCommit {
+  hash: string;
+  shortHash: string;
+  authorName: string;
+  authorEmail: string;
+  authoredAt: string;
+  subject: string;
+}
+
+/** 解析该仓库实际生效的 user.name/user.email。旧任务没有冻结身份时只用这个显式兜底，绝不猜作者。 */
+export async function resolveGitIdentity(cwd: string): Promise<GitIdentity | null> {
+  const [name, email] = await Promise.all([
+    run(["git", "-C", cwd, "config", "--get", "user.name"], { timeoutMs: 10_000 }),
+    run(["git", "-C", cwd, "config", "--get", "user.email"], { timeoutMs: 10_000 }),
+  ]);
+  const identity = { name: name.stdout.trim(), email: email.stdout.trim() };
+  return name.code === 0 && email.code === 0 && identity.name && identity.email ? identity : null;
+}
+
+function parseCommitLog(raw: string): GitCommit[] {
+  return raw.split("\x1e").map((record) => record.trim()).filter(Boolean).flatMap((record) => {
+    const [hash, shortHash, authorName, authorEmail, authoredAt, ...subject] = record.split("\x1f");
+    return hash && shortHash && authorName && authorEmail && authoredAt
+      ? [{ hash, shortHash, authorName, authorEmail, authoredAt, subject: subject.join("\x1f") }]
+      : [];
+  });
+}
+
+function belongsToIdentity(commit: GitCommit, identity: GitIdentity): boolean {
+  return commit.authorName.trim() === identity.name.trim()
+    && commit.authorEmail.trim().toLowerCase() === identity.email.trim().toLowerCase();
+}
+
+async function ownerCommitStats(cwd: string, commits: GitCommit[]): Promise<{ text: string; error: boolean }> {
+  if (!commits.length) return { text: "", error: false };
+  const shown = await run([
+    "git", "-C", cwd, "show", "--numstat", "--format=", "--no-renames",
+    ...commits.map((commit) => commit.hash), "--",
+  ], { timeoutMs: 30_000 });
+  if (shown.code !== 0) return { text: "", error: true };
+
+  const files = new Map<string, { added: number; deleted: number; binary: boolean }>();
+  for (const line of shown.stdout.split("\n")) {
+    const [addedRaw, deletedRaw, ...pathParts] = line.split("\t");
+    const path = pathParts.join("\t").trim();
+    if (!path || addedRaw === undefined || deletedRaw === undefined) continue;
+    const previous = files.get(path) || { added: 0, deleted: 0, binary: false };
+    const added = Number(addedRaw), deleted = Number(deletedRaw);
+    if (Number.isFinite(added) && Number.isFinite(deleted)) {
+      previous.added += added;
+      previous.deleted += deleted;
+    } else {
+      previous.binary = true;
+    }
+    files.set(path, previous);
+  }
+  const text = [...files.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, stat]) => ` ${path} | ${stat.binary ? "binary" : `+${stat.added} -${stat.deleted}`}`)
+    .join("\n");
+  return { text, error: false };
+}
+
+/** 任务级 git 快照：基线范围内只保留冻结作者的提交，文件统计从这些提交逐条聚合；
+ *  当前工作树改动另列为未归属现场状态。旧任务缺身份时读取当前仓库配置并明确标注兜底来源。 */
+export async function gitSnapshot(context: TaskGitContext): Promise<GitInfo> {
+  const { cwd, startHead } = context;
   const blank: GitInfo = { status: "error", base: "", diffStat: "", commits: "", untracked: [] };
   // 目录已不存在（worktree 被清）：git-error，别误报「无改动」
   if (!cwd || !existsSync(cwd)) return blank;
@@ -318,25 +420,45 @@ async function gitSnapshot(cwd: string, startHead?: string): Promise<GitInfo> {
     }
   }
 
-  // untracked（--porcelain 里 ?? 开头，旧版漏了）
+  const frozen = context.gitIdentity?.name.trim() && context.gitIdentity.email.trim()
+    ? { name: context.gitIdentity.name.trim(), email: context.gitIdentity.email.trim() }
+    : null;
+  const identity = frozen || await resolveGitIdentity(cwd);
+  const identitySource: GitIdentitySource = frozen ? "frozen" : identity ? "repository-config" : "unavailable";
+
+  // 当前工作树是“现在看到的现场”，可能来自共享目录的任意进程，因此与已提交作者证据分开且不归属。
   const st = await run(["git", "-C", cwd, "status", "--porcelain"], { timeoutMs: 15_000 });
   const untracked = st.code === 0
     ? st.stdout.split("\n").filter((l) => l.startsWith("?? ")).map((l) => l.slice(3).trim()).filter(Boolean)
     : [];
 
-  let diffStat = "", commits = "", error = false;
+  let diffStat = "", commits = "", workingTreeStat = "", excludedCommitCount = 0;
+  let error = st.code !== 0;
   if (hasHead) {
-    const range = base || "HEAD";
-    const diff = await run(["git", "-C", cwd, "diff", "--stat", range], { timeoutMs: 20_000 });
-    if (diff.code !== 0) error = true; else diffStat = (diff.stdout || "").slice(0, 4000);
+    const working = await run(["git", "-C", cwd, "diff", "--stat", "HEAD"], { timeoutMs: 20_000 });
+    if (working.code !== 0) error = true; else workingTreeStat = (working.stdout || "").slice(0, 4000);
     if (base) {
-      const logr = await run(["git", "-C", cwd, "log", `${base}..HEAD`, "--oneline"], { timeoutMs: 20_000 });
-      if (logr.code === 0) commits = (logr.stdout || "").slice(0, 2000);
+      const logr = await run([
+        "git", "-C", cwd, "log", `${base}..HEAD`,
+        "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e",
+      ], { timeoutMs: 20_000 });
+      if (logr.code !== 0) {
+        error = true;
+      } else {
+        const allCommits = parseCommitLog(logr.stdout || "");
+        const ownerCommits = identity ? allCommits.filter((commit) => belongsToIdentity(commit, identity)) : [];
+        excludedCommitCount = allCommits.length - ownerCommits.length;
+        commits = ownerCommits.map((commit) =>
+          `${commit.shortHash} | ${commit.authorName} <${commit.authorEmail}> | ${commit.authoredAt} | ${commit.subject}`,
+        ).join("\n").slice(0, 4000);
+        const stats = await ownerCommitStats(cwd, ownerCommits);
+        if (stats.error) error = true; else diffStat = stats.text.slice(0, 4000);
+      }
     }
   }
 
-  const status = classifyGit({ isRepo: true, hasHead, error, diffStat, commits, untracked });
-  return { status, base, diffStat, commits, untracked };
+  const status = classifyGit({ isRepo: true, hasHead, error, diffStat, commits, workingTreeStat, untracked });
+  return { status, base, diffStat, commits, workingTreeStat, untracked, identity: identity || undefined, identitySource, excludedCommitCount };
 }
 
 /** 兜底素材：codex-bg / terminal 无会话消息时，用 canonical task + 日志尾部拼一个最小 messages，
@@ -382,7 +504,7 @@ async function tryWriteFlight(task: WorkTask): Promise<string> {
   let messages = state?.messages || [];
   if (!messages.length) messages = fallbackMessages(task);
 
-  const git = await gitSnapshot(task.cwd, task.startHead);
+  const git = await gitSnapshot({ cwd: task.cwd, startHead: task.startHead, gitIdentity: task.gitIdentity });
   const scope = scopeOf(task.cwd);
   const record = assembleFlightRecord({
     task: { id: task.id, project: task.project, branch: task.branch, backend: state?.backend },

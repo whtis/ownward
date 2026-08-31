@@ -32,4 +32,21 @@ struct ChatProviderSelectionTests {
         #expect(sel.provider == "codex")
         #expect(sel.model == "mini")
     }
+
+    @Test func default哨兵可恢复旧对话_新对话仍选第一个显式模型() throws {
+        let providers = [
+            "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "default"],
+            "claude": ["sonnet", "default"],
+        ]
+
+        let existing = try selectChatProvider(raw: providers, requestedProvider: "codex",
+                                              requestedModel: "default", existingChat: true)
+        #expect(existing.provider == "codex")
+        #expect(existing.model == "default")
+
+        let fresh = try selectChatProvider(raw: providers, requestedProvider: "codex",
+                                           requestedModel: "default", existingChat: false)
+        #expect(fresh.provider == "codex")
+        #expect(fresh.model == "gpt-5.6-sol")
+    }
 }

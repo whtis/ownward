@@ -7,16 +7,75 @@ import SwiftUI
 import PhotosUI
 
 /// /api/work 只认这三个引擎（src/verticals.ts 白名单）；chat 的 codex-alt 之类第二账号键派任务不可用
-private let engines: [(key: String, label: String)] = [
+let workEngines: [(key: String, label: String)] = [
     ("claude", "Claude"), ("codex", "Codex"), ("codebuddy", "CodeBuddy"),
 ]
 
 /// 服务端 chat.providers 没配该引擎时的兜底型号表（与 web/app.js 同一份）
 private let fallbackModels: [String: [String]] = [
-    "claude": ["opus", "sonnet", "haiku"],
-    "codex": ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-5.5-pro"],
+    "claude": ["fable", "opus", "sonnet", "haiku"],
+    "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
     "codebuddy": ["hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"],
 ]
+
+private let workProviderEffortsByProvider: [String: [String]] = [
+    "claude": ["low", "medium", "high", "xhigh", "max"],
+    "codebuddy": ["low", "medium", "high", "xhigh", "max"],
+]
+
+let workCodexModelEfforts: [String: [String]] = [
+    "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+    "gpt-5.5": ["low", "medium", "high", "xhigh"],
+    "gpt-5.4": ["low", "medium", "high", "xhigh"],
+]
+
+func workProviderDefaultModel(_ provider: String) -> String {
+    provider == "codex" ? "gpt-5.6-sol" : ""
+}
+
+func workProviderHandoffModel(_ provider: String) -> String {
+    switch provider {
+    case "codex": "gpt-5.6-sol"
+    case "codebuddy": "hy3"
+    default: "sonnet"
+    }
+}
+
+func workProviderModels(_ provider: String, providers: [String: [String]]) -> [String] {
+    let models = provider == "codex" ? (fallbackModels[provider] ?? []) : (providers[provider] ?? []) + (fallbackModels[provider] ?? [])
+    return models.reduce(into: []) { result, model in
+        if !result.contains(model) { result.append(model) }
+    }
+}
+
+func workProviderEfforts(_ provider: String, model: String) -> [String] {
+    provider == "codex"
+        ? (workCodexModelEfforts[model.isEmpty ? workProviderDefaultModel(provider) : model] ?? [])
+        : (workProviderEffortsByProvider[provider] ?? [])
+}
+
+func workProviderDefaultEffort(_ provider: String, model: String) -> String {
+    let efforts = workProviderEfforts(provider, model: model)
+    return efforts.contains("medium") ? "medium" : (efforts.first ?? "")
+}
+
+func workProviderSelectionIsValid(
+    _ provider: String, model: String, effort: String, allowOmitted: Bool = false
+) -> Bool {
+    if !allowOmitted && (model.isEmpty || effort.isEmpty) { return false }
+    let effectiveModel = model.isEmpty ? workProviderDefaultModel(provider) : model
+    let modelValid = model.isEmpty || provider != "codex" || workCodexModelEfforts[effectiveModel] != nil
+    let effortValid = effort.isEmpty || workProviderEfforts(provider, model: effectiveModel).contains(effort)
+    return modelValid && effortValid
+}
+
+func normalizedDispatchDefaultEffort(_ provider: String, model: String, configured: String?) -> String {
+    guard let configured, !configured.isEmpty else { return "" }
+    return workProviderEfforts(provider, model: model).contains(configured)
+        ? configured : workProviderDefaultEffort(provider, model: model)
+}
 
 /// 描述留空时的开场白（与 web 同款）：开一个「待命会话」，进会话再说要干啥
 private let standbyPrompt = "你是常驻结对助手。本条只是开场，简短确认待命即可，等我下一条消息再开始干活。"
@@ -32,6 +91,7 @@ struct DispatchView: View {
     @State private var task = ""
     @State private var provider = "claude"
     @State private var model = ""            // "" = 引擎默认
+    @State private var effort = ""           // "" = Provider 默认
     @State private var permission = "safe"   // safe | bypass
     @State private var worktree = true
     @State private var defaultsApplied = false
@@ -43,8 +103,7 @@ struct DispatchView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var models: [String] {
-        let fromServer = providers[provider] ?? []
-        return fromServer.isEmpty ? (fallbackModels[provider] ?? []) : fromServer
+        workProviderModels(provider, providers: providers)
     }
 
     var body: some View {
@@ -82,17 +141,34 @@ struct DispatchView: View {
                 // 后者对「服务端默认值把 provider 也一起改了」同样会触发，顺序上会把刚填好的默认 model 抹掉
                 Picker("引擎", selection: Binding(
                     get: { provider },
-                    set: { new in if new != provider { provider = new; model = "" } }
+                    set: { new in
+                        if new != provider {
+                            provider = new
+                            model = workProviderDefaultModel(new)
+                            effort = workProviderDefaultEffort(new, model: model)
+                        }
+                    }
                 )) {
-                    ForEach(engines, id: \.key) { Text($0.label).tag($0.key) }
+                    ForEach(workEngines, id: \.key) { Text($0.label).tag($0.key) }
                 }
                 .pickerStyle(.segmented)
-                Picker("模型", selection: $model) {
+                Picker("模型", selection: Binding(
+                    get: { model },
+                    set: { next in
+                        model = next
+                        let allowed = workProviderEfforts(provider, model: next)
+                        if !allowed.contains(effort) { effort = workProviderDefaultEffort(provider, model: next) }
+                    }
+                )) {
                     Text("默认").tag("")
                     // 服务端默认值可能给了个不在型号表里的型号（配置比 providers 新）——
                     // 不把它补进选项，Picker 会显示空白，看起来像没选
                     if !model.isEmpty, !models.contains(model) { Text(model).tag(model) }
                     ForEach(models, id: \.self) { Text($0).tag($0) }
+                }
+                Picker("思考深度", selection: $effort) {
+                    Text("默认").tag("")
+                    ForEach(workProviderEfforts(provider, model: model), id: \.self) { Text($0).tag($0) }
                 }
             }
             Section {
@@ -207,9 +283,10 @@ struct DispatchView: View {
             let d = s.dispatchDefaults
             if !defaultsApplied {
                 if dir.isEmpty, let dd = d.dir, !dd.isEmpty { dir = dd }
-                if let p = d.provider, engines.contains(where: { $0.key == p }) { provider = p }
+                if let p = d.provider, workEngines.contains(where: { $0.key == p }) { provider = p }
                 else if let codex = d.codex { provider = codex ? "codex" : "claude" }
-                if let m = d.model, !m.isEmpty { model = m }
+                model = d.model.flatMap { $0.isEmpty ? nil : $0 } ?? workProviderDefaultModel(provider)
+                effort = normalizedDispatchDefaultEffort(provider, model: model, configured: d.effort)
                 if d.permission == "safe" || (d.permission == "bypass" && s.allowFullAccess) { permission = d.permission ?? "safe" }
                 defaultsApplied = true
             }
@@ -223,6 +300,9 @@ struct DispatchView: View {
     private func submit() async {
         let d = dir.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !d.isEmpty else { error = "先选项目目录"; return }
+        guard effort.isEmpty || workProviderEfforts(provider, model: model).contains(effort) else {
+            error = "所选模型不支持这个思考深度"; return
+        }
         guard !submitting else { return }
         submitting = true; error = nil
         defer { submitting = false }
@@ -233,6 +313,7 @@ struct DispatchView: View {
                 task: body.isEmpty ? standbyPrompt : body,
                 provider: provider, worktree: worktree,
                 model: model.isEmpty ? nil : model,
+                effort: effort.isEmpty ? nil : effort,
                 permission: permission,
                 images: pendingImages.map(\.payload)
             )

@@ -46,6 +46,11 @@
         "haiku"
       ],
       "codex": [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
         "default"
       ]
     },
@@ -56,7 +61,7 @@
     "claudeBin": "claude",
     "claudeModel": "sonnet",
     "codexBin": "codex",
-    "codexModel": "",
+    "codexModel": "gpt-5.6-sol",
     "codebuddyBin": "codebuddy"
   },
   "dispatch": {
@@ -66,6 +71,7 @@
       "dir": "",
       "provider": "",
       "model": "",
+      "effort": "",
       "permission": ""
     }
   },

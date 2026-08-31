@@ -34,6 +34,7 @@ import {
 import type { ProjectCandidate } from "./project-memory.ts";
 import type { Fail, RoleCandidate } from "./roles.ts";
 import { cfg, log, run } from "./util.ts";
+import { codexEffortsForModel, DEFAULT_CODEX_MODEL, isCodexEffort } from "./session-options.ts";
 
 /** 消息里的图片只有元数据（id/类型/字节数）；字节住附件目录，取图走 /api/chat/image。
  *  旧对话没有这个键 = 纯文本消息，读出来一个字都不变。 */
@@ -379,11 +380,12 @@ export async function* streamChat(
     text = defaultImageText(pics.length);
   }
   if (!chat) {
+    const selectedProvider = provider || "claude";
     chat = {
       id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       title: text.replace(/\s+/g, " ").slice(0, 24),
-      provider: provider || "claude",
-      model: model || cfg.llm?.claudeModel || "sonnet",
+      provider: selectedProvider,
+      model: model || ((selectedProvider === "codex" || selectedProvider === "codex-alt") ? (cfg.llm?.codexModel || DEFAULT_CODEX_MODEL) : (cfg.llm?.claudeModel || "sonnet")),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messages: [],
@@ -593,8 +595,13 @@ async function* runCodex(chat: AiChat, text: string, system: string, imageFiles:
   // 图片走已落盘的附件路径（codex exec 没有 stdin 内联通道）。用 `--image=` 连写：
   // -i / --image 是贪婪多值参数，空格分隔会把后面的 prompt 一起吞成图片路径（codex-session.ts 的血泪）
   const imgArgs = imageFiles.map((f) => `--image=${f}`);
-  // 推理力度（fast 聊天体验）：config chat.codexEffort ∈ minimal/low/medium/high，空=账号默认
-  const effort = ["minimal", "low", "medium", "high"].includes(cfg.chat?.codexEffort) ? [`-c`, `model_reasoning_effort=${cfg.chat.codexEffort}`] : [];
+  // 推理力度与 Runner 共用同一份模型矩阵；未知模型或非法组合不下发，交给账号默认值。
+  const configuredEffort = cfg.chat?.codexEffort;
+  const supportedEfforts = codexEffortsForModel(chat.model === "default" ? undefined : chat.model);
+  const effort = configuredEffort && isCodexEffort(configuredEffort) && supportedEfforts?.includes(configuredEffort)
+    ? [`-c`, `model_reasoning_effort=${JSON.stringify(configuredEffort)}`]
+    : [];
+  if (configuredEffort && !effort.length) log(`chat: codex effort ${configuredEffort} 与模型 ${chat.model || "default"} 不兼容，已忽略`);
   const base = ["exec", "--skip-git-repo-check", "-C", CHATS_DIR, "--sandbox", "read-only", ...effort, ...imgArgs];
   // codex-alt = 第二个 ChatGPT 账号（独立 CODEX_HOME / 独立额度）
   const env = chat.provider === "codex-alt"

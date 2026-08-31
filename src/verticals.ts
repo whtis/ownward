@@ -5,7 +5,7 @@ import { DecisionEngine, decisionEngineStatuses, runDecision } from "./kernel/de
 import { ExtensionRuntime, type BuiltinVertical } from "./kernel/extensions/runtime.ts";
 import { KernelSessionService } from "./kernel/sessions/service.ts";
 import { parseSessionMigrationMode } from "./kernel/sessions/contracts.ts";
-import type { ScopedActions, ScopedLlm, ScopedSessions, ScopedSources } from "./kernel/extensions/contracts.ts";
+import type { ScopedActions, ScopedLlm, ScopedSessions, ScopedSources, VerticalManifest, VerticalStatus } from "./kernel/extensions/contracts.ts";
 import type { ScopedTasks } from "./kernel/extensions/contracts.ts";
 import { addTask, applyEvolve, loadTasks, removeTask, startEvolve, startWork, updateTask } from "./dispatch.ts";
 import { listActions, openAction, resolveActionExact, setActionState } from "./actions.ts";
@@ -199,4 +199,60 @@ export async function routeVerticals(req: Request, url: URL): Promise<Response |
 export function verticalStatuses() { return verticalRuntime.statuses(); }
 export async function reloadVertical(id: string) { await startVerticals(); return verticalRuntime.reload(id); }
 export function verticalManifests() { return verticalRuntime.manifests(); }
-export async function verticalDiagnostics() { await startVerticals(); let health: Awaited<ReturnType<typeof verticalRuntime.health>> = []; try { health = await verticalRuntime.health(); } catch (error) { log(`vertical diagnostics unavailable: ${error instanceof Error ? error.name : "unknown"}`); } return { trust: { model: "local-code", untrustedUnsupported: true, isolation: "process-and-kernel-api-contract-not-os-sandbox", importLint: "compatibility-only-not-a-security-boundary" }, verticals: verticalStatuses(), manifests: verticalManifests(), health }; }
+export interface ExternalVerticalNavigationItem {
+  verticalId: string;
+  id: string;
+  label: string;
+  href: string;
+  state: "ready" | "degraded";
+}
+/** manifest navigation 是外部输入。只投影可服务的 external Vertical，且 href 必须仍在自己的静态资产命名空间内。 */
+export function projectExternalVerticalNavigation(
+  statuses: readonly VerticalStatus[],
+  manifests: readonly VerticalManifest[],
+): ExternalVerticalNavigationItem[] {
+  const manifestById = new Map(manifests.map((manifest) => [manifest.id, manifest] as const));
+  const seenVerticals = new Set<string>(), seenEntries = new Set<string>(), seenHrefs = new Set<string>();
+  const result: ExternalVerticalNavigationItem[] = [];
+  for (const status of statuses) {
+    if (status.source !== "external" || !["ready", "degraded"].includes(status.state) || seenVerticals.has(status.id)) continue;
+    seenVerticals.add(status.id);
+    const manifest = manifestById.get(status.id);
+    if (!manifest || manifest.id !== status.id || !/^[a-z][a-z0-9-]{0,63}$/.test(manifest.id)) continue;
+    for (const entry of manifest.navigation ?? []) {
+      const id = typeof entry?.id === "string" ? entry.id : "";
+      const label = typeof entry?.label === "string" ? entry.label.trim() : "";
+      const href = safeExternalVerticalHref(manifest.id, entry?.href);
+      const entryKey = `${manifest.id}:${id}`;
+      if (!/^[a-z][a-z0-9-]{0,63}$/.test(id) || !label || label.length > 80 || /[\u0000-\u001f\u007f]/.test(label) || !href || seenEntries.has(entryKey) || seenHrefs.has(href)) continue;
+      seenEntries.add(entryKey); seenHrefs.add(href);
+      result.push({ verticalId: manifest.id, id, label, href, state: status.state as "ready" | "degraded" });
+    }
+  }
+  return result;
+}
+function safeExternalVerticalHref(verticalId: string, value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 512 || value.includes("%") || value.includes("\\") || /[?#\u0000-\u001f\u007f]/.test(value)) return null;
+  const prefix = `/verticals/${verticalId}/`;
+  if (!value.startsWith(prefix)) return null;
+  const suffix = value.slice(prefix.length);
+  if (!suffix || !/^[A-Za-z0-9._~/-]+$/.test(suffix) || suffix.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  try {
+    const parsed = new URL(value, "http://ownward.invalid");
+    return parsed.origin === "http://ownward.invalid" && parsed.pathname === value && !parsed.search && !parsed.hash ? value : null;
+  } catch { return null; }
+}
+export async function verticalDiagnostics() {
+  await startVerticals();
+  let health: Awaited<ReturnType<typeof verticalRuntime.health>> = [];
+  try { health = await verticalRuntime.health(); }
+  catch (error) { log(`vertical diagnostics unavailable: ${error instanceof Error ? error.name : "unknown"}`); }
+  const verticals = verticalStatuses(), manifests = verticalManifests();
+  return {
+    trust: { model: "local-code", untrustedUnsupported: true, isolation: "process-and-kernel-api-contract-not-os-sandbox", importLint: "compatibility-only-not-a-security-boundary" },
+    verticals,
+    manifests,
+    health,
+    navigation: projectExternalVerticalNavigation(verticals, manifests),
+  };
+}

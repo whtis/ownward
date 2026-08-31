@@ -1,5 +1,9 @@
 import { isAbsolute } from "path";
 import type { RunnerAttachmentRef } from "../../runner/attachments.ts";
+import { CODEX_EFFORTS, DEFAULT_CODEX_MODEL, isCodexEffort, isCodexModelEffortPair, type CodexEffort } from "../../session-options.ts";
+
+export { CODEX_EFFORTS, CODEX_MODEL_EFFORTS, DEFAULT_CODEX_MODEL } from "../../session-options.ts";
+export type { CodexEffort } from "../../session-options.ts";
 
 export const CODEX_PROVIDER_ID = "codex" as const;
 export const CODEX_PROVIDER_CAPABILITIES = new Set([
@@ -7,7 +11,6 @@ export const CODEX_PROVIDER_CAPABILITIES = new Set([
 ] as const);
 
 export type CodexAccess = "workspace-write" | "full-access";
-export type CodexEffort = "low" | "medium" | "high";
 export type CodexHome = { kind: "default" } | { kind: "path"; path: string };
 export type CodexImage = { mediaType: string; blob: RunnerAttachmentRef };
 export type CodexOptions = { model?: string; effort?: CodexEffort; access: CodexAccess; extraDirs: string[]; home: CodexHome };
@@ -20,7 +23,7 @@ const text = (v: unknown, label: string, max = 1024 * 1024, nonempty = false) =>
 const absolute = (v: unknown, label: string) => { const s = text(v, label, 4096); if (!isAbsolute(s)) throw new Error(`${label} 必须是绝对路径`); return s; };
 const codexNativeRef = (v: unknown) => { const s = text(v, "nativeRef", 64, true); if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) throw new Error("nativeRef 必须是 Codex thread UUID"); return s; };
 const model = (v: unknown) => { const s = text(v, "model", 128, true); if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(s)) throw new Error("model 非法"); return s; };
-const effort = (v: unknown): CodexEffort => { if (v !== "low" && v !== "medium" && v !== "high") throw new Error("effort 非法"); return v; };
+const effort = (v: unknown): CodexEffort => { if (!isCodexEffort(v)) throw new Error("effort 非法"); return v; };
 function images(v: unknown): CodexImage[] {
   if (!Array.isArray(v) || v.length > 20) throw new Error("images 非法");
   return v.map((x) => {
@@ -40,7 +43,10 @@ export function parseCodexOptions(v: unknown): CodexOptions {
   if (v.home.kind === "default" && v.home.path === undefined) home = { kind: "default" };
   else if (v.home.kind === "path" && v.home.path !== undefined) home = { kind: "path", path: absolute(v.home.path, "home.path") };
   else throw new Error("home 非法");
-  return { access: v.access, extraDirs: [...new Set(v.extraDirs.map((d) => absolute(d, "extraDir")))].sort(), home, ...(v.model === undefined ? {} : { model: model(v.model) }), ...(v.effort === undefined ? {} : { effort: effort(v.effort) }) };
+  const parsedModel = v.model === undefined ? undefined : model(v.model);
+  const parsedEffort = v.effort === undefined ? undefined : effort(v.effort);
+  if (!isCodexModelEffortPair(parsedModel, parsedEffort)) throw new Error("model/effort 组合非法");
+  return { access: v.access, extraDirs: [...new Set(v.extraDirs.map((d) => absolute(d, "extraDir")))].sort(), home, ...(parsedModel === undefined ? {} : { model: parsedModel }), ...(parsedEffort === undefined ? {} : { effort: parsedEffort }) };
 }
 export function parseCodexStartInput(input: string): CodexStartInput {
   const v = JSON.parse(input) as unknown; if (!plain(v)) throw new Error("Codex start input 非法"); exact(v, ["text", "cwd", "images", "options"], "Codex start input");

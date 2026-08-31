@@ -9,7 +9,26 @@ enum Route: Hashable, Sendable {
     case observe(ccId: String?, taskId: String?)    // 旁观外部会话 / terminal 任务
 }
 
-enum AppTab: Hashable { case inbox, agent, chat }
+enum AppTab: String, Hashable { case inbox, agent, chat }
+
+struct AppTabPreference {
+    static let key = "ownward.lastAppTab"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    /// 调试入口只覆盖本次初始显示，不写回用户上次选择。
+    func initialTab(debugOverride: String? = nil) -> AppTab {
+        if let debugOverride, let tab = AppTab(rawValue: debugOverride) { return tab }
+        return defaults.string(forKey: Self.key).flatMap(AppTab.init(rawValue:)) ?? .chat
+    }
+
+    func save(_ tab: AppTab) {
+        defaults.set(tab.rawValue, forKey: Self.key)
+    }
+}
 
 struct RootView: View {
     @Environment(AppSettings.self) private var settings
@@ -25,30 +44,31 @@ struct RootView: View {
 
 struct MainShell: View {
     let client: OwnwardClient
-    @State private var tab: AppTab = .chat          // 首页=对话：打开就能聊
+    private let tabPreference: AppTabPreference
+    @State private var tab: AppTab
     @State private var inboxPath: [Route] = []
     @State private var agentPath: [Route] = []
     @State private var chatPath: [Route] = [.chat(nil)]   // 冷启动直达新对话（back 回列表）
     @State private var drawerOpen = false
 
-    init(client: OwnwardClient) {
+    init(client: OwnwardClient, defaults: UserDefaults = .standard) {
         self.client = client
+        let tabPreference = AppTabPreference(defaults: defaults)
+        self.tabPreference = tabPreference
+        var tab = tabPreference.initialTab()
+        var drawerOpen = false
+        var chatPath: [Route] = [.chat(nil)]
+        var inboxPath: [Route] = []
+        var agentPath: [Route] = []
         #if DEBUG
         // 调试直达：xcrun simctl launch <dev> ai.ownward.app -ownward.debugTab inbox -ownward.debugRoute settings
         // 再加 -ownward.debugDrawer 1 可以开着侧边栏启动（抽屉没有 URL 入口，截图/自动化只能这样进）
         // （UserDefaults 自动解析启动参数，仅当次进程有效；截图/自动化用，Release 不编译）
-        let d = UserDefaults.standard
-        _drawerOpen = State(initialValue: d.bool(forKey: "ownward.debugDrawer"))
-        var tab: AppTab = .chat
-        var chatPath: [Route] = [.chat(nil)]
-        var inboxPath: [Route] = []
-        var agentPath: [Route] = []
-        switch d.string(forKey: "ownward.debugTab") {
-        case "inbox": tab = .inbox
-        case "agent": tab = .agent
-        case "chat": tab = .chat; chatPath = []
-        default: break
-        }
+        let d = defaults
+        let debugTab = d.string(forKey: "ownward.debugTab")
+        tab = tabPreference.initialTab(debugOverride: debugTab)
+        drawerOpen = d.bool(forKey: "ownward.debugDrawer")
+        if debugTab == AppTab.chat.rawValue { chatPath = [] }
         if let r = d.string(forKey: "ownward.debugRoute") {
             let route: Route? = switch r {
             case "settings": .settings
@@ -65,11 +85,12 @@ struct MainShell: View {
             case .chat: chatPath = route.map { [$0] } ?? []
             }
         }
+        #endif
         _tab = State(initialValue: tab)
+        _drawerOpen = State(initialValue: drawerOpen)
         _chatPath = State(initialValue: chatPath)
         _inboxPath = State(initialValue: inboxPath)
         _agentPath = State(initialValue: agentPath)
-        #endif
     }
 
     var body: some View {
@@ -108,7 +129,10 @@ struct MainShell: View {
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
-        .onChange(of: tab) { Haptics.selection() }
+        .onChange(of: tab) { _, tab in
+            Haptics.selection()
+            tabPreference.save(tab)
+        }
         // 返回（按钮或边缘右滑）时的轻触感：path 变短即 pop
         .onChange(of: inboxPath.count) { old, new in if new < old { Haptics.back() } }
         .onChange(of: agentPath.count) { old, new in if new < old { Haptics.back() } }

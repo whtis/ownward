@@ -34,6 +34,14 @@ describe("RunnerAgentStateProjector 消息展开", () => {
     expect(s.messages[0]).toMatchObject({ role: "tool", name: "⚠️ 出错", text: "boom: exit 1" });
   });
 
+  test("工具报错保留归一化图片 URL，纯图错误也可见且非法 URL 被滤", () => {
+    const image = "/api/agent-image/s1/aaaaaaaaaaaaaaaa.png";
+    const mixed = project([{ type: "message-completed", body: { role: "tool", error: true, content: [[{ type: "text", text: "boom" }, { type: "image", url: image }, { type: "image", url: "https://evil.example/x.png" }]] } }]);
+    expect(mixed.messages[0]).toMatchObject({ role: "tool", name: "⚠️ 出错", text: "boom", images: [image] });
+    const only = project([{ type: "message-completed", body: { role: "tool", error: true, content: [[{ type: "image", url: image }]] } }]);
+    expect(only.messages[0]).toMatchObject({ role: "tool", name: "⚠️ 出错", text: "🖼 图片 ×1", images: [image] });
+  });
+
   test("成功工具结果（tool-result payload）逐条展开并带名字", () => {
     const s = project([{ type: "message-completed", body: { role: "tool-result", results: [{ name: "Bash", content: "total 8\ndrwxr-xr-x" }] } }]);
     expect(s.messages[0]).toMatchObject({ role: "tool", name: "↳ Bash" });
@@ -52,12 +60,12 @@ describe("RunnerAgentStateProjector 消息展开", () => {
 
   test("session-updated 带出 commands/model；request 级 usage 带出 ctxTokens（turn 级不覆盖）", () => {
     const s = project([
-      { type: "session-updated", body: { nativeRef: "n1", model: "claude-example-5", commands: ["compact", "clear"] } },
+      { type: "session-updated", body: { nativeRef: "n1", model: "claude-fable-5", commands: ["compact", "clear"] } },
       { type: "usage", body: { scope: "request", inputTokens: 1200, outputTokens: 5, contextTokens: 1200 } },
       { type: "usage", body: { scope: "turn", inputTokens: 99999, outputTokens: 50, contextTokens: 99999 } },
     ]);
     expect(s.commands).toEqual(["compact", "clear"]);
-    expect(s.model).toBe("claude-example-5");
+    expect(s.model).toBe("claude-fable-5");
     expect(s.ctxTokens).toBe(1200);
   });
 
@@ -99,6 +107,18 @@ describe("RunnerAgentStateProjector 消息展开", () => {
     expect(s.messages[0].text).toBe("false\n(exit 1)");
   });
 
+  test("codex MCP 图文结果按原顺序投影，图片独立成行避免被工具折叠", () => {
+    const image = "/api/agent-image/s1/aaaaaaaaaaaaaaaa.png";
+    const s = project([{ type: "message-completed", body: { role: "tool", type: "mcp_tool_call", item: {
+      server: "image-server", tool: "render", result: { content: [
+        { type: "text", text: "before" }, { type: "image", mimeType: "image/png", url: image }, { type: "text", text: "after" },
+      ] },
+    } } }], "codex");
+    expect(s.messages.map((m: any) => [m.name, m.text, m.images ?? []])).toEqual([
+      ["↳ image-server/render", "before", []], ["image", "🖼 图片 ×1", [image]], ["↳ image-server/render", "after", []],
+    ]);
+  });
+
   test("旧 payload（纯 text 字符串）仍按 assistant 渲染——历史 journal 兼容", () => {
     const s = project([{ type: "message-completed", body: "老格式文本" }]);
     expect(s.messages[0]).toMatchObject({ role: "assistant", text: "老格式文本" });
@@ -137,7 +157,7 @@ describe("notice 分类不许被吞", () => {
   });
   test("上一轮遗留的后台任务通知透出到会话里", () => {
     // 后台任务是随上一轮 CLI 一起没的，而 agent 上一轮多半承诺了「跑完自动怎样」——不透出，
-    // 用户就会一直等一件永远不会发生的事
+    // 用户就会一直等一件永远不会发生的事（2026-08-31 实撞：等「插上线自动装 iOS」）
     const s = project([{ type: "provider-notice", body: { category: "background_task", message: "上一轮的后台任务 bg-1 → stopped：No completion record was found" } }]);
     expect(s.messages).toHaveLength(1);
     expect(s.messages[0].text).toContain("bg-1");

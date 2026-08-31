@@ -31,7 +31,7 @@ describe("settings schema and snapshot", () => {
   test("schema covers every defaults leaf and forces top-level classification", () => {
     const f = files(), defaults = JSON.parse(readFileSync(f.defaultFile, "utf8")), { schema } = loadSettings(f);
     expect(schemaLeafPointers(schema)).toEqual(defaultLeaves(defaults));
-    for (const pointer of ["/dashboard/listen", "/dispatch/defaults/dir", "/dispatch/defaults/model", "/dispatch/defaults/permission", "/dispatch/defaults/provider"])
+    for (const pointer of ["/dashboard/listen", "/dispatch/defaults/dir", "/dispatch/defaults/effort", "/dispatch/defaults/model", "/dispatch/defaults/permission", "/dispatch/defaults/provider"])
       expect(schemaLeafPointers(schema)).toContain(pointer);
     expect(new Set(Object.values(schema.nodes).map((node) => node.tier))).toEqual(new Set(["public", "advanced", "internal"]));
   });
@@ -112,7 +112,8 @@ describe("validate-only patches", () => {
       { op: "set", path: "/dashboard/listen", value: "all" },
       { op: "set", path: "/dispatch/defaults/dir", value: "~/workspace/example" },
       { op: "set", path: "/dispatch/defaults/provider", value: "codex" },
-      { op: "set", path: "/dispatch/defaults/model", value: "default" },
+      { op: "set", path: "/dispatch/defaults/model", value: "gpt-5.6-sol" },
+      { op: "set", path: "/dispatch/defaults/effort", value: "high" },
       { op: "set", path: "/dispatch/defaults/permission", value: "safe" },
     ] }, f);
     expect(result.valid).toBeTrue();
@@ -120,10 +121,21 @@ describe("validate-only patches", () => {
     expect(result.normalizedPatches.map((patch) => patch.path)).toEqual([
       "/dashboard/listen",
       "/dispatch/defaults/dir",
+      "/dispatch/defaults/effort",
       "/dispatch/defaults/model",
       "/dispatch/defaults/permission",
       "/dispatch/defaults/provider",
     ]);
+  });
+
+  test("rejects invalid dispatch model/effort candidates", () => {
+    const check = (patches: any[]) => { const f = files(); return validateSettingsPatches({ sourceDigest: loadSettings(f).snapshot.sourceDigest, patches }, f); };
+    expect(check([{ op: "set", path: "/dispatch/defaults/provider", value: "codex" }, { op: "set", path: "/dispatch/defaults/model", value: "default" }]).issues[0]?.path).toBe("/dispatch/defaults/model");
+    expect(check([{ op: "set", path: "/dispatch/defaults/provider", value: "codex" }, { op: "set", path: "/dispatch/defaults/model", value: "gpt-5.6-luna" }, { op: "set", path: "/dispatch/defaults/effort", value: "ultra" }]).issues[0]?.message).toContain("组合");
+    expect(check([{ op: "set", path: "/dispatch/defaults/provider", value: "codex" }, { op: "set", path: "/dispatch/defaults/model", value: "gpt-custom" }, { op: "set", path: "/dispatch/defaults/effort", value: "high" }]).valid).toBeFalse();
+    expect(check([{ op: "set", path: "/dispatch/defaults/provider", value: "codex" }, { op: "set", path: "/dispatch/defaults/model", value: "gpt-custom" }]).valid).toBeTrue();
+    expect(check([{ op: "set", path: "/dispatch/defaults/effort", value: "high" }]).issues[0]?.message).toContain("Provider");
+    expect(check([{ op: "set", path: "/dispatch/defaults/provider", value: "claude" }, { op: "set", path: "/dispatch/defaults/effort", value: "ultra" }]).valid).toBeFalse();
   });
 
   test("validates the whole candidate while tolerating extension siblings", () => {

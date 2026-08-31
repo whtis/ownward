@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from "fs";
-import { saveContentImages } from "../../runner/agent-images.ts";
+import { AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, contentImageUrls, normalizeClaudeContentImages } from "../../runner/agent-images.ts";
 import { readRunnerAttachment } from "../../runner/attachments.ts";
 import type { RunnerCommandRecord, RunnerReasonCode } from "../../runner/journals.ts";
 import type { ProviderEventInput, RunnerProvider } from "../../runner/server.ts";
@@ -65,7 +65,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   constructor(private readonly claudeCommand: readonly string[] = ["claude"], private readonly env: Record<string, string | undefined> = process.env, options: ClaudeProviderOptions = {}) {
     if (!claudeCommand.length || claudeCommand.some((part) => !part)) throw new Error("Claude command 非法");
     this.id = options.providerId ?? CLAUDE_PROVIDER_ID;
-    this.options = { controlAckTimeoutMs: options.controlAckTimeoutMs ?? 5_000, maxInvalidLines: options.maxInvalidLines ?? 3, maxStdoutBufferBytes: options.maxStdoutBufferBytes ?? 2 * 1024 * 1024, stderrRingBytes: options.stderrRingBytes ?? 16 * 1024, dataRoot: options.dataRoot };
+    this.options = { controlAckTimeoutMs: options.controlAckTimeoutMs ?? 5_000, maxInvalidLines: options.maxInvalidLines ?? 3, maxStdoutBufferBytes: options.maxStdoutBufferBytes ?? AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, stderrRingBytes: options.stderrRingBytes ?? 16 * 1024, dataRoot: options.dataRoot };
   }
   readHistory(input: { nativeRef: string }) {
     // codebuddy 的 transcript 是自有格式（~/.codebuddy/projects/，非 CC 帧结构）——
@@ -221,7 +221,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   private requireSession(command: RunnerCommandRecord): ClaudeSession { const session = this.sessions.get(command.sessionId); if (!session) throw providerError("PROVIDER_SESSION_NOT_FOUND", "Claude session 不存在"); return session; }
 
   private async cliCapability(cleanEnv: Record<string,string|undefined>,waitForProbe:boolean):Promise<CliCapability> {
-    const key=`${this.claudeCommand.join("\0")}\0${this.env.FAKE_CLAUDE_EFFORT??""}\0${this.env.FAKE_CLAUDE_HELP_DELAY_MS??""}\0${this.env.FAKE_CLAUDE_PERMISSION_PROMPT_TOOL??""}`;
+    const key=`${this.claudeCommand.join("\0")}\0${this.env.FAKE_CLAUDE_EFFORT??""}\0${this.env.FAKE_CLAUDE_HELP_DELAY_MS??""}\0${this.env.FAKE_CLAUDE_HELP_FAIL??""}\0${this.env.FAKE_CLAUDE_PERMISSION_PROMPT_TOOL??""}`;
     let capability=cliCapabilities.get(key);
     if(!capability){capability={state:"pending",effort:false,permissionPromptTool:true};cliCapabilities.set(key,capability);capability.probe=(async()=>{
       const probeRun=async(extra:string[])=>{let proc:Bun.Subprocess|undefined,timer:ReturnType<typeof setTimeout>|undefined;try{proc=Bun.spawn([...this.claudeCommand,...extra],{env:cleanEnv,stdout:"pipe",stderr:"pipe",stdin:"ignore"});timer=setTimeout(()=>{try{proc?.kill("SIGKILL");}catch{}},2_000);const [stdout,stderr,code]=await Promise.all([new Response(proc.stdout as ReadableStream<Uint8Array>).text(),new Response(proc.stderr as ReadableStream<Uint8Array>).text(),proc.exited]);return{code,text:`${stdout}\n${stderr}`};}finally{if(timer)clearTimeout(timer);}};
@@ -231,7 +231,8 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
         const parse=await probeRun(["--permission-prompt-tool"]);
         capability!.permissionPromptTool=!parse.text.includes("unknown option '--permission-prompt-tool'");
         const bare=await probeRun(["--help"]);
-        capability!.effort=bare.code===0&&bare.text.includes("--effort");
+        if(bare.code!==0)throw new Error("Claude CLI capability probe failed");
+        capability!.effort=bare.text.includes("--effort");
         capability!.state="ready";
       }catch{capability!.state="failed";this.metrics.effortProbeFailures++;}
     })();}
@@ -242,7 +243,8 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   private async spawn(session: ClaudeSession): Promise<void> {
     const generation = ++session.generation, cleanEnv = { ...this.env, DISABLE_OMC: "1" }; for (const key of Object.keys(cleanEnv)) if (key.startsWith("CLAUDE_CODE_") || key.startsWith("CODEBUDDY_")) delete cleanEnv[key];  // 两家 CLI 的嵌套会话变量都剥，防被当成父会话的子会话
     // 非 bypass 必须等 probe：错发 --permission-prompt-tool 给不认识它的克隆 CLI（codebuddy）会直接 unknown option 崩
-    const capability=await this.cliCapability(cleanEnv,!!session.options.effort||session.options.access!=="bypass"),supportsEffort=capability.state==="ready"&&capability.effort;if(session.options.effort&&!supportsEffort)this.metrics.effortUnsupported++;
+    const capability=await this.cliCapability(cleanEnv,!!session.options.effort||session.options.access!=="bypass"),supportsEffort=capability.state==="ready"&&capability.effort;
+    if(session.options.effort&&!supportsEffort){this.metrics.effortUnsupported++;throw providerError("PROVIDER_CAPABILITY_UNSUPPORTED",capability.state==="failed"?`${this.id} CLI 无法确认 --effort 支持，已拒绝启动`:`${this.id} CLI 不支持 --effort，已拒绝启动`);}
     const supportsPermissionPromptTool=capability.state!=="ready"||capability.permissionPromptTool;
     let proc: Bun.Subprocess; try { proc = Bun.spawn(buildClaudeProviderArgs(this.claudeCommand, session.options, session.nativeRef,supportsEffort,supportsPermissionPromptTool), { cwd: session.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe", env: cleanEnv }); } catch { throw providerError("PROVIDER_UNAVAILABLE", "无法启动 Claude CLI"); }
     session.proc = proc; void this.readStdout(session, proc, generation); void this.readStderr(session, proc, generation); void proc.exited.then((code) => this.onExit(session, proc, generation, code));
@@ -309,7 +311,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       turn.queue.push(this.event(command, "message-completed", { payload: JSON.stringify(message) })); turn.queue.push(this.event(command, "usage", { payload: JSON.stringify({ scope: "request", ...normalizeUsage(raw.message.usage) }) }, "best-effort")); return;
     }
     if (raw.type === "user" && plain(raw.message)) {
-      const content = raw.message.content, items = Array.isArray(content) ? content.filter((item) => plain(item) && item.type === "tool_result") : [];
+      const content = normalizeClaudeContentImages(this.options.dataRoot, session.sessionId, raw.message.content), items = Array.isArray(content) ? content.filter((item) => plain(item) && item.type === "tool_result") : [];
       const errors = items.filter((item) => item.is_error).map((item) => item.content);
       if (errors.length) turn.queue.push(this.event(command, "message-completed", { payload: JSON.stringify({ role: "tool", error: true, content: errors }) }));
       // 成功的工具结果也入 journal（终端能看到，控制台不该缺）：每条截 2000、每帧合计 8000 有界；
@@ -317,7 +319,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       let budget = 8_000; const results: { name: string; content: string; images?: string[] }[] = [];
       for (const item of items) {
         if (item.is_error) continue;
-        const images = this.options.dataRoot ? saveContentImages(this.options.dataRoot, session.sessionId, [item]) : [];
+        const images = contentImageUrls(item.content);
         const text = budget > 0 ? flattenToolResult(item.content).trim().slice(0, Math.min(2_000, budget)) : "";
         if (!text && !images.length) continue;
         budget -= text.length;

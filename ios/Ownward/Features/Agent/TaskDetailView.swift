@@ -70,9 +70,12 @@ final class TaskSessionStore {
     enum HandoffOutcome: Equatable { case ok, needsConfirm, failed(String) }
 
     /// 跨引擎接力（android TaskDetailScreen 同款流程）：策略性「结果未知」错误转确认弹窗，其余如实报错
-    func handoff(to providerId: String, confirmUnknownOutcome: Bool) async -> HandoffOutcome {
+    func handoff(to providerId: String, model: String, effort: String,
+                 reason: String, confirmUnknownOutcome: Bool) async -> HandoffOutcome {
         do {
-            _ = try await client.devHandoff(id: taskId, providerId: providerId, confirmUnknownOutcome: confirmUnknownOutcome)
+            _ = try await client.devHandoff(
+                id: taskId, providerId: providerId, confirmUnknownOutcome: confirmUnknownOutcome,
+                model: model, effort: effort, reason: reason)
             Haptics.success()
             await refresh()
             return .ok
@@ -108,6 +111,7 @@ struct TaskDetailView: View {
     @State private var input = ""
     @State private var pendingImages: [PendingImage] = []
     @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var providers: [String: [String]] = [:]
     @State private var showInfo = false
     @FocusState private var focused: Bool
 
@@ -187,7 +191,7 @@ struct TaskDetailView: View {
         }
         .sheet(isPresented: $showInfo) {
             if let s = state {
-                InfoSheet(state: s, store: store, setControl: { action in
+                InfoSheet(state: s, store: store, providers: providers, setControl: { action in
                     showInfo = false
                     Task { await store.setControl(action) }
                 }, dismissInfo: { showInfo = false })
@@ -197,6 +201,7 @@ struct TaskDetailView: View {
         // 运行中 2.5s，空闲 8s；仅前台可见时轮询
         .poll(id: "task-\(taskId)") { await store.refresh(); return store.pollInterval }
         .task {
+            if let available = try? await client.chatProviders() { providers = available }
             #if DEBUG
             // 调试：-ownward.debugInput "/" 预填输入框，用来给斜杠补全菜单截图
             //（模拟器没法脚本化打字；截图/自动化用，Release 不编译）
@@ -264,19 +269,53 @@ struct TaskDetailView: View {
 private struct InfoSheet: View {
     let state: AgentState
     let store: TaskSessionStore
+    let providers: [String: [String]]
     let setControl: (String) -> Void
     let dismissInfo: () -> Void
 
     @State private var handoffTarget: String?
+    @State private var provider: String
+    @State private var model: String
+    @State private var effort: String
     @State private var confirmUnknown = false
     @State private var switching = false
     @State private var alertShown = false
     @State private var handoffError: String?
 
+    init(state: AgentState, store: TaskSessionStore, providers: [String: [String]],
+         setControl: @escaping (String) -> Void, dismissInfo: @escaping () -> Void) {
+        self.state = state
+        self.store = store
+        self.providers = providers
+        self.setControl = setControl
+        self.dismissInfo = dismissInfo
+        let currentProvider = agentProvider(state)
+        _provider = State(initialValue: currentProvider)
+        _model = State(initialValue: state.model ?? "")
+        _effort = State(initialValue: state.effort ?? "")
+    }
+
     var body: some View {
         let s = state
-        VStack(alignment: .leading, spacing: 0) {
-            InfoRow(label: "引擎", value: s.backend + (s.model.map { " · \($0)" } ?? ""))
+        let currentProvider = agentProvider(s)
+        let sameProvider = provider == currentProvider
+        let modelOptions = uniqueSessionOptions((sameProvider && (s.model?.isEmpty != false) ? [""] : [])
+            + workProviderModels(provider, providers: providers)
+            + (model.isEmpty ? [] : [model]))
+        let allowedEfforts = workProviderEfforts(provider, model: model)
+        let effortOptions = uniqueSessionOptions((sameProvider && (s.effort?.isEmpty != false) ? [""] : [])
+            + (!effort.isEmpty && !allowedEfforts.contains(effort) ? [effort] : [])
+            + allowedEfforts)
+        let noop = sessionConfigIsNoop(
+            currentProvider: currentProvider, currentModel: s.model ?? "", currentEffort: s.effort ?? "",
+            provider: provider, model: model, effort: effort)
+        let valid = !provider.isEmpty && workProviderSelectionIsValid(
+            provider, model: model, effort: effort, allowOmitted: sameProvider)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                InfoRow(label: "Provider", value: currentProvider)
+            InfoRow(label: "模型", value: s.model?.isEmpty == false ? s.model! : "Provider 默认")
+            InfoRow(label: "思考深度", value: s.effort?.isEmpty == false ? s.effort! : "Provider 默认")
             InfoRow(label: "控制权", value: s.control == "ownward" ? "ownward（可输入）" : (s.control == "external" ? "桌面终端" : "旁观（已释放输入权）"))
             if let t = s.tokens {
                 let total = t.total ?? ((t.input ?? 0) + (t.output ?? 0))
@@ -284,24 +323,55 @@ private struct InfoSheet: View {
             }
             if let c = s.ctxTokens { InfoRow(label: "上下文", value: String(format: "%.1fk", Double(c) / 1000)) }
             InfoRow(label: "最近活动", value: TimeFormat.ago(epochMs: s.lastActivityAt))
-            // 跨引擎接力（android TaskDetailScreen 同款）：当前会话保留，新引擎接力续跑
-            Text("切换引擎").font(.owLabel).foregroundStyle(OW.textDim).padding(.top, 16)
+            Text("会话配置").font(.owLabel).foregroundStyle(OW.textDim).padding(.top, 16)
             let block = handoffBlockReason(s)
-            HStack(spacing: 8) {
-                ForEach(["claude", "codex", "codebuddy"].filter { $0 != s.backend }, id: \.self) { provider in
-                    Button(provider) {
-                        Haptics.tap()
-                        confirmUnknown = false; handoffError = nil
-                        handoffTarget = provider; alertShown = true
-                    }
-                    .buttonStyle(.bordered)
-                }
+            Picker("Provider", selection: $provider) {
+                ForEach(workEngines, id: \.key) { Text($0.label).tag($0.key) }
             }
-            .font(.owLabel)
+            .pickerStyle(.segmented)
+            .onChange(of: provider) { _, next in
+                if next == currentProvider {
+                    model = s.model ?? ""
+                    effort = s.effort ?? ""
+                } else {
+                    model = workProviderHandoffModel(next)
+                    effort = workProviderDefaultEffort(next, model: model)
+                }
+                handoffError = nil
+            }
             .disabled(block != nil || switching)
+            .padding(.top, 8)
+            Picker("模型", selection: Binding(
+                get: { model },
+                set: { next in
+                    model = next
+                    let allowed = workProviderEfforts(provider, model: next)
+                    if !(sameProvider && effort.isEmpty), !allowed.contains(effort) {
+                        effort = workProviderDefaultEffort(provider, model: next)
+                    }
+                    handoffError = nil
+                }
+            )) {
+                ForEach(modelOptions, id: \.self) { Text($0.isEmpty ? "Provider 默认" : $0).tag($0) }
+            }
+            .disabled(block != nil || switching)
+            Picker("思考深度", selection: $effort) {
+                ForEach(effortOptions, id: \.self) { Text($0.isEmpty ? "Provider 默认" : $0).tag($0) }
+            }
+            .disabled(block != nil || switching)
+            Button(sameProvider ? "应用配置" : "切换引擎并应用") {
+                Haptics.tap()
+                confirmUnknown = false; handoffError = nil
+                handoffTarget = provider; alertShown = true
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(block != nil || switching || !valid || noop)
             .padding(.top, 8)
             if let block {
                 Text(block).font(.owBodyS).foregroundStyle(OW.textDim).padding(.top, 4)
+            } else if noop {
+                Text("请选择不同的模型、思考深度或 Provider")
+                    .font(.owBodyS).foregroundStyle(OW.textDim).padding(.top, 4)
             }
             if let handoffError {
                 Text(handoffError).font(.owBodyS).foregroundStyle(OW.danger).padding(.top, 4)
@@ -329,24 +399,43 @@ private struct InfoSheet: View {
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(OW.surface2, in: RoundedRectangle(cornerRadius: OWRadius.s))
             }
-            Spacer()
+                Spacer()
+            }
+            .padding(.horizontal, 24).padding(.top, 28)
         }
-        .padding(.horizontal, 24).padding(.top, 28)
         .presentationBackground(OW.bg)
-        .alert(confirmUnknown ? "确认未知副作用后切换？" : "切换到 \(handoffTarget ?? "")？", isPresented: $alertShown) {
+        .alert(confirmUnknown ? "确认未知副作用后切换？" : (sameProvider ? "应用会话配置？" : "切换到 \(handoffTarget ?? "")？"), isPresented: $alertShown) {
             Button("取消", role: .cancel) { handoffTarget = nil; confirmUnknown = false }
             Button(confirmUnknown ? "理解风险，继续" : "确认切换") { Task { await confirmHandoff() } }
         } message: {
             Text(confirmUnknown
                 ? "旧 Run 的执行结果未知，可能已经产生文件或命令副作用。继续接力不会重放旧命令，请先核对工作区状态。"
-                : "当前会话会保留，新引擎将接力继续这个任务。")
+                : (sameProvider
+                    ? "当前会话的有界历史会保留，新的模型和思考深度从下一轮生效。"
+                    : "当前会话的有界历史会保留，新引擎将接力继续这个任务。"))
         }
     }
 
     private func confirmHandoff() async {
         guard let target = handoffTarget, !switching else { return }
+        let currentProvider = agentProvider(state)
+        guard !sessionConfigIsNoop(
+            currentProvider: currentProvider, currentModel: state.model ?? "", currentEffort: state.effort ?? "",
+            provider: target, model: model, effort: effort) else {
+            handoffTarget = nil; confirmUnknown = false; handoffError = "配置没有变化"
+            return
+        }
+        guard workProviderSelectionIsValid(
+            target, model: model, effort: effort, allowOmitted: target == currentProvider
+        ) else {
+            handoffTarget = nil; confirmUnknown = false; handoffError = "所选模型不支持这个思考深度"
+            return
+        }
         switching = true
-        let outcome = await store.handoff(to: target, confirmUnknownOutcome: confirmUnknown)
+        let outcome = await store.handoff(
+            to: target, model: model, effort: effort,
+            reason: target == currentProvider ? "manual-reconfigure" : "manual-handoff",
+            confirmUnknownOutcome: confirmUnknown)
         switching = false
         switch outcome {
         case .ok:
@@ -359,6 +448,22 @@ private struct InfoSheet: View {
             handoffTarget = nil; confirmUnknown = false
             handoffError = msg
         }
+    }
+}
+
+func agentProvider(_ state: AgentState) -> String {
+    if let providerId = state.providerId, !providerId.isEmpty { return providerId }
+    return state.backend.isEmpty ? "claude" : state.backend
+}
+
+func sessionConfigIsNoop(currentProvider: String, currentModel: String, currentEffort: String,
+                         provider: String, model: String, effort: String) -> Bool {
+    currentProvider == provider && currentModel == model && currentEffort == effort
+}
+
+private func uniqueSessionOptions(_ values: [String]) -> [String] {
+    values.reduce(into: []) { result, value in
+        if !result.contains(value) { result.append(value) }
     }
 }
 
