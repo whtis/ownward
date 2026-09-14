@@ -40,6 +40,8 @@ jobs:
           except Exception as e: print('metadata unavailable:',e)
           PY
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with: {path: site}
       - id: deployment
