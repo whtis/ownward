@@ -19,8 +19,7 @@ cd ios && ./build.sh           # 生成 Ownward.xcodeproj + 模拟器 Debug 构�
 
 ## 版本
 
-- `MARKETING_VERSION`（CFBundleShortVersionString）只能纯数字点分（App Store 校验），渠道+日期放
-  `OwnwardVersionName`（如 `0.1.0-alpha.20260821`）；`CURRENT_PROJECT_VERSION` = build `YYYYMMDDN`。
+- `MARKETING_VERSION`（CFBundleShortVersionString）和 `OwnwardVersionName` 与根目录 `package.json` 的版本保持一致；`CURRENT_PROJECT_VERSION` = build `YYYYMMDDN`。
 - 发布后在 daemon 机器上跑 `scripts/ios-release.sh "说明" "<TestFlight 链接>"`，写 `data/app/ios.json`，
   手机端设置页「检查更新」比对 build 号。
 

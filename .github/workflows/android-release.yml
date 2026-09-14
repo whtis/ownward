@@ -50,7 +50,10 @@ jobs:
           G=android/app/build.gradle.kts
           NAME=$(grep -o 'versionName = "[^"]*"' "$G" | cut -d'"' -f2)
           CODE=$(grep -o 'versionCode = [0-9]*' "$G" | grep -o '[0-9]*')
+          PACKAGE=$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')
           [ -n "$NAME" ] && [ -n "$CODE" ] || { echo "::error::读不到 $G 的 versionName/versionCode"; exit 1; }
+          [ "$NAME" = "$PACKAGE" ] || { echo "::error::Android versionName=$NAME 与 package.json=$PACKAGE 不一致"; exit 1; }
+          case "$NAME" in *-*) echo "::error::正式 Android Release 不能带 alpha/beta 等渠道后缀: $NAME"; exit 1;; esac
           if [ "$RELEASE" = "true" ]; then
             EXPECT="android-v${NAME}+${CODE}"
             [ "$GITHUB_REF_NAME" = "$EXPECT" ] || { echo "::error::tag $GITHUB_REF_NAME 与代码里的版本不符（应为 $EXPECT）"; exit 1; }
