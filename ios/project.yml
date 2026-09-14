@@ -19,7 +19,7 @@ settings:
     # 版本约定（dev-guidelines）：CFBundleShortVersionString 只能是纯数字点分（App Store 校验），
     # OwnwardVersionName 与 package.json 对齐；build = YYYYMMDDN
     MARKETING_VERSION: "1.2.2"
-    CURRENT_PROJECT_VERSION: "202609021"
+    CURRENT_PROJECT_VERSION: "202609142"
     CODE_SIGN_STYLE: Automatic
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     SWIFT_EMIT_LOC_STRINGS: NO

@@ -16,7 +16,10 @@ print(json.load(open(sys.argv[1]))["version"])
 PY2
 )
 [ -n "$VERSION_NAME" ] && [ -n "$VERSION_CODE" ] || { echo "读不到 ios/project.yml 的版本号"; exit 1; }
+[[ "$PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "package.json 版本必须是稳定 X.Y.Z：$PACKAGE_VERSION"; exit 1; }
 [ "$VERSION_NAME" = "$PACKAGE_VERSION" ] || { echo "iOS versionName ($VERSION_NAME) 必须与 package.json ($PACKAGE_VERSION) 对齐"; exit 1; }
+MARKETING_VERSION=$(grep -o 'MARKETING_VERSION: "[^"]*"' "$YML" | cut -d'"' -f2)
+[ "$MARKETING_VERSION" = "$PACKAGE_VERSION" ] || { echo "iOS MARKETING_VERSION ($MARKETING_VERSION) 必须与 package.json ($PACKAGE_VERSION) 对齐"; exit 1; }
 mkdir -p "$ROOT/data/app"
 python3 - "$VERSION_NAME" "$VERSION_CODE" "$NOTES" "$URL" > "$ROOT/data/app/ios.json" <<'PY'
 import json, sys

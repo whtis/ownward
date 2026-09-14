@@ -58,9 +58,8 @@ jobs:
             EXPECT="android-v${NAME}+${CODE}"
             [ "$GITHUB_REF_NAME" = "$EXPECT" ] || { echo "::error::tag $GITHUB_REF_NAME 与代码里的版本不符（应为 $EXPECT）"; exit 1; }
           fi
-          PRE=false; case "$NAME" in *-*) PRE=true;; esac
           {
-            echo "name=$NAME"; echo "code=$CODE"; echo "prerelease=$PRE"
+            echo "name=$NAME"; echo "code=$CODE"; echo "prerelease=false"
             echo "apk=ownward-${NAME}-${CODE}.apk"
           } >> "$GITHUB_OUTPUT"
           echo "版本 $NAME ($CODE) ref=$GITHUB_REF_NAME release=$RELEASE"
@@ -173,13 +172,11 @@ jobs:
           [ -n "$APK" ] || { echo "::error::artifact 缺 APK"; exit 1; }
           NAME=$(python3 -c 'import json; print(json.load(open("dist/android.json"))["versionName"])')
           CODE=$(python3 -c 'import json; print(json.load(open("dist/android.json"))["versionCode"])')
-          PRE=false; case "$NAME" in *-*) PRE=true;; esac
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release 已存在，只更新资产"
             gh release upload "$TAG" "$APK" dist/android.json dist/SHA256SUMS --clobber
           else
             ARGS=(--verify-tag --title "Android $NAME ($CODE)" --notes-file dist/RELEASE_NOTES.md --generate-notes)
-            [ "$PRE" = "true" ] && ARGS+=(--prerelease)
             gh release create "$TAG" "$APK" dist/android.json dist/SHA256SUMS "${ARGS[@]}"
           fi
           gh release view "$TAG" --json url -q .url
