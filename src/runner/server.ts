@@ -153,7 +153,7 @@ export class RunnerServer {
     const b = body as any;
     if (this.draining) { this.write(connection, response(request, "error", { code: "RUNNER_DRAINING", message: "Runner 正在 drain，拒绝新命令" })); return; }
     const kind = request.kind === "interrupt" ? "interrupt" : request.kind === "approval-response" ? "approval-response" : b.kind;
-    if (!["start-run", "resume-run", "send-input", "interrupt", "approval-response", "add-dir", "set-access", "new-session"].includes(kind)) { this.write(connection, response(request, "error", { code: "RUNNER_COMMAND_UNSUPPORTED", message: `不支持 ${kind}` })); return; }
+    if (!["start-run", "resume-run", "send-input", "interrupt", "approval-response", "add-dir", "set-access", "set-options", "new-session"].includes(kind)) { this.write(connection, response(request, "error", { code: "RUNNER_COMMAND_UNSUPPORTED", message: `不支持 ${kind}` })); return; }
     let provider: RunnerProvider;
     try { provider = this.resolveProvider(b.providerId); this.registerProvider(provider); }
     catch (error) { this.write(connection, response(request, "error", { code: "RUNNER_PROVIDER_UNAVAILABLE", message: error instanceof Error ? error.message : "Provider 未注册" })); return; }

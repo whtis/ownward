@@ -1,6 +1,6 @@
 // AI 对话：流式输出 + 多供应商（claude / codex，均吃各自订阅）。
-// claude 走 --resume 原生续聊 + stream-json token 级增量；
-// codex 无原生续聊/流式，用「历史重放」保上下文、整段返回。
+// claude：每个对话保留一条 stream-json 常驻进程（见下方「常驻 claude 进程」），--resume 原生续聊 + token 级增量；
+// codex：`codex exec --json` 原生 thread 续聊（exec resume）+ item 级增量，线程丢了才回退「历史重放」。
 // 历史持久化在 data/chats/<id>.json。
 //
 // 图片附件（chat-images.ts）：字节落 data/chats/attachments/<chatId>/，消息里只记 { id, mediaType, bytes }。
@@ -33,7 +33,7 @@ import {
 } from "./chat-images.ts";
 import type { ProjectCandidate } from "./project-memory.ts";
 import type { Fail, RoleCandidate } from "./roles.ts";
-import { cfg, log, run } from "./util.ts";
+import { cfg, log } from "./util.ts";
 import { codexEffortsForModel, DEFAULT_CODEX_MODEL, isCodexEffort } from "./session-options.ts";
 
 /** 消息里的图片只有元数据（id/类型/字节数）；字节住附件目录，取图走 /api/chat/image。
@@ -45,6 +45,8 @@ export interface AiChat {
   provider: string;      // claude | codex
   model: string;
   claudeSessionId?: string;
+  /** codex 原生 thread id（`codex exec --json` 的 thread.started）：有它就 `exec resume` 续聊，不再重放历史 */
+  codexThreadId?: string;
   /** 绑定的角色 id（新建时定死；旧对话没有这两个字段，读出来就是普通对话） */
   roleId?: string;
   /** 本次对话注入的项目（必是角色已关联项目的子集，可为空数组=只要角色自身记忆） */
@@ -528,73 +530,192 @@ export async function saveChatCandidate(
   return candidateFromMessage(chat, index, text, target);
 }
 
-async function* runClaude(chat: AiChat, prompt: string, system: string, images: PreparedImage[] = []): AsyncGenerator<ChatEvent, string> {
-  const withImages = images.length > 0;
-  const bin = chat.provider === "codebuddy" ? (cfg.llm?.codebuddyBin || "codebuddy") : (cfg.llm?.claudeBin || "claude");
-  const proc = Bun.spawn([bin, ...claudeArgs(chat, prompt, system, withImages)], {
-    cwd: CHATS_DIR, stdout: "pipe", stderr: "pipe", stdin: withImages ? "pipe" : "ignore",
+// ---- 常驻 claude 进程（对话提速）----
+// 旧实现每条消息冷起一次 `claude -p`：CLI 启动到 init 帧约 4s，再加模型首字，sonnet 一问一答要 6~7s 才见字，
+// 比在终端里直接用慢一倍以上（2026-09-05 实测：init 4.1s / 首字 7.3s）。改成每个对话保留一条 stream-json
+// 长驻进程：首条消息冷起一次，之后每条只往 stdin 写一帧 user 消息，首字延迟只剩模型本身的 TTFT。
+// 边界：模型 / system prompt（记忆包）/ CLI 路径 / 会话 id 变了就换进程（带 --resume 续同一会话）；
+// 10 分钟没人说话回收；最多同时保留 3 条，多了按最久未用回收；daemon 退出时全部 SIGKILL。
+const RESIDENT_IDLE_MS = 10 * 60_000, RESIDENT_MAX = 3;
+type ClaudeFrame = Record<string, any>;
+interface ResidentClaude {
+  key: string; bin: string; model: string; systemHash: string; sessionId: string;
+  proc: Bun.Subprocess; frames: ClaudeFrame[]; waiters: ((frame: ClaudeFrame | null) => void)[];
+  exited: boolean; stderr: string; busy: boolean; lastUsedAt: number; idleTimer?: ReturnType<typeof setTimeout>;
+}
+const residents = new Map<string, ResidentClaude>();
+const shortHash = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex").slice(0, 16);
+function killResident(r: ResidentClaude, why: string): void {
+  if (residents.get(r.key) === r) residents.delete(r.key);
+  clearTimeout(r.idleTimer);
+  try { r.proc.kill("SIGKILL"); } catch { /* 早退出了 */ }
+  log(`chat: 回收常驻 claude [${r.key}]：${why}`);
+}
+/** 测试与 daemon 退出用：把所有常驻进程杀干净（CC 不响应 SIGTERM，一律 SIGKILL） */
+export function resetChatResidents(): void { for (const r of [...residents.values()]) killResident(r, "全部回收"); }
+process.on("exit", () => { for (const r of residents.values()) { try { r.proc.kill("SIGKILL"); } catch {} } });
+async function pumpResident(r: ResidentClaude): Promise<void> {
+  const deliver = (frame: ClaudeFrame | null) => { const waiter = r.waiters.shift(); if (waiter) waiter(frame); else if (frame) r.frames.push(frame); };
+  const stdoutDone = (async () => {
+    const reader = (r.proc.stdout as ReadableStream<Uint8Array>).getReader(), decoder = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1); if (!line) continue; try { deliver(JSON.parse(line)); } catch { /* 非 JSON 行忽略 */ } }
+    }
+  })().catch(() => {});
+  const stderrDone = (async () => { const reader = (r.proc.stderr as ReadableStream<Uint8Array>).getReader(), decoder = new TextDecoder(); for (;;) { const { done, value } = await reader.read(); if (done) break; r.stderr = (r.stderr + decoder.decode(value, { stream: true })).slice(-4000); } })().catch(() => {});
+  await Promise.all([r.proc.exited.catch(() => -1), stdoutDone, stderrDone]);
+  r.exited = true;
+  if (residents.get(r.key) === r) residents.delete(r.key);
+  clearTimeout(r.idleTimer);
+  while (r.waiters.length) r.waiters.shift()!(null);   // 等帧的那轮：进程没了，按已有输出收尾
+}
+function nextClaudeFrame(r: ResidentClaude): Promise<ClaudeFrame | null> {
+  if (r.frames.length) return Promise.resolve(r.frames.shift()!);
+  if (r.exited) return Promise.resolve(null);
+  return new Promise((resolve) => r.waiters.push(resolve));
+}
+function spawnResident(chat: AiChat, system: string, bin: string): ResidentClaude {
+  // 超出上限：先回收最久没用、且不在回复中的那条
+  while (residents.size >= RESIDENT_MAX) {
+    const victim = [...residents.values()].filter((r) => !r.busy).sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+    if (!victim) break;
+    killResident(victim, "超出常驻上限");
+  }
+  // prompt 永远走 stdin 帧（不是 argv）：进程要活过这一轮，argv 里的 -p <prompt> 只能用一次
+  const proc = Bun.spawn([bin, ...claudeArgs(chat, "", system, true)], {
+    cwd: CHATS_DIR, stdout: "pipe", stderr: "pipe", stdin: "pipe",
     env: { ...process.env, DISABLE_OMC: "1" },
   });
-  if (withImages) {
-    // 一帧发完就关 stdin：对话是一问一答，EOF 是 CC 结束本轮退出的信号
-    // （不关就一直等下一帧，这轮永远读不到 result）
-    proc.stdin.write(claudeUserFrame(prompt, images));
-    proc.stdin.end();
+  const r: ResidentClaude = { key: chat.id, bin, model: chat.model, systemHash: shortHash(system), sessionId: chat.claudeSessionId || "", proc, frames: [], waiters: [], exited: false, stderr: "", busy: false, lastUsedAt: Date.now() };
+  void pumpResident(r);
+  residents.set(chat.id, r);
+  log(`chat: 拉起常驻 claude [${chat.id}] pid=${proc.pid} model=${chat.model}${chat.claudeSessionId ? " (resume)" : ""}`);
+  return r;
+}
+function acquireResident(chat: AiChat, system: string, bin: string): ResidentClaude {
+  const existing = residents.get(chat.id);
+  if (existing) {
+    if (existing.busy) throw new Error("上一条还在回复中，等它说完再发");
+    // exitCode/signalCode 是同步可见的：进程刚退、pump 还没收尾的那几毫秒里也不能把帧写进一具尸体
+    const dead = existing.exited || existing.proc.exitCode !== null || existing.proc.signalCode !== null;
+    const same = !dead && existing.bin === bin && existing.model === chat.model && existing.systemHash === shortHash(system) && existing.sessionId === (chat.claudeSessionId || "");
+    if (same) return existing;
+    killResident(existing, dead ? "进程已退出" : "模型/记忆包/会话变了，换进程续聊");
   }
+  return spawnResident(chat, system, bin);
+}
 
-  let acc = "";
-  let final: string | null = null;
-  const reader = proc.stdout.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line) continue;
-      try {
-        const ev = JSON.parse(line);
-        if (ev.session_id) chat.claudeSessionId = ev.session_id;
-        const delta = ev.event?.delta;
-        if (ev.type === "stream_event" && delta?.type === "text_delta" && delta.text) {
-          acc += delta.text;
-          yield { type: "delta", text: delta.text };
-        } else if (ev.type === "assistant") {
-          // 联网工具调用 → 给客户端一个"搜索中"状态
-          for (const c of ev.message?.content ?? []) {
-            if (c?.type === "tool_use") {
-              const label = c.name === "WebSearch" ? "联网搜索" : c.name === "WebFetch" ? "抓取网页" : null;
-              if (!label) continue; // ToolSearch 等基建调用不值得展示
-              const q = c.input?.query || c.input?.url || "";
-              yield { type: "tool", text: `${label}${q ? "：" + String(q).slice(0, 80) : ""}` };
-            }
+async function* runClaude(chat: AiChat, prompt: string, system: string, images: PreparedImage[] = []): AsyncGenerator<ChatEvent, string> {
+  const bin = chat.provider === "codebuddy" ? (cfg.llm?.codebuddyBin || "codebuddy") : (cfg.llm?.claudeBin || "claude");
+  let r = acquireResident(chat, system, bin);
+  const send = (target: ResidentClaude) => {
+    // 写一帧就够；stdin 不关——关了 CLI 会在这轮结束后退出，下一条又得冷起
+    target.busy = true; clearTimeout(target.idleTimer);
+    const sink = target.proc.stdin as any;
+    sink.write(claudeUserFrame(prompt, images));
+    if (typeof sink.flush === "function") sink.flush();
+  };
+  send(r);
+  let respawned = false;
+  try {
+    let acc = "", final: string | null = null, errored = "", sawFrame = false;
+    for (;;) {
+      const ev = await nextClaudeFrame(r);
+      if (ev === null) {
+        // 这轮一帧都没收到就没了 = 进程在两轮之间已经死了（限流退出 / 被杀 / 自己闲置退出）而我们还没察觉：
+        // 重拉一次带 --resume 续上，用户这条消息不能就这么蒸发。已经吐过字的不重试（会重复输出）
+        if (!sawFrame && !respawned) { respawned = true; killResident(r, "两轮之间已退出，重拉续聊"); r = spawnResident(chat, system, bin); send(r); continue; }
+        break;   // 进程没了：拿已有输出收尾（没有输出在下面报错）
+      }
+      sawFrame = true;
+      if (typeof ev.session_id === "string" && ev.session_id) { chat.claudeSessionId = ev.session_id; r.sessionId = ev.session_id; }
+      const delta = ev.event?.delta;
+      if (ev.type === "stream_event" && delta?.type === "text_delta" && delta.text) {
+        acc += delta.text;
+        yield { type: "delta", text: delta.text };
+      } else if (ev.type === "assistant") {
+        // 联网工具调用 → 给客户端一个"搜索中"状态
+        for (const c of ev.message?.content ?? []) {
+          if (c?.type === "tool_use") {
+            const label = c.name === "WebSearch" ? "联网搜索" : c.name === "WebFetch" ? "抓取网页" : null;
+            if (!label) continue; // ToolSearch 等基建调用不值得展示
+            const q = c.input?.query || c.input?.url || "";
+            yield { type: "tool", text: `${label}${q ? "：" + String(q).slice(0, 80) : ""}` };
           }
-        } else if (ev.type === "result") {
-          final = ev.result ?? null;
         }
-      } catch { /* skip non-json */ }
+      } else if (ev.type === "result") {
+        // --resume 时 CLI 会先为上一轮遗留的后台任务通知单独走一个伪 turn（init + result，origin.kind=task-notification），
+        // 它不是本轮的终结——认了它，用户这条消息就静默蒸发（SELF.md 陷阱，2026-08-31 实撞）
+        if (ev.origin?.kind === "task-notification") continue;
+        if (ev.is_error && !acc) errored = String(ev.result || ev.error || "claude 返回错误");
+        final = typeof ev.result === "string" ? ev.result : null;
+        break;
+      }
     }
+    if (errored) { killResident(r, "本轮报错"); throw new Error(errored.slice(-200)); }
+    if (final === null && !acc) { const tail = r.stderr.trim().slice(-200); killResident(r, "本轮无输出"); throw new Error(`${bin} 出错: ${tail || "无输出即退出"}`); }
+    return final ?? acc;
+  } finally {
+    r.busy = false; r.lastUsedAt = Date.now();
+    if (residents.get(chat.id) === r && !r.exited) r.idleTimer = setTimeout(() => killResident(r, "10 分钟无对话"), RESIDENT_IDLE_MS);
   }
-  const code = await proc.exited;
-  // 已流出完整回复时容忍收尾期的非零退出（别把整轮对话连图片附件一起弹掉）；
-  // 失败要可观测：留日志，不许静默吞
-  if (code !== 0 && !acc && !final) {
-    const err = await new Response(proc.stderr).text();
-    throw new Error(`${bin} 出错: ${err.slice(-200)}`);
-  }
-  if (code !== 0) log(`chat: ${bin} 非零退出(code=${code})但已有输出，保留回复`);
-  return final ?? acc;
+}
+
+/** codex 命令行（唯一拼装处，测试按它验 -m / effort / resume）：exec 父选项全放 `resume` 前，正文经 `--` 隔离 */
+export function codexArgs(chat: AiChat, prompt: string, imageFiles: readonly string[], effortArgs: readonly string[], withModel: boolean): string[] {
+  // 图片走已落盘的附件路径（codex exec 没有 stdin 内联通道）。用 `--image=` 连写：
+  // -i / --image 是贪婪多值参数，空格分隔会把后面的 prompt 一起吞成图片路径（codex-session.ts 的血泪）
+  const args = ["exec", "--skip-git-repo-check", "-C", CHATS_DIR, "--sandbox", "read-only", ...effortArgs, ...imageFiles.map((f) => `--image=${f}`), "--json"];
+  if (withModel) args.push("-m", chat.model);
+  if (chat.codexThreadId) args.push("resume", "--", chat.codexThreadId, prompt);
+  else args.push("--", prompt);
+  return args;
+}
+interface CodexTurn { code: number; stderr: string; reply: string; threadId?: string; emitted: boolean }
+/** 跑一轮 `codex exec --json`，把 agent_message 的增量流出去；返回退出码/stderr 供调用方决定重试 */
+async function* codexTurn(bin: string, args: string[], env: Record<string, string> | undefined): AsyncGenerator<ChatEvent, CodexTurn> {
+  const proc = Bun.spawn([bin, ...args], { cwd: CHATS_DIR, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: env ? { ...process.env, ...env } : process.env });
+  const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 300_000);
+  let stderr = ""; const stderrDone = (async () => { const reader = (proc.stderr as ReadableStream<Uint8Array>).getReader(), decoder = new TextDecoder(); for (;;) { const { done, value } = await reader.read(); if (done) break; stderr = (stderr + decoder.decode(value, { stream: true })).slice(-4000); } })().catch(() => {});
+  const snapshots = new Map<string, string>(), replies: string[] = []; let threadId: string | undefined, emitted = false, failure = "";
+  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader(), decoder = new TextDecoder(); let buf = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1); if (!line) continue;
+        let ev: any; try { ev = JSON.parse(line); } catch { continue; }   // 非 JSON 行（老版本/告警）忽略
+        if (ev?.type === "thread.started") { const id = typeof ev.thread_id === "string" ? ev.thread_id : typeof ev.thread?.id === "string" ? ev.thread.id : ""; if (id) threadId = id; }
+        else if ((ev?.type === "item.updated" || ev?.type === "item.completed" || ev?.type === "item.started") && ev.item?.type === "agent_message" && typeof ev.item.text === "string") {
+          const id = String(ev.item.id ?? "");
+          if (ev.type === "item.completed") {
+            // 只在快照有增量时补最后一段；整条都没流过（没有 item.updated）就整段发出
+            const prior = snapshots.get(id) ?? ""; const suffix = ev.item.text.startsWith(prior) ? ev.item.text.slice(prior.length) : ev.item.text;
+            if (suffix) { emitted = true; yield { type: "delta", text: suffix }; }
+            snapshots.delete(id); replies.push(ev.item.text);
+          } else {
+            const prior = snapshots.get(id);
+            if (ev.type === "item.updated" && prior !== undefined && ev.item.text.startsWith(prior)) { const suffix = ev.item.text.slice(prior.length); if (suffix) { emitted = true; yield { type: "delta", text: suffix }; } }
+            else if (ev.type === "item.updated" && prior === undefined) { emitted = true; yield { type: "delta", text: ev.item.text }; }
+            snapshots.set(id, ev.item.text);
+          }
+        } else if (ev?.type === "item.completed" && ev.item?.type === "web_search") {
+          yield { type: "tool", text: `联网搜索${ev.item.query ? "：" + String(ev.item.query).slice(0, 80) : ""}` };
+        } else if (ev?.type === "turn.failed") failure = typeof ev.error?.message === "string" ? ev.error.message : JSON.stringify(ev.error ?? "turn failed");
+        else if (ev?.type === "error" && typeof ev.message === "string") failure = ev.message;
+      }
+    }
+  } finally { clearTimeout(timer); }
+  const code = await proc.exited.catch(() => -1); await stderrDone;
+  return { code: code !== 0 ? code : failure ? 1 : 0, stderr: failure ? `${stderr}\n${failure}` : stderr, reply: replies.join("\n\n").trim(), threadId, emitted };
 }
 
 async function* runCodex(chat: AiChat, text: string, system: string, imageFiles: string[] = []): AsyncGenerator<ChatEvent, string> {
-  const prompt = codexPrompt(chat, text, system);
-  // 图片走已落盘的附件路径（codex exec 没有 stdin 内联通道）。用 `--image=` 连写：
-  // -i / --image 是贪婪多值参数，空格分隔会把后面的 prompt 一起吞成图片路径（codex-session.ts 的血泪）
-  const imgArgs = imageFiles.map((f) => `--image=${f}`);
   // 推理力度与 Runner 共用同一份模型矩阵；未知模型或非法组合不下发，交给账号默认值。
   const configuredEffort = cfg.chat?.codexEffort;
   const supportedEfforts = codexEffortsForModel(chat.model === "default" ? undefined : chat.model);
@@ -602,25 +723,26 @@ async function* runCodex(chat: AiChat, text: string, system: string, imageFiles:
     ? [`-c`, `model_reasoning_effort=${JSON.stringify(configuredEffort)}`]
     : [];
   if (configuredEffort && !effort.length) log(`chat: codex effort ${configuredEffort} 与模型 ${chat.model || "default"} 不兼容，已忽略`);
-  const base = ["exec", "--skip-git-repo-check", "-C", CHATS_DIR, "--sandbox", "read-only", ...effort, ...imgArgs];
   // codex-alt = 第二个 ChatGPT 账号（独立 CODEX_HOME / 独立额度）
-  const env = chat.provider === "codex-alt"
-    ? { CODEX_HOME: `${process.env.HOME}/.codex-alt` }
-    : undefined;
+  const env = chat.provider === "codex-alt" ? { CODEX_HOME: `${process.env.HOME}/.codex-alt` } : undefined;
   const bin = cfg.llm?.codexBin || "codex";
-  const withModel = chat.model && chat.model !== "default";
-
-  let r = await run([bin, ...base, ...(withModel ? ["-m", chat.model] : []), prompt],
-    { timeoutMs: 300_000, cwd: CHATS_DIR, env });
-  // ChatGPT 账号只能用账号默认模型：指定 -m 会 400，自动去掉重试一次
-  if (r.code !== 0 && withModel && /model.*not supported|invalid_request/i.test(r.stderr || r.stdout)) {
-    log(`chat: codex 模型 ${chat.model} 不支持，回退默认`);
-    chat.model = "default";
-    r = await run([bin, ...base, prompt], { timeoutMs: 300_000, cwd: CHATS_DIR, env });
+  let withModel = !!chat.model && chat.model !== "default";
+  // 有原生 thread 就只发这条新消息（system 与历史都在线程里）；没有才把 system + 历史重放拼进 prompt
+  let r = yield* codexTurn(bin, codexArgs(chat, chat.codexThreadId ? text : codexPrompt(chat, text, system), imageFiles, effort, withModel), env);
+  // 线程没了（被 `codex delete`、CODEX_HOME 换了、rollout 被清）：退回历史重放开新线程，别让对话卡死在旧 id 上
+  if (r.code !== 0 && chat.codexThreadId && !r.emitted && /resume|thread|rollout|not found|no such/i.test(r.stderr)) {
+    log(`chat: codex thread ${chat.codexThreadId} 恢复失败，改为历史重放开新线程: ${r.stderr.trim().slice(-160)}`);
+    chat.codexThreadId = undefined;
+    r = yield* codexTurn(bin, codexArgs(chat, codexPrompt(chat, text, system), imageFiles, effort, withModel), env);
   }
-  if (r.code !== 0) throw new Error(`codex 出错: ${(r.stderr || r.stdout).slice(-200)}`);
-  // codex 无 token 流：最终结果一次性作为 delta 发出
-  const reply = r.stdout.trim();
-  yield { type: "delta", text: reply };
-  return reply;
+  // ChatGPT 账号只能用账号默认模型：指定 -m 会 400，自动去掉重试一次
+  if (r.code !== 0 && withModel && !r.emitted && /model.*not supported|invalid_request/i.test(r.stderr)) {
+    log(`chat: codex 模型 ${chat.model} 不支持，回退默认`);
+    chat.model = "default"; withModel = false;
+    r = yield* codexTurn(bin, codexArgs(chat, chat.codexThreadId ? text : codexPrompt(chat, text, system), imageFiles, effort, withModel), env);
+  }
+  if (r.code !== 0 && !r.reply) throw new Error(`codex 出错: ${r.stderr.trim().slice(-200) || `退出码 ${r.code}`}`);
+  if (r.code !== 0) log(`chat: codex 非零退出(code=${r.code})但已有输出，保留回复`);
+  if (r.threadId) chat.codexThreadId = r.threadId;
+  return r.reply;
 }

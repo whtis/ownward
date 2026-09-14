@@ -37,7 +37,11 @@ function publicEffect(item: InternalSkillEffect, home: string): PublicSkillEffec
 export function buildSkillPlan(options: SkillScanOptions, snapshot: RawSkillSnapshot, actions: SkillProposalAction[], expectedRevision: string): InternalSkillPlan {
   if ((options.platform || process.platform) !== "darwin") fail("SKILL_MUTATION_PLATFORM_UNSUPPORTED", "Skill 写操作 v1 仅支持 macOS");
   if (snapshot.inventory.completeness !== "complete") fail("SKILL_INVENTORY_PARTIAL", "扫描不完整，拒绝生成写计划");
-  if (snapshot.inventory.revision !== expectedRevision) fail("SKILL_INVENTORY_STALE", "Skill inventory 已变化");
+  // 全部 inventory 门统一比 mutableRevision（只覆盖可写根）。revision 还覆盖只读根，
+  // codex 每次运行都重写 ~/.codex/skills/.system/** 的 88 个文件，实测几分钟变两次。
+  // 用户盯着建议列表看几分钟再点「审阅所选建议」，期间跑一次 codex 就会被无谓地判过期；
+  // 而回滚那条路因为窗口更长，结构上根本走不通（2026-09-03 实测）。计划只会写可写根。
+  if (snapshot.inventory.mutableRevision !== expectedRevision) fail("SKILL_INVENTORY_STALE", "Skill inventory 已变化");
   if (!Array.isArray(actions) || actions.length === 0) fail("SKILL_PLAN_EMPTY", "整理方案没有操作");
   const storeRoot = resolve(options.storeRoot || join(options.home, ".ownward", "skills")), managedRoot = join(storeRoot, "managed");
   let registry: SkillRegistry = structuredClone(readRegistry(storeRoot)); const effects: InternalSkillEffect[] = [], transactionId = randomUUID();
@@ -47,8 +51,19 @@ export function buildSkillPlan(options: SkillScanOptions, snapshot: RawSkillSnap
       // the transaction journal's own ancestor in the rollback effect list.
       addMkdirs(effects, [managedRoot], storeRoot);
       if (!action.observationIds.length) fail("SKILL_ACTION_INVALID", "采纳必须选择 Skill");
-      const selected = action.observationIds.map((id) => observation(snapshot, id)); selected.forEach((item) => { requireMutable(item); requireWritable(snapshot, item.engine); });
-      const digest = selected[0].targetTreeDigest || selected[0].treeDigest; if (!digest || selected.some((item) => (item.targetTreeDigest || item.treeDigest) !== digest)) fail("SKILL_ADOPT_CONFLICT", "只能同时采纳内容完全一致的 Skill");
+      const selected = action.observationIds.map((id) => observation(snapshot, id)); selected.forEach((item) => { requireMutable(item); requireWritable(snapshot, item.engine);
+        // 技能包不能整包纳管：把 1GB 复制进受管目录不合理，而且它由外部工具（如 gstack）维护、会被其升级覆盖。
+        if (item.state === "external") fail("SKILL_ADOPT_EXTERNAL", `${item.name}（${item.engine}/${item.scope}）只是指向外部工具目录的链接壳（如 gstack 在顶层暴露的子技能），没有自己的内容可纳管；它由外部工具维护。`);
+        if (item.state === "empty") fail("SKILL_ADOPT_EMPTY", `${item.name}（${item.engine}/${item.scope}）是空目录，没有内容可纳管；它只能被清理。`);
+        if (item.nestedSkills > 0) fail("SKILL_ADOPT_BUNDLE", `${item.name}（${item.engine}/${item.scope}）是技能包，内嵌 ${item.nestedSkills} 个 Skill，由外部工具维护，Ownward 不纳管它。`); });
+      const digest = selected[0].targetTreeDigest || selected[0].treeDigest;
+      if (!digest || selected.some((item) => (item.targetTreeDigest || item.treeDigest) !== digest)) {
+        // 光说「只能采纳一致的」是死胡同：把不一致的名字和出路一起给出来。
+        const names = [...new Set(selected.map((item) => item.name))];
+        const shown = names.slice(0, 4).join("、") + (names.length > 4 ? ` 等 ${names.length} 个` : "");
+        fail("SKILL_ADOPT_CONFLICT", `只能同时采纳内容完全一致的 Skill：${shown} 的内容并不相同${digest ? "" : "（其中有观测缺少内容指纹）"}。`
+          + "这一组请逐个采纳，或在建议里只勾选其中一个；若它们本来就是不同的 Skill，直接跳过这条建议。");
+      }
       const source = selected[0].rawRealPath; if (!source) fail("SKILL_SOURCE_MISSING", "采纳源不可读取");
       const id = randomUUID(), name = safeName(selected[0].name), managedPath = join(managedRoot, id);
       effects.push(effect("copy-tree", managedPath, `复制 ${name} 到 Ownward 受管目录`, false, { source, sourcePrecondition: snapshotPath(source) }));
@@ -66,7 +81,15 @@ export function buildSkillPlan(options: SkillScanOptions, snapshot: RawSkillSnap
       if (action.kind === "migrate" && action.removeSource && action.fromObservationId) { const source = observation(snapshot, action.fromObservationId), sourceDigest = source.targetTreeDigest || source.treeDigest; requireMutable(source); const belongs = record.sources.some((x) => x.path === source.rawEntryPath) || record.deployments.some((x) => x.path === source.rawEntryPath); if (!belongs || source.name !== record.name || sourceDigest !== record.digest) fail("SKILL_MIGRATE_SOURCE_MISMATCH", "迁移源不属于该受管 Skill 或内容已变化"); if (source.rawEntryPath === path) fail("SKILL_ACTION_CONFLICT", "迁移源与目标不能是同一路径"); effects.push(effect("delete-entry", source.rawEntryPath, `删除迁移后的旧部署 ${record.name}`, true)); record.deployments = record.deployments.filter((x) => x.path !== source.rawEntryPath); }
       record.lastVerifiedTransaction = transactionId;
     } else if (action.kind === "delete") {
-      const item = observation(snapshot, action.observationId); requireMutable(item); requireWritable(snapshot, item.engine); effects.push(effect("delete-entry", item.rawEntryPath, `删除 ${item.name} 的 ${item.engine}/${item.scope} 部署`, true));
+      const item = observation(snapshot, action.observationId); requireMutable(item); requireWritable(snapshot, item.engine);
+      // 技能包顶层自己有 SKILL.md，扫描器只当它是一个观测，但里面可能压着几百个技能：
+      // 实测一条 delete 抹掉了 ~/.agents/skills/gstack 里的 290 个 SKILL.md（2026-09-02）。
+      // 这种连带删除绝不能靠一条看起来平平无奇的「删除部署」就执行。
+      if (item.nestedSkills > 0) fail("SKILL_DELETE_BUNDLE",
+        `${item.name}（${item.engine}/${item.scope}）里面还嵌着 ${item.nestedSkills} 个 Skill，删掉它等于把这些一起删了。`
+        + "如果只是想去掉跨引擎的重复，请改用「纳管」——它会把内容收进受管目录、各处换成链接，两个引擎都还能用。"
+        + "确实要整包移除的话，请在文件系统里自行删除。");
+      effects.push(effect("delete-entry", item.rawEntryPath, `删除 ${item.name} 的 ${item.engine}/${item.scope} 部署`, true));
       for (const record of registry.skills) { const before = record.deployments.length; record.deployments = record.deployments.filter((x) => x.path !== item.rawEntryPath); if (record.deployments.length !== before) record.lastVerifiedTransaction = transactionId; }
     } else fail("SKILL_ACTION_INVALID", "未知 Skill 操作");
   }
@@ -74,8 +97,9 @@ export function buildSkillPlan(options: SkillScanOptions, snapshot: RawSkillSnap
   registry = normalizeRegistry({ ...registry, updatedAt: new Date().toISOString() });
   const registryFile = registryPath(storeRoot); effects.push(effect("write-registry", registryFile, "更新 Skill Registry", false, { content: JSON.stringify(registry, null, 2) + "\n", mode: 0o600 }));
   effects.forEach((item, index) => item.index = index);
+  // inventoryRevision 里装的是 mutableRevision（全部 inventory 门的统一口径），字段名是历史遗留
   const createdAt = new Date(), id = randomUUID(), publicPlan: SkillPlan = { id, transactionId, version: 1, inventoryRevision: expectedRevision, createdAt: createdAt.toISOString(), expiresAt: new Date(createdAt.getTime() + 10 * 60_000).toISOString(), digest: "", requiresApproval: actions.some((x) => x.kind !== "repair") || effects.some((x) => x.destructive || !["mkdir", "create-link", "write-registry"].includes(x.kind)), effects: effects.map((x) => publicEffect(x, options.home)), registryRevision: registry.revision };
-  const plan = { public: publicPlan, effects, registryAfter: registry }; publicPlan.digest = computeSkillPlanDigest(plan); return plan;
+  const plan = { public: publicPlan, mutableRevision: snapshot.inventory.mutableRevision, effects, registryAfter: registry }; publicPlan.digest = computeSkillPlanDigest(plan); return plan;
 }
 
 export function computeSkillPlanDigest(plan: InternalSkillPlan): string {

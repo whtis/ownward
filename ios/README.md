@@ -49,7 +49,8 @@ xcrun simctl launch <dev> ai.ownward.app \
   -ownward.debugTab agent \                  # inbox | agent | chat
   -ownward.debugRoute "task:<id>" \          # settings | newchat | dispatch | chat:<id> | task:<id> | observe:<ccId>
   -ownward.debugDrawer 1 \                   # 开着侧边栏启动（抽屉没有 URL 入口）
-  -ownward.debugInput "/c"                   # 预填会话输入框（模拟器没法脚本化打字）
+  -ownward.debugInput "/c" \                 # 预填会话输入框（模拟器没法脚本化打字）
+  -ownward.debugRoutineDraft weekly          # 收件箱启动即打开该例行的审稿页并聚焦编辑区（看键盘避让）
 ```
 
 ## 与 Android 的差异点

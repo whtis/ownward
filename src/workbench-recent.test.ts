@@ -2,8 +2,33 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { createAsyncSnapshotCache } from "./workbench.ts";
 
 describe("recent Ownward sessions", () => {
+  test("cold concurrent snapshots share one load and reuse it until TTL expiry", async () => {
+    let now = 0, loads = 0, release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const snapshot = createAsyncSnapshotCache<string>(5_000, () => now);
+    const first = snapshot(async () => { loads++; await gate; return "first"; });
+    const second = snapshot(async () => { loads++; return "duplicate"; });
+    expect(loads).toBe(1);
+    release();
+    expect(await Promise.all([first, second])).toEqual(["first", "first"]);
+    expect(await snapshot(async () => { loads++; return "cached"; })).toBe("first");
+    expect(loads).toBe(1);
+    now = 5_000;
+    expect(await snapshot(async () => { loads++; return "refreshed"; })).toBe("refreshed");
+    expect(loads).toBe(2);
+  });
+
+  test("failed snapshot loads are not cached and release the single-flight", async () => {
+    let loads = 0;
+    const snapshot = createAsyncSnapshotCache<string>(60_000);
+    await expect(snapshot(async () => { loads++; throw new Error("boom"); })).rejects.toThrow("boom");
+    expect(await snapshot(async () => { loads++; return "recovered"; })).toBe("recovered");
+    expect(loads).toBe(2);
+  });
+
   test("Runner-native task is visible without legacy task sidecars", async () => {
     const root = mkdtempSync(join(tmpdir(), "ownward-recent-runner-")), cwd = join(root, "project");
     try {

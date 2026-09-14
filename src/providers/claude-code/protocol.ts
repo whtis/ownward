@@ -1,13 +1,13 @@
 import { isAbsolute } from "path";
 import type { RunnerAttachmentRef } from "../../runner/attachments.ts";
-import { CLAUDE_EFFORTS, type ClaudeEffort } from "../../session-options.ts";
+import { CLAUDE_PROTOCOL_EFFORTS, type ClaudeEffort } from "../../session-options.ts";
 
 export { CLAUDE_EFFORTS } from "../../session-options.ts";
 export type { ClaudeEffort } from "../../session-options.ts";
 
 export const CLAUDE_PROVIDER_ID = "claude" as const;
 export const CLAUDE_PROVIDER_CAPABILITIES = new Set([
-  "stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "new-session", "model", "effort",
+  "stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort",
 ] as const);
 
 export type ClaudeAccess = "standard" | "bypass";
@@ -37,7 +37,7 @@ const model = (value: unknown): string => {
   return result;
 };
 const effort = (value: unknown): ClaudeEffort => {
-  if (!CLAUDE_EFFORTS.includes(value as ClaudeEffort)) throw new Error("effort 非法");
+  if (!CLAUDE_PROTOCOL_EFFORTS.includes(value as ClaudeEffort)) throw new Error("effort 非法");
   return value as ClaudeEffort;
 };
 function parseImages(value: unknown): ClaudeImage[] {
@@ -84,6 +84,17 @@ export function parseClaudeAddDir(input: string): string {
 export function parseClaudeAccess(input: string): ClaudeAccess {
   const raw = JSON.parse(input) as unknown; if (!plain(raw)) throw new Error("set-access input 非法"); exact(raw, ["access"], "set-access input");
   if (raw.access !== "standard" && raw.access !== "bypass") throw new Error("access 非法"); return raw.access;
+}
+export type ClaudeSetOptionsInput = { model?: string; effort?: ClaudeEffort };
+export function parseClaudeSetOptions(input: string): ClaudeSetOptionsInput {
+  const raw = JSON.parse(input) as unknown; if (!plain(raw)) throw new Error("set-options input 非法"); exact(raw, ["model", "effort"], "set-options input");
+  const out: ClaudeSetOptionsInput = { ...(raw.model === undefined ? {} : { model: model(raw.model) }), ...(raw.effort === undefined ? {} : { effort: effort(raw.effort) }) };
+  if (!Object.keys(out).length) throw new Error("set-options 至少要给 model 或 effort");
+  return out;
+}
+/** options 的键序是 Session 身份的一部分（adapter 用 JSON.stringify 比对 resume 快照），改完必须按 parseClaudeOptions 的顺序重建 */
+export function withClaudeOptions(options: ClaudeSessionOptions, patch: ClaudeSetOptionsInput): ClaudeSessionOptions {
+  return parseClaudeOptions({ ...options, ...patch });
 }
 export function parseClaudeNewSession(input: string): Record<string, never> {
   const raw = JSON.parse(input) as unknown; if (!plain(raw) || Object.keys(raw).length) throw new Error("new-session input 必须为空对象"); return {};

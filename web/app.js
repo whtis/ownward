@@ -8,9 +8,11 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 /** 内联 onclick 的字符串参数编码：反斜杠/引号/换行都要处理——esc() 只管 HTML，
  *  标题/路径里一个尾部反斜杠就能改写 JS 字符串边界（codex 对抗审查实证过） */
 const jsq = (s) => esc(String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/[\n\r\u2028\u2029]/g, " "));
-// 派发与会话重配共用同一份能力表。efforts 必须与 Runner provider protocol 的白名单一致，
+// 派发与会话重配共用同一份能力表。这里是离线兜底的内置快照（2026-09-05）；页面载入后由
+// /api/providers/catalog 覆盖——Codex 那份来自 CLI 自己的官方模型缓存（~/.codex/models_cache.json），
+// 新型号（gpt-6-astra）上线不用再改前端。efforts 必须与 Runner provider protocol 的白名单一致，
 // 不能把某家 CLI 不认识的档位画进下拉框后再寄希望于后端兜底。
-const WORK_PROVIDER_CAPABILITIES = Object.freeze({
+const WORK_PROVIDER_CAPABILITIES_BUILTIN = Object.freeze({
   claude: Object.freeze({
     label: "Claude Code",
     models: Object.freeze(["fable", "opus", "sonnet", "haiku"]),
@@ -19,25 +21,54 @@ const WORK_PROVIDER_CAPABILITIES = Object.freeze({
   }),
   codex: Object.freeze({
     label: "Codex",
-    models: Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]),
+    models: Object.freeze(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"]),
     defaultModel: "gpt-5.6-sol", handoffModel: "gpt-5.6-sol", handoffEffort: "medium",
   }),
   codebuddy: Object.freeze({
     label: "CodeBuddy",
-    models: Object.freeze(["hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"]),
-    // CodeBuddy 复用 Claude provider protocol，不能暴露 Codex-only 档位。
-    efforts: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+    // 2026-09-05 `codebuddy --help` 的 Currently supported 列表；服务端会用实时解析结果覆盖
+    models: Object.freeze(["hy3", "hy3-x", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo", "minimax-m3-pay", "minimax-m2.7", "kimi-k3-2", "kimi-k2.7", "kimi-k2.6", "deepseek-v4-pro", "deepseek-v4-flash"]),
+    // CodeBuddy 复用 Claude provider protocol，不能暴露 Codex-only 档位；但它比 claude 多一档 minimal
+    efforts: Object.freeze(["minimal", "low", "medium", "high", "xhigh", "max"]),
     defaultModel: "", handoffModel: "hy3", handoffEffort: "medium",
   }),
 });
-const WORK_CODEX_MODEL_EFFORTS = Object.freeze({
+const WORK_CODEX_MODEL_EFFORTS_BUILTIN = Object.freeze({
+  "gpt-6-astra": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
   "gpt-5.6-sol": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
   "gpt-5.6-terra": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
   "gpt-5.6-luna": Object.freeze(["low", "medium", "high", "xhigh", "max"]),
   "gpt-5.5": Object.freeze(["low", "medium", "high", "xhigh"]),
-  "gpt-5.4": Object.freeze(["low", "medium", "high", "xhigh"]),
+  "gpt-5.3-codex-spark": Object.freeze(["low", "medium", "high", "xhigh"]),
 });
-const WORK_EFFORT_LABELS = Object.freeze({ low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max", ultra: "ultra" });
+let WORK_PROVIDER_CAPABILITIES = WORK_PROVIDER_CAPABILITIES_BUILTIN;
+let WORK_CODEX_MODEL_EFFORTS = WORK_CODEX_MODEL_EFFORTS_BUILTIN;
+let WORK_CODEX_MODEL_INFO = Object.freeze({});   // slug → {displayName, defaultEffort, fast}，只有官方缓存才带
+let WORK_PROVIDER_CATALOG_SOURCE = "builtin";     // builtin | official-cache（Codex 目录来源，设置页/弹窗提示用）
+const WORK_EFFORT_LABELS = Object.freeze({ minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max", ultra: "ultra" });
+/** 服务端目录到达后整体替换查表。形状不对就整份不用——宁可继续用旧表，也不画出半份目录 */
+function applyProviderCatalog(catalog) {
+  const strings = (list) => Array.isArray(list) && list.length > 0 && list.every((x) => typeof x === "string" && x);
+  if (!catalog || typeof catalog !== "object" || !catalog.codex || !Array.isArray(catalog.codex.models)) return false;
+  const models = catalog.codex.models.filter((m) => m && typeof m.slug === "string" && m.slug && Array.isArray(m.efforts) && m.efforts.every((x) => typeof x === "string" && x));
+  if (!models.length) return false;
+  const caps = { ...WORK_PROVIDER_CAPABILITIES_BUILTIN };
+  for (const id of ["claude", "codebuddy"]) {
+    const c = catalog[id];
+    if (c && strings(c.models) && strings(c.efforts)) caps[id] = Object.freeze({ ...WORK_PROVIDER_CAPABILITIES_BUILTIN[id], models: Object.freeze([...c.models]), efforts: Object.freeze([...c.efforts]) });
+  }
+  const defaultModel = typeof catalog.codex.defaultModel === "string" && catalog.codex.defaultModel ? catalog.codex.defaultModel : WORK_PROVIDER_CAPABILITIES_BUILTIN.codex.defaultModel;
+  caps.codex = Object.freeze({ ...WORK_PROVIDER_CAPABILITIES_BUILTIN.codex, models: Object.freeze(models.map((m) => m.slug)), defaultModel, handoffModel: defaultModel });
+  WORK_PROVIDER_CAPABILITIES = Object.freeze(caps);
+  WORK_CODEX_MODEL_EFFORTS = Object.freeze(Object.fromEntries(models.map((m) => [m.slug, Object.freeze([...m.efforts])])));
+  WORK_CODEX_MODEL_INFO = Object.freeze(Object.fromEntries(models.map((m) => [m.slug, Object.freeze({ displayName: m.displayName || m.slug, defaultEffort: m.defaultEffort || "", fast: m.fast || null })])));
+  WORK_PROVIDER_CATALOG_SOURCE = catalog.codex.source || "server";
+  return true;
+}
+async function refreshProviderCatalog() {
+  const catalog = await getJSON("/api/providers/catalog").catch(() => null);
+  return applyProviderCatalog(catalog);
+}
 function workProviderCapability(providerId) { return WORK_PROVIDER_CAPABILITIES[providerId] || WORK_PROVIDER_CAPABILITIES.claude; }
 function workProviderEfforts(providerId, model) {
   const capability = workProviderCapability(providerId);
@@ -46,6 +77,10 @@ function workProviderEfforts(providerId, model) {
 function workProviderDefaultEffort(providerId, model) {
   const efforts = workProviderEfforts(providerId, model);
   return efforts.includes("medium") ? "medium" : efforts[0] || "";
+}
+/** 只配了默认模型没配默认引擎时（dispatch.defaults.model="opus"、provider 留空），按模型反查它属于哪家 */
+function workProviderForModel(model) {
+  return Object.keys(WORK_PROVIDER_CAPABILITIES).find((providerId) => WORK_PROVIDER_CAPABILITIES[providerId].models.includes(model)) || "";
 }
 /** 外部可控 URL 只放行 http(s)：feed/action/会议链接是 triage 从邮件/飞书内容里提的，
  *  javascript:/data: 一点就在本页源里执行 = 打穿 localhost API（esc 防不了这个） */
@@ -135,8 +170,11 @@ let toastTimer;
 function toast(msg) {
   const t = $("#toast");
   t.textContent = msg; t.dataset.show = "true";
+  // showModal() 的 <dialog> 在浏览器 top layer，z-index 再大也盖不过它——恢复流程里的报错
+  // 因此整条被弹窗挡住，用户只看到「点了没反应」。popover 同样进 top layer 且不抢焦点。
+  try { t.hidePopover?.(); t.showPopover?.(); } catch { /* 不支持 popover 就退回普通层 */ }
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.dataset.show = "false"), 2600);
+  toastTimer = setTimeout(() => { t.dataset.show = "false"; try { t.hidePopover?.(); } catch {} }, 2600);
 }
 /** 页面级状态占位：统一空白等待与明确失败，不把请求失败伪装成“没有内容”。 */
 function stateBox(message, state = "empty") {
@@ -172,6 +210,8 @@ const LOCAL_CMDS = [
   { name: "new", desc: "同任务丢上下文重开" },
   { name: "clear", desc: "同 /new" },
   { name: "btw", desc: "忙时补一句背景，不打断本轮" },
+  { name: "model", desc: "同引擎就地换模型（不接力）：/model opus" },
+  { name: "effort", desc: "同引擎就地换思考深度：/effort high" },
 ];
 const CP = {};  // key → {i, stash, sel}：历史游标与菜单选中项，跨重渲染保留
 
@@ -485,7 +525,9 @@ function renderSysStatus() {
 }
 function connectSSE() {
   const es = new EventSource("/api/events");
-  es.addEventListener("open", () => { setLive(true, "LIVE"); S.retries = 0; });
+  // 重连 = daemon 刚起来过，扩展的启停正是在那时生效：顺手把扩展入口重新拉一次，
+  // 否则关掉的扩展会一直挂在导航上（界面不许显示一个已经不存在的东西）
+  es.addEventListener("open", () => { setLive(true, "LIVE"); S.retries = 0; window.VerticalNav?.loadNavigation?.(); });
   es.addEventListener("state", (ev) => { S.state = JSON.parse(ev.data); renderTopbar(); TABS._onState?.(); });
   es.addEventListener("feed", (ev) => pushFeed(JSON.parse(ev.data)));
   es.addEventListener("tasks", (ev) => {
@@ -546,11 +588,29 @@ function bindTopbar() {
 
   const overlay = $("#work-overlay");
   let workExtraDirs = [];
-  const refreshProjectCandidates = async () => {
-    S.projects = await getJSON("/api/projects").catch(() => S.projects);
+  // 「最近目录」两条路都给：datalist 供手输补全；chip 行永远可见可点。
+  // 只有 datalist 时，目录框一旦预填了默认目录（dispatch.defaults.dir），浏览器按当前值做子串
+  // 过滤，别的目录一条都不冒出来——用户看到的就是「历史记录丢了」。
+  const renderRecentDirs = () => {
+    const wrap = $("#w-dir-recent"); if (!wrap) return;
+    const dirs = S.projects.slice(0, 12);
+    wrap.hidden = !dirs.length;
+    wrap.innerHTML = dirs.map((p) => `<button type="button" class="dir-chip" data-dir="${esc(p.dir)}" title="${esc(p.dir)}"><span>${esc(p.name || p.dir)}</span></button>`).join("");
+    $$("#w-dir-recent button").forEach((b) => b.addEventListener("click", () => { $("#w-dir").value = b.dataset.dir; $("#w-task").focus(); }));
+  };
+  const paintProjectCandidates = () => {
     const options = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
     $("#w-dir-list").innerHTML = options;
     $("#add-dir-list").innerHTML = options;
+    renderRecentDirs();
+  };
+  let projectsSeq = 0;  // 打开弹窗的后台刷新与「追加目录」后的刷新可能交错，只认最后一次发出的结果
+  const refreshProjectCandidates = async () => {
+    const seq = ++projectsSeq;
+    const fresh = await getJSON("/api/projects").catch(() => null);
+    if (seq !== projectsSeq) return;
+    if (fresh) S.projects = fresh;
+    paintProjectCandidates();
   };
   const renderWorkExtraDirs = () => {
     $("#w-extra-chips").innerHTML = workExtraDirs.map((dir, i) => {
@@ -602,12 +662,20 @@ function bindTopbar() {
     if (dir) $("#w-dir").value = dir;
     else if (!$("#w-dir").value && d.dir) $("#w-dir").value = d.dir;
     if (!$("#w-task").value) {
-      if (d.provider) $("#w-engine").value = d.provider;
-      else if (d.codex !== undefined) $("#w-engine").value = d.codex ? "codex" : "claude";
+      // 引擎和模型/思考深度必须一起回到默认值。弹窗的 <select> 在派发后不清空，上一次选的 codex 会留到
+      // 下一次打开；这时只把模型重置成默认的 opus，就画出「codex + opus」这种服务端必拒的组合
+      // （2026-09-05 实撞：defaults 只配了 model 没配 provider）。默认引擎没配就按默认模型反查，再不行落 claude。
+      $("#w-engine").value = d.provider
+        || (d.codex !== undefined ? (d.codex ? "codex" : "claude") : "")
+        || workProviderForModel(d.model || "")
+        || "claude";
       fillWorkProviderOptions({ model: d.model || "", effort: d.effort || "", useProviderDefault: !d.model });
     } else fillWorkProviderOptions();
-    const options = S.projects.map((p) => `<option value="${esc(p.dir)}">`).join("");
-    $("#w-dir-list").innerHTML = options;
+    paintProjectCandidates();     // 先用缓存立刻画出来
+    refreshProjectCandidates();   // 再后台刷新：刚派过/刚聊过的目录要能立刻出现在最近目录里
+    // 模型目录也顺手刷一次：codex CLI 刚更新过缓存（新型号上线）就能立刻出现在下拉框里；
+    // 目录没变就不动 DOM，变了按当前选择重画（选中的型号仍有效就保留）
+    refreshProviderCatalog().then((changed) => { if (changed && overlay.dataset.open === "true") fillWorkProviderOptions({ model: $("#w-model").value, effort: $("#w-effort").value }); });
     const bypass=$("#w-perm option[value=bypass]");if(bypass){bypass.disabled=S.state?.allowFullAccess!==true;bypass.hidden=S.state?.allowFullAccess!==true;if(bypass.disabled&&$("#w-perm").value==="bypass")$("#w-perm").value="";}
     if (d.permission && !$("#w-perm").value && !(d.permission === "bypass" && S.state?.allowFullAccess !== true)) $("#w-perm").value = d.permission;
     ($("#w-dir").value ? $("#w-task") : $("#w-dir")).focus();
@@ -768,6 +836,27 @@ function bindTopbar() {
   });
 }
 
+/* ============ 手机键盘避让：可视视口 → CSS 变量 ============ */
+/** 手机浏览器弹键盘时 position:fixed 的弹窗不会跟着缩（iOS Safari 从不缩布局视口，安卓 Chrome
+ *  默认 resizes-visual 也不缩），底部被键盘盖住——审草稿这种长文本编辑区尤其明显。
+ *  把 visualViewport 的高度/偏移写成 --vv-h / --vv-top，需要贴合可视区的弹窗在 CSS 里取用。 */
+function bindVisualViewport() {
+  const vv = window.visualViewport; if (!vv) return;
+  const root = document.documentElement.style;
+  let last = "";
+  const sync = () => {
+    // scroll 事件在键盘动画/惯性滚动期间每帧都来，值没变就别碰样式（改自定义属性会触发全树重算）
+    const h = Math.round(vv.height), top = Math.round(vv.offsetTop), key = `${h}/${top}`;
+    if (key === last) return;
+    last = key;
+    root.setProperty("--vv-h", `${h}px`);
+    root.setProperty("--vv-top", `${top}px`);
+  };
+  vv.addEventListener("resize", sync);
+  vv.addEventListener("scroll", sync);
+  sync();
+}
+
 /* ============ 浏览器内目录选择 ============ */
 /** 数据来自 /api/fs/dirs（realpath 圈死在 architecture.allowedRoots）。
  *  为什么不弹本机 Finder：远程打开 web 时 osascript 弹窗出现在 daemon 的屏幕上。 */
@@ -815,7 +904,7 @@ function bindDirPicker() {
 /* ============ ⌘K 全局搜索/命令面板 ============ */
 /** 主仓 SwiftUI 有 CommandPalette（跨域模糊搜 + 快捷动作），网页化时掉了。
  *  精简版：tab 跳转 + 快捷动作 + 任务/对话/笔记三个域的标题搜索；选中即跳。 */
-const PAL = { items: [], filtered: [], sel: 0, open: false };
+const PAL = { items: [], filtered: [], sel: 0, open: false, remote: { q: "", items: [] }, timer: null };
 function palStatic() {
   const tabs = [["today", "今日"], ["tasks", "任务"], ["chat", "对话"], ["lark", "飞书"], ["mail", "邮件"], ["pr", "PR"], ["roles", "角色"], ["notes", "笔记"], ["feed", "通知流"], ["system", "系统"], ["settings", "设置"]];
   return [
@@ -849,11 +938,28 @@ async function palOpen() {
   );
   palRender();
 }
-function palClose() { PAL.open = false; $("#palette-overlay").dataset.open = "false"; }
+function palClose() { PAL.open = false; PAL.remote = { q: "", items: [] }; clearTimeout(PAL.timer); $("#palette-overlay").dataset.open = "false"; }
+/** 全文命中：输入 ≥2 字就查派生索引（/api/search，读库不开会话），结果排在本地标题匹配后面——
+ *  归档 / 早已滚出「最近」的会话正文也能搜到。每个任务只留第一条命中，免得一个会话刷满面板。 */
+function palSearch(q) {
+  clearTimeout(PAL.timer);
+  PAL.timer = setTimeout(async () => {
+    const r = await getJSON(`/api/search?q=${encodeURIComponent(q)}&limit=30`).catch(() => null);
+    if (!PAL.open || $("#pal-input").value.trim().toLowerCase() !== q) return;
+    const seen = new Set(), items = [];
+    for (const h of r?.hits || []) {
+      if (seen.has(h.taskId)) continue; seen.add(h.taskId);
+      items.push({ label: `会话 · ${h.project || "?"} · ${String(h.snippet || "").replace(/\s+/g, " ")}`, hint: h.title || h.taskId, go: () => { switchTab("tasks"); if (typeof Tasks !== "undefined") Tasks.select(h.taskId); } });
+    }
+    PAL.remote = { q, items };
+    palRender();
+  }, 200);
+}
 function palRender() {
   const q = $("#pal-input").value.trim().toLowerCase();
-  PAL.filtered = (q ? PAL.items.filter((x) => (x.label + " " + x.hint).toLowerCase().includes(q)) : PAL.items)
-    .slice(0, 20);
+  const local = (q ? PAL.items.filter((x) => (x.label + " " + x.hint).toLowerCase().includes(q)) : PAL.items).slice(0, 20);
+  if (q.length >= 2 && PAL.remote.q !== q) palSearch(q);
+  PAL.filtered = [...local, ...(q.length >= 2 && PAL.remote.q === q ? PAL.remote.items : [])].slice(0, 40);
   PAL.sel = Math.max(0, Math.min(PAL.sel, PAL.filtered.length - 1));
   $("#pal-list").innerHTML = PAL.filtered.length
     ? PAL.filtered.map((x, i) => `<button type="button" class="pal-item" data-i="${i}" data-on="${i === PAL.sel}"><span>${esc(x.label)}</span><span class="hint">${esc(x.hint)}</span></button>`).join("")
@@ -909,12 +1015,14 @@ async function appInit() {
   bindTopbar();
   bindPalette();
   bindDirPicker();
+  bindVisualViewport();
   let feedFailed = false, tasksFailed = false;
   const [feed, tasks, state, projects] = await Promise.all([
     getJSON("/api/feed?limit=150").catch(() => (feedFailed = true, [])),
     getJSON("/api/tasks").catch(() => (tasksFailed = true, [])),
     getJSON("/api/state").catch(() => null),
     getJSON("/api/projects").catch(() => []),
+    refreshProviderCatalog(),   // Provider 模型目录（Codex 来自官方缓存）；失败就留着内置兜底表
   ]);
   S.feed = feed.reverse(); S.feedError = feedFailed ? "通知流暂时无法载入" : ""; S.tasks = tasks; S.state = state; S.projects = projects;
   if (typeof Tasks !== "undefined") Tasks.tasksError = tasksFailed ? "任务列表暂时无法载入" : "";

@@ -19,6 +19,7 @@ export type { AgentControl, DevImage, DevMsg, PlanStep, TokenUsage } from "./ker
 // 忙时输入队列的类型和合并规则搬到了 kernel/sessions/input-queue.ts：
 // Runner 会话现在也排队（见那边的 SessionInputQueueStore），两条链路必须用同一套
 // /btw 识别、斜杠命令独占一帧、合并顺序——各写一份迟早会漂移成两种行为。
+import { contextWindowOf, estimateContextWindow } from "./providers/claude-code/context-window.ts";
 import { mergeQueued, parseQueued, QUEUE_VIEW, sliceQueue, type QueuedItem, type QueuedView } from "./kernel/sessions/input-queue.ts";
 export { mergeQueued, newQueuedId, parseQueued, sliceQueue, type QueuedItem, type QueuedView } from "./kernel/sessions/input-queue.ts";
 
@@ -63,14 +64,13 @@ interface EngineSession {
   commands?: string[];       // init 帧回报的 slash_commands（客户端输入框补全用）
   turnStartHead?: string;    // 本轮开始时的 git HEAD：轮结束出「本轮改动卡片」的 diff 基线
   ctxTokens?: number;        // 最近一轮请求的上下文占用（input+cache 读写）：客户端换算 ctx%
+  ctxWindow?: number;        // result 帧 modelUsage 回报的上下文窗口（1M/200k）；缺省按模型名估（estimateContextWindow）
   autoCompacting?: boolean;  // 正在自动压缩：防止压缩期间重复触发
   activeRun?: RunSidecarHandle;
   interruptRequested?: boolean;
   runSidecarDeps?: RunSidecarDeps;
 }
 
-// 上下文窗口 & 自动压缩阈值（claude 系当前 200k）：ctx 超过阈值就自动 /compact，避免撞满上限
-const CTX_WINDOW = 200_000;
 
 const sessions = new Map<string, EngineSession>();
 const IDLE_KILL_MS = 30 * 60_000;
@@ -95,7 +95,7 @@ function persist(s: EngineSession) {
   ensureDir(join(DATA, "tasks"));
   writeFileSync(sessionFile(s.taskId), JSON.stringify({
     toolSessionId: s.toolSessionId, turn: s.turn, control: s.control, messages: s.messages.slice(-400),
-    plan: s.plan, tokens: s.tokens, model: s.model, commands: s.commands, ctxTokens: s.ctxTokens, lastActivityAt: s.lastActivityAt,
+    plan: s.plan, tokens: s.tokens, model: s.model, commands: s.commands, ctxTokens: s.ctxTokens, ctxWindow: s.ctxWindow, lastActivityAt: s.lastActivityAt,
     opts: s.opts,
   }));
   // legacy meta 仍是当前 Provider 真相；写成功后再补 Session Repository。失败可由 daemon reconcile 重试。
@@ -339,6 +339,9 @@ function handleLine(s: EngineSession, e: any) {
     touch(s); // 本轮 result 触活
     s.partial = "";
     accumulateTokens(s, e.usage);
+    // 窗口大小只有 result 帧的 modelUsage 才报：按 assistant 帧带出的主模型取桶，命中不了退最大值
+    const win = contextWindowOf(e.modelUsage, [s.model]);
+    if (win > 0) s.ctxWindow = win;
     const outcome = claudeResultOutcome(!!e.is_error, !!s.interruptRequested);
     endTurn(s, e.is_error ? 1 : 0, outcome,
       outcome === "interrupted" ? "user_interrupt" : e.is_error ? "provider_result_error" : undefined, resultUsage(e.usage), false);
@@ -476,7 +479,8 @@ function maybeAutoCompact(s: EngineSession): boolean {
   if (cfg.engine?.autoCompact === false) return false;
   if (s.control !== "ownward" || s.autoCompacting) return false;
   if (!s.alive && !s.toolSessionId) return false;           // 无法 resume 就压不了
-  const ratio = (s.ctxTokens || 0) / CTX_WINDOW;
+  // 窗口：result 帧 modelUsage 报的为准（s.ctxWindow）；没报（旧 CLI / 重启后旧会话文件）按模型名估，口径同 web
+  const ratio = (s.ctxTokens || 0) / (s.ctxWindow || estimateContextWindow(s.model));
   if (ratio < (cfg.engine?.compactThreshold ?? 0.85)) return false;
 
   s.autoCompacting = true;
@@ -768,12 +772,12 @@ function writeStdin(s: EngineSession, data: string): boolean {
 }
 
 /** 客户端轮询：会话消息 + 状态。daemon 重启后从落盘文件兜底（只读） */
-export function getEngineMessages(taskId: string): { messages: DevMsg[]; turn: string; alive: boolean; partial: string; pending: PendingPerm[]; queued: QueuedView[]; plan: PlanStep[]; tokens: TokenUsage; backend: string; model?: string; commands?: string[]; ctxTokens?: number; lastActivityAt: number } {
+export function getEngineMessages(taskId: string): { messages: DevMsg[]; turn: string; alive: boolean; partial: string; pending: PendingPerm[]; queued: QueuedView[]; plan: PlanStep[]; tokens: TokenUsage; backend: string; model?: string; commands?: string[]; ctxTokens?: number; ctxWindow?: number; lastActivityAt: number } {
   const s = sessions.get(taskId);
-  if (s) return { messages: s.messages, turn: s.turn, alive: s.alive, partial: s.partial, pending: [...s.pendingPerms.values()], queued: engineQueue(taskId), plan: s.plan, tokens: s.tokens, backend: "claude", model: s.model, commands: s.commands, ctxTokens: s.ctxTokens, lastActivityAt: s.lastActivityAt };
+  if (s) return { messages: s.messages, turn: s.turn, alive: s.alive, partial: s.partial, pending: [...s.pendingPerms.values()], queued: engineQueue(taskId), plan: s.plan, tokens: s.tokens, backend: "claude", model: s.model, commands: s.commands, ctxTokens: s.ctxTokens, ctxWindow: s.ctxWindow, lastActivityAt: s.lastActivityAt };
   try {
     const saved = JSON.parse(readFileSync(sessionFile(taskId), "utf8"));
-    return { messages: saved.messages || [], turn: "idle", alive: false, partial: "", pending: [], queued: [], plan: saved.plan || [], tokens: saved.tokens || {}, backend: "claude", model: saved.model, commands: saved.commands, ctxTokens: saved.ctxTokens, lastActivityAt: saved.lastActivityAt || 0 };
+    return { messages: saved.messages || [], turn: "idle", alive: false, partial: "", pending: [], queued: [], plan: saved.plan || [], tokens: saved.tokens || {}, backend: "claude", model: saved.model, commands: saved.commands, ctxTokens: saved.ctxTokens, ctxWindow: saved.ctxWindow, lastActivityAt: saved.lastActivityAt || 0 };
   } catch {
     return { messages: [], turn: "idle", alive: false, partial: "", pending: [], queued: [], plan: [], tokens: {}, backend: "claude", lastActivityAt: 0 };
   }

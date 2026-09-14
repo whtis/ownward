@@ -322,7 +322,7 @@ textarea { resize: vertical; }
 .session-head .title { font-weight: 600; }
 .session-head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .tasks-detail-col .session-head { flex-wrap:nowrap; overflow-x:auto; }
-.tasks-detail-col .session-head > :not(.session-dirs) { flex:none; }
+.tasks-detail-col .session-head > * { flex:none; }
 .tasks-detail-col .session-head .right { flex-wrap:nowrap; }
 /* overflow-x hidden：消息流永不横滚——需要横滚的内容（代码块/工具输出）各自带 overflow-x:auto */
 .session-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 12px; }
@@ -482,12 +482,42 @@ textarea { resize: vertical; }
 .composer-bar .spacer { flex: 1; }
 .composer-bar .button.primary { height: 30px; border-radius: 8px; }
 
+/* 会话信息条：贴在输入框下面的一行小字，左右分家——左 .meta-read 只读读数（ctx / 额度 / token / 分支 / 目录），
+   右 .meta-act 可点的（模型·深度 / ＋目录 / 谱系）。一律无边框、11px、次级色。
+   左边放不下自己横滚，右边固定不滚、不换行；两边都绝不换行把输入框顶上去。 */
+.session-meta { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 0 2px; font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
+.session-meta .meta-read { display: flex; align-items: center; gap: 14px; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.session-meta .meta-read::-webkit-scrollbar { display: none; }
+.session-meta .meta-act { display: flex; align-items: center; gap: 4px; flex: none; }
+.session-meta .meta-read > *, .session-meta .meta-act > *, .session-meta .tag { flex: none; }
+.session-meta .tag { height: auto; padding: 0; border-radius: 0; background: none; font-size: inherit; }
+.session-meta .meta-item, .session-meta .tag { color: var(--text-secondary); }
+.session-meta [data-tone="warn"] { color: var(--warning); }
+.session-meta [data-tone="bad"] { color: var(--danger); }
+.session-meta .meta-item { display: inline-flex; align-items: center; gap: 4px; }
+.session-meta .meta-item b { font-weight: 500; color: var(--text-tertiary); }
+.session-meta .meta-chip { border: 0; background: none; font: inherit; color: var(--text-secondary); padding: 2px 6px; margin: -2px 0; border-radius: 6px; cursor: pointer; }
+.session-meta .meta-chip:hover:not([disabled]) { background: var(--surface-2); color: var(--text-primary); }
+.session-meta .meta-chip[disabled] { cursor: default; color: var(--text-disabled); }
+
 .queue-strip { display: flex; gap: 6px; padding: 6px 10px 0; flex-wrap: wrap; font-size: 11px; color: var(--text-tertiary); align-items: center; }
 .queue-strip .q { border: 1px dashed var(--border-default); border-radius: 5px; padding: 2px 7px; display: inline-flex; gap: 5px; align-items: center; }
 .queue-strip .q button { border: 0; background: none; color: var(--text-tertiary); cursor: pointer; }
 .resume-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 10px 0; padding: 8px 10px; border: 1px solid var(--border-default); border-radius: 8px; background: var(--surface-2); color: var(--text-secondary); font-size: 12px; }
 .resume-strip code { flex: 1; min-width: 240px; padding: 4px 7px; overflow-x: auto; border-radius: 5px; background: var(--surface-1); color: var(--text-primary); white-space: nowrap; }
 .resume-strip[data-state="waiting"] { color: var(--text-tertiary); }
+/* 会话谱系：只在头部「谱系」按钮打开的弹窗里出现，不再常驻输入框上方 */
+.lineage-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; font-size: 12px; color: var(--text-secondary); }
+.lineage-count { color: var(--text-tertiary); font: 11px var(--font-mono); white-space: nowrap; }
+.lineage-list { border: 1px solid var(--border-default); border-radius: 8px; background: var(--surface-2); font-size: 12px; color: var(--text-secondary); }
+.lineage-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; }
+.lineage-row + .lineage-row { border-top: 1px solid var(--border-subtle); }
+/* 额度徽标：没数据时整个占位不显示（.tag 自带 display 会盖掉 hidden，所以套一层） */
+.usage-pill { display: contents; }
+.usage-pill:empty { display: none; }
+.lineage-row[data-current="true"] .lineage-meta { color: var(--text-primary); }
+.lineage-row code { flex: 1; min-width: 200px; padding: 3px 7px; overflow-x: auto; border-radius: 5px; background: var(--surface-1); color: var(--text-primary); white-space: nowrap; font-size: 11px; }
+.lineage-meta.muted { color: var(--text-tertiary); }
 
 /* ============ 对话 tab ============ */
 .chat-item { padding: 9px 11px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
@@ -670,10 +700,16 @@ textarea { resize: vertical; }
 .modal label { display: block; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
 .modal input[type=text], .modal textarea, .modal select { width: 100%; }
 .modal textarea { min-height: 64px; }
+/* 审草稿是「读一屏、改几段」的活，560px 的通用 modal 太窄：给它自己的尺寸，并且让弹窗本身
+   可拖拽缩放（resize 需要 overflow 非 visible）。textarea 撑满剩余高度，拉窗口就是拉编辑区。 */
+.modal.draft { width: min(880px, 94vw); height: min(72vh, 680px); max-height: 92vh; resize: both; overflow: auto; display: flex; flex-direction: column; }
+.modal.draft #d-text { flex: 1; min-height: 180px; resize: none; }
+.modal.draft .actions { align-items: center; }
 .modal .row { display: flex; gap: 14px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--text-secondary); flex-wrap: wrap; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-.toast {
-  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 60;
+.toast, .toast:popover-open {
+  position: fixed; inset: auto; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 60;
+  margin: 0; overflow: visible;
   background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px;
   padding: 8px 14px; font-size: 12px; color: var(--text-primary); box-shadow: var(--shadow-popover);
   opacity: 0; transition: opacity .2s ease; pointer-events: none; max-width: 80vw;
@@ -728,9 +764,6 @@ textarea { resize: vertical; }
 .tasks-back { display: none; flex: none; }
 .task-project { color: var(--text-tertiary); font-size: 11.5px; }
 .session-dirs,.dir-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-.session-head .session-dirs { min-width:48px; max-width:min(34vw,460px); flex:0 1 460px; flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
-.session-head .session-dirs::-webkit-scrollbar { display:none; }
-.session-head .session-dirs .dir-chip { flex:none; }
 .dir-chip { display:inline-flex; align-items:center; gap:5px; max-width:280px; padding:3px 8px; border:1px solid var(--border-subtle); border-radius:999px; background:var(--surface-1); color:var(--text-secondary); font-size:11px; white-space:nowrap; }
 .dir-chip.primary { border-color:var(--accent); color:var(--text-primary); }
 .dir-chip span { overflow:hidden; text-overflow:ellipsis; }
@@ -740,6 +773,12 @@ textarea { resize: vertical; }
 .extra-dir-row > .label-hint { flex:none; }
 .extra-dir-row .dir-chips { flex:1 1 140px; min-width:0; }
 .extra-dir-row .dir-chip { max-width:100%; box-sizing:border-box; }
+/* 派任务弹窗的「最近目录」：横向一行可滚，点即填入目录框；不随目录框里已有的值过滤 */
+.recent-dirs { flex-wrap:nowrap; overflow-x:auto; margin-top:6px; padding-bottom:2px; scrollbar-width:none; }
+.recent-dirs::-webkit-scrollbar { display:none; }
+.recent-dirs[hidden] { display:none; }   /* 没候选时真的不占行：hidden 属性会被 .dir-chips 的 display:flex 盖掉 */
+.recent-dirs .dir-chip { flex:none; cursor:pointer; font:inherit; font-size:11px; }
+.recent-dirs .dir-chip:hover { border-color:var(--accent); color:var(--text-primary); }
 .extra-dir-disabled { flex:1; }
 .extra-dir-add { flex:none; width:28px; height:28px; font-size:18px; line-height:1; }
 
@@ -812,7 +851,13 @@ textarea { resize: vertical; }
 .settings-apply { display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 16px;border-top:1px solid var(--border-default);background:var(--surface-2);color:var(--text-tertiary);font-size:11.5px; }
 .settings-apply strong { color:var(--text-secondary); }
 .settings-callout,.settings-readonly-note { display:flex;gap:7px;margin-bottom:14px;padding:10px 12px;border:1px solid var(--border-subtle);border-radius:9px;background:var(--surface-2);color:var(--text-tertiary);font-size:11.5px; }
-.settings-callout { flex-direction:column; }.settings-callout strong { color:var(--text-primary); }.settings-callout.warning { border-color:var(--warning); }
+.settings-callout { flex-direction:column;align-items:flex-start; }
+/* Agent 分析进度：一行文字 + 底部随「已用/上限」增长的细条。没有它用户只能盯着灰按钮猜是不是卡死 */
+.analysis-progress { position:relative;width:100%;display:flex;align-items:center;gap:6px;padding:8px 10px 10px;border-radius:8px;background:var(--surface-2);font-size:11px;color:var(--text-secondary); }
+.analysis-progress .spin { width:10px;height:10px;border:2px solid var(--border-default);border-top-color:var(--accent);border-radius:50%;animation:analysis-spin .8s linear infinite;flex:none; }
+.analysis-progress .bar { position:absolute;left:0;bottom:0;height:2px;background:var(--accent);border-radius:0 0 8px 8px;transition:width .6s linear; }
+.analysis-diag { width:100%;font-size:10.5px;color:var(--text-tertiary); }
+@keyframes analysis-spin { to { transform:rotate(360deg); } }  /* 里面的按钮按内容宽，别被 column flex 拉成整行 */.settings-callout strong { color:var(--text-primary); }.settings-callout.warning { border-color:var(--warning); }
 .settings-field-list { display:grid;gap:8px; }
 .settings-field { display:grid;grid-template-columns:minmax(0,1fr) minmax(150px,.8fr);align-items:center;gap:20px;padding:13px 14px;border:1px solid var(--border-subtle);border-radius:9px;background:var(--surface-2); }
 .settings-field h3 { font-size:12.5px; }.settings-field p { margin-top:3px;color:var(--text-tertiary);font-size:11px; }
@@ -839,10 +884,14 @@ textarea { resize: vertical; }
 .setting-actions,.setting-badges { display:flex;flex-wrap:wrap;gap:5px; }.setting-actions { justify-content:flex-end; }.setting-badges { margin-top:6px; }.setting-badges span,.setting-badges strong,.setting-badges em { padding:2px 6px;border-radius:999px;background:var(--surface-3);color:var(--text-tertiary);font:9px/1.4 var(--font-mono);font-style:normal; }.setting-badges strong { color:var(--accent); }.setting-badges em { color:var(--warning); }
 .setting-error { color:var(--danger)!important;text-align:left; }
 .operation-banner { display:grid;gap:4px;margin-bottom:12px;padding:11px 12px;border:1px solid var(--border-default);border-radius:9px;background:var(--surface-2);font-size:11px; }.operation-banner[data-state="running"] { border-color:var(--accent); }.operation-banner[data-state="done"] strong { color:var(--success); }.operation-banner[data-state="error"] { border-color:var(--danger);background:var(--danger-soft); }.operation-banner span { color:var(--text-secondary); }.operation-banner code { color:var(--text-tertiary);font-size:9.5px;overflow-wrap:anywhere; }
-.control-dialog { width:min(760px,calc(100vw - 32px));max-height:min(82vh,780px);padding:0;border:1px solid var(--border-default);border-radius:13px;background:var(--surface-popover);color:var(--text-primary);box-shadow:var(--shadow-popover); }.control-dialog::backdrop { background:rgba(8,8,10,.68);backdrop-filter:blur(3px); }.control-dialog>div { display:grid;gap:14px;padding:18px;max-height:inherit;overflow:auto; }
+.control-dialog { margin:auto;width:min(760px,calc(100vw - 32px));max-height:min(82vh,780px);padding:0;border:1px solid var(--border-default);border-radius:13px;background:var(--surface-popover);color:var(--text-primary);box-shadow:var(--shadow-popover); }.control-dialog::backdrop { background:rgba(8,8,10,.68);backdrop-filter:blur(3px); }.control-dialog>div { display:grid;gap:14px;padding:18px;max-height:inherit;overflow:auto; }
 .dialog-head,.dialog-actions { display:flex;align-items:center;justify-content:space-between;gap:10px; }.dialog-head h2 { font-size:17px; }.dialog-actions { justify-content:flex-end;position:sticky;bottom:-18px;margin:0 -18px -18px;padding:12px 18px;background:var(--surface-popover);border-top:1px solid var(--border-subtle); }
 .approval-effects { display:grid;gap:7px; }.approval-effects article { display:grid;grid-template-columns:minmax(120px,1fr) minmax(90px,.7fr) auto minmax(90px,.7fr);align-items:center;gap:8px;padding:10px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-2); }.approval-effects article[data-danger="true"] { border-color:var(--warning); }.approval-effects code { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary);font-size:10px; }.approval-effects small { grid-column:1/-1;color:var(--text-tertiary);font-size:9.5px; }
-.approval-confirmations,.proposal-list { display:grid;gap:7px; }.approval-confirmations label,.proposal-list label { display:flex;align-items:flex-start;gap:9px;padding:9px 10px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-2);font-size:11px; }.approval-confirmations input,.proposal-list input { margin-top:2px;accent-color:var(--accent); }.proposal-list span { min-width:0;display:grid;gap:4px; }.proposal-list code { white-space:normal;overflow-wrap:anywhere;color:var(--text-tertiary);font-size:9.5px; }
+/* 建议可能有几十上百条：主操作必须在列表顶部够得着，而不是滚到底。只放一条，不上下各来一个——
+   两个主按钮会造出两个视觉中心。背景用不透明的 popover 面，滚动内容不许透上来。 */
+.proposal-bar { position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:8px 10px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-popover);font-size:11px; }
+.proposal-bar .count { color:var(--text-tertiary); }
+.approval-confirmations,.proposal-list { display:grid;gap:7px; }.approval-confirmations label,.proposal-list label { display:flex;align-items:flex-start;gap:9px;padding:9px 10px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-2);font-size:11px; }.approval-confirmations input,.proposal-list input { margin-top:2px;accent-color:var(--accent); }.proposal-list span { min-width:0;display:grid;gap:4px; }.proposal-list small { color:var(--text-secondary);font-size:10.5px; }.proposal-list summary { cursor:pointer;color:var(--text-tertiary);font-size:10px; }.proposal-list code { white-space:normal;overflow-wrap:anywhere;color:var(--text-tertiary);font-size:9.5px; }
 .skill-root-choice { display:grid;gap:5px;width:100%;padding:11px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-2);color:var(--text-primary);text-align:left;cursor:pointer; }.skill-root-choice:hover { border-color:var(--accent); }.skill-root-choice span { color:var(--text-tertiary);font-size:10px; }
 .skill-control-tabs { display:flex;gap:4px;margin-bottom:12px;padding:3px;border:1px solid var(--border-subtle);border-radius:9px;background:var(--surface-2); }.skill-control-tabs button { flex:1;min-height:32px;border:0;border-radius:6px;background:transparent;color:var(--text-secondary);cursor:pointer; }.skill-control-tabs button[data-on="true"] { background:var(--surface-active);color:var(--text-primary); }
 .skill-locations,.transaction-list { display:grid;gap:7px; }.skill-locations article,.transaction-list article { display:grid;gap:5px;padding:10px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-1); }.skill-locations code,.transaction-list code { overflow-wrap:anywhere;color:var(--text-tertiary);font-size:9.5px; }.skill-locations span,.transaction-list span { color:var(--text-secondary);font-size:10px; }.skill-locations .button { justify-self:start; }
@@ -862,6 +911,12 @@ textarea { resize: vertical; }
   .approval-effects article { grid-template-columns:minmax(0,1fr); }.approval-effects article span { display:none; }.approval-effects small { grid-column:auto; }
   .control-dialog { width:100vw;max-width:none;height:100dvh;max-height:none;margin:0;border:0;border-radius:0; }.control-dialog>div { min-height:100%;box-sizing:border-box;padding-bottom:calc(18px + env(safe-area-inset-bottom)); }
   .dialog-actions { bottom:calc(-18px - env(safe-area-inset-bottom));padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+  /* 审草稿：贴合可视视口（--vv-h/--vv-top 由 app.js 的 visualViewport 同步），键盘弹起弹窗跟着缩，
+     编辑区始终整块露在键盘上方；没有 visualViewport 的环境退回 100dvh */
+  #draft-overlay { top:var(--vv-top, 0px); height:var(--vv-h, 100dvh); bottom:auto; padding-top:0; align-items:stretch; }
+  #draft-overlay .modal.draft { width:100%; box-sizing:border-box; height:auto; max-height:none; resize:none; border:0; border-radius:0; padding:12px 12px calc(10px + env(safe-area-inset-bottom)); }
+  #draft-overlay .modal.draft #d-text { min-height:96px; }
+  #draft-overlay .modal.draft .actions { flex-wrap:wrap; margin-top:10px; }
   .transaction-list article { grid-template-columns:minmax(0,1fr); }.transaction-list .button { justify-self:start;min-height:44px; }
 }
 .chat-list-col, .notes-list-col, .system-summary-col { gap: 0; }
@@ -1286,3 +1341,11 @@ html[data-look="win98"] .empty { color: #1c1c1c; }
 .settings-group[data-enabled="false"] .settings-group-body{opacity:.55}
 .settings-group-body .settings-field{border:0;padding:6px 0;background:transparent}
 .settings-group-body .settings-path{display:none}
+
+/* 冲突差异视图 */
+.diff-legend { display:flex; gap:16px; font-size:12px; color:var(--text-secondary); }
+.diff-files { display:grid; gap:8px; max-height:50vh; overflow:auto; }
+.diff-table { width:100%; border-collapse:collapse; font-size:12px; font-family:ui-monospace,Menlo,monospace; }
+.diff-table td { border-top:1px solid var(--border); padding:2px 6px; vertical-align:top; white-space:pre-wrap; word-break:break-all; }
+.diff-table td:first-child { color:var(--text-tertiary); width:3em; text-align:right; }
+.conflict-actions { display:flex; flex-wrap:wrap; gap:6px; }

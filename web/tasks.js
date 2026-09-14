@@ -4,9 +4,11 @@
 const Tasks = {
   sel: null,               // 选中任务 id 或 cc 会话 id
   dev: null,               // 引擎会话最近一次 DevSessionRes
+  usage: null,             // /api/usage：各家订阅额度（跟慢数据一起 60s 刷一轮，头部徽标就地更新）
   ccMsgs: [], ccOffset: 0, // 旁观增量
   ccList: [],              // 本机全部 agent 会话（去重后混进项目组；含 ownward 之外开的 claude/codex）
   recent: [], rq: "",      // 最近会话分区：ownward 原生引擎对话 + 筛选词
+  rqHits: null, rqTimer: null,   // 筛选词的全文命中（/api/search）：{ q, byTask: Map<taskId, {snippet, hit}> }
   pinned: [],              // 置顶会话（daemon 持久化）
   dismissed: {},           // 隐藏的项目组 {project: epochMs}
   openTools: new Set(),    // 工具帧展开状态（重渲染保持）
@@ -70,7 +72,6 @@ TABS.tasks = {
     loadTasksAux().then(renderTaskList);
     Tasks.timer = setInterval(() => {
       pollDetail(false);
-      refreshRecentSessions();
       // 会话列表/置顶/隐藏是慢数据：每 60s 跟一轮就够（24 × 2.5s）
       if (++Tasks.auxTick % 24 === 0) loadTasksAux().then(renderTaskList);
     }, 2500);
@@ -96,29 +97,20 @@ function tkSetContext(project, title) {
 /** 分组视图的辅助数据：全部会话 + 置顶 + 隐藏项目（任务本体走 SSE/轮询） */
 async function loadTasksAux() {
   Tasks.auxError = "";
-  const [cc, pin, dis, rc] = await Promise.all([
+  const [cc, pin, dis, rc, us] = await Promise.all([
     getJSON("/api/cc/sessions").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/sessions/pinned").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/projects/dismissed").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/dev/recent").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
+    getJSON("/api/usage").catch(() => null),   // 额度拿不到不算错：徽标不画就是了
   ]);
   if (cc) Tasks.ccList = cc;
   if (pin?.pinned) Tasks.pinned = pin.pinned;
   if (dis?.dismissed) Tasks.dismissed = dis.dismissed;
   if (rc) Tasks.recent = rc;
+  if (us && JSON.stringify(us) !== JSON.stringify(Tasks.usage)) { Tasks.usage = us; renderUsagePill(); }
   Tasks.auxLoaded = true;
   if (Tasks.selKind === "cc" && Tasks.sel) void pollCcObserve(Tasks.sel, Tasks.selKind, true);
-}
-async function refreshRecentSessions() {
-  if (Tasks.recentBusy) return;
-  Tasks.recentBusy = true;
-  try {
-    const recent = await getJSON("/api/dev/recent");
-    if (JSON.stringify(recent) === JSON.stringify(Tasks.recent)) return;
-    Tasks.recent = recent;
-    renderTaskList(); // 同时刷新列表与 tab；内容未变时不动 DOM
-  } catch { /* 快轮询失败保持上一帧；完整辅助刷新负责展示错误 */ }
-  finally { Tasks.recentBusy = false; }
 }
 TABS._onTasks = () => { if (S.tab === "tasks") renderTaskList(); };
 
@@ -201,7 +193,7 @@ function tkSetView(v) {
   renderTaskList();
 }
 function rcCardHtml(s) {
-  const state = sessionState("task", s);
+  const state = sessionState("task", s), hit = rcHits()?.get(s.id);
   return `<div class="card clickable" ${state.tone ? `data-tone="${state.tone}"` : ""} data-selected="${Tasks.sel === s.id}" onclick="Tasks.select('${jsq(s.id)}')">
     <div class="top">${sessionStateHtml(state)}
       <span class="task-project">${esc(s.project)}</span>
@@ -209,22 +201,50 @@ function rcCardHtml(s) {
       <span class="right mono">${ageText(new Date(s.lastAt).toISOString())}</span></div>
     <div class="body task-card-title">${esc(s.title)}</div>
     ${s.last ? `<div class="body" style="color:var(--text-tertiary);-webkit-line-clamp:1;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">${esc(s.last)}</div>` : ""}
+    ${hit ? `<div class="body" style="color:var(--text-secondary);-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">🔍 ${esc(hit.snippet)}</div>` : ""}
     <div class="foot"><span class="mono" style="font-size:11px;color:var(--text-tertiary)">💬 ${s.msgs}${s.userMsgs > 1 ? ` · 追问 ${s.userMsgs - 1}` : ""}</span>
       <span style="flex:1"></span>${pinBtnHtml("task", s.id, s.project, s.title, "")}</div>
   </div>`;
 }
+/** 当前筛选词对应的全文命中（没查到或词已变就是 null） */
+function rcHits() { const q = Tasks.rq.trim().toLowerCase(); return q && Tasks.rqHits?.q === q ? Tasks.rqHits.byTask : null; }
 function rcFiltered() {
-  const q = Tasks.rq.trim().toLowerCase();
-  return q ? Tasks.recent.filter((s) => `${s.project}\n${s.title}\n${s.last}`.toLowerCase().includes(q)) : Tasks.recent;
+  const q = Tasks.rq.trim().toLowerCase(), hits = rcHits();
+  return q ? Tasks.recent.filter((s) => `${s.project}\n${s.title}\n${s.last}`.toLowerCase().includes(q) || !!hits?.has(s.id)) : Tasks.recent;
+}
+/** 全文命中但已经滚出「最近」列表（归档 / 更早）的会话：单独列成简卡，点了照样能打开 */
+function rcExtraHitsHtml() {
+  const hits = rcHits(); if (!hits) return "";
+  const known = new Set(Tasks.recent.map((s) => s.id));
+  return [...hits.entries()].filter(([id]) => !known.has(id)).map(([id, h]) => `
+    <div class="card clickable" data-selected="${Tasks.sel === id}" onclick="Tasks.select('${jsq(id)}')">
+      <div class="top"><span class="task-project">${esc(h.project || "?")}</span><span class="tag">${esc(h.mode === "codex-bg" ? "codex" : h.mode === "codebuddy-bg" ? "codebuddy" : "claude")}</span><span class="right mono">${h.lastAt ? ageText(new Date(h.lastAt).toISOString()) : "更早"}</span></div>
+      <div class="body task-card-title">${esc(h.title || id)}</div>
+      <div class="body" style="color:var(--text-tertiary);-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">🔍 ${esc(h.snippet)}</div>
+    </div>`).join("");
 }
 function rcCardsHtml() {
-  const list = rcFiltered();
-  return list.map(rcCardHtml).join("")
+  const list = rcFiltered(), extra = rcExtraHitsHtml();
+  return (list.map(rcCardHtml).join("") + extra)
     || stateBox(Tasks.rq.trim() ? "没有匹配的会话" : "还没有 Ownward 会话，点右上「派新任务」开始");
+}
+/** 全文搜索：≥2 字就问派生索引（读库，不打开会话）；回来后按命中刷卡片 */
+function rcSearch(q) {
+  clearTimeout(Tasks.rqTimer);
+  Tasks.rqTimer = setTimeout(async () => {
+    const r = await getJSON(`/api/search?q=${encodeURIComponent(q)}&limit=100`).catch(() => null);
+    if (Tasks.rq.trim().toLowerCase() !== q) return;
+    const byTask = new Map();
+    for (const h of r?.hits || []) if (!byTask.has(h.taskId)) byTask.set(h.taskId, { snippet: String(h.snippet || "").replace(/\s+/g, " "), project: h.project, title: h.title, mode: h.mode, lastAt: h.lastAt });
+    Tasks.rqHits = { q, byTask };
+    rcFilter(Tasks.rq);
+  }, 200);
 }
 /** 筛选输入只更新卡片容器，不整列重渲——中文输入法组字不被打断 */
 function rcFilter(v) {
   Tasks.rq = v;
+  const q = v.trim().toLowerCase();
+  if (q.length >= 2 && Tasks.rqHits?.q !== q) rcSearch(q);
   const box = $("#tk-rc-cards"); if (box) box.innerHTML = rcCardsHtml();
   const meta = $("#tk-rc-meta"); if (meta) meta.textContent = `${rcFiltered().length} / ${Tasks.recent.length}`;
 }
@@ -414,7 +434,8 @@ function updateSessionConfigSubmit(clearError = true) {
   const validPair = modelValid && effortValid;
   submit.disabled = noop || !values.providerId || !validPair;
   if (clearError || $("#session-config-status")?.dataset.state !== "error") {
-    sessionConfigStatus(noop ? "当前配置没有变化" : sameProvider ? "将创建同 Provider 的新会话并沿用有界历史" : "将创建目标 Provider 的新会话并沿用有界历史", noop ? "muted" : "ready");
+    // 同 Provider 只换模型/深度是就地改（CLI 原生支持带新参数续聊，原生上下文一字不丢）；跨 Provider 才需要接力
+    sessionConfigStatus(noop ? "当前配置没有变化" : sameProvider ? "将就地切换模型/思考深度，沿用当前会话（不接力，下一轮生效）" : "将创建目标 Provider 的新会话并沿用有界历史", noop ? "muted" : "ready");
   }
 }
 function fillSessionConfigEfforts(requestedEffort = "", preserveLegacy = false, allowOmitted = false) {
@@ -479,11 +500,12 @@ async function submitSessionConfig() {
   dialog.dataset.busy = "true";
   $$('button,select', $("#session-config-body")).forEach((control) => { control.disabled = true; });
   submit.textContent = "应用中…";
-  sessionConfigStatus("正在创建接力会话并应用配置…", "busy");
+  const sameProvider = providerId === dialog.dataset.currentProvider;
+  sessionConfigStatus(sameProvider ? "正在就地切换配置…" : "正在创建接力会话并应用配置…", "busy");
   let applied = false;
   try {
-    const payload = { id, providerId, model: model || undefined, effort: effort || undefined, reason: providerId === dialog.dataset.currentProvider ? "manual-reconfigure" : "manual-handoff" };
-    let res = await post("/api/dev/handoff", payload);
+    const payload = { id, providerId, model: model || undefined, effort: effort || undefined, reason: sameProvider ? "manual-reconfigure" : "manual-handoff" };
+    let res = sameProvider ? await post("/api/dev/reconfigure", { id, model: payload.model, effort: payload.effort }) : await post("/api/dev/handoff", payload);
     if (handoffErrorCode(res) === "SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED") {
       const proceed = confirm("旧会话存在结果未知的操作，可能已经产生副作用。\n\n系统不会重放旧命令；继续只会创建新的 Session 接力。确认仍要继续？");
       if (!proceed) { sessionConfigStatus("已取消：请先确认旧会话的实际结果", "error"); return; }
@@ -511,6 +533,57 @@ async function submitSessionConfig() {
       }
     }
   }
+}
+/** 会话谱系：接力/换 ref 后，之前那个引擎的会话 ID 和恢复命令要能查到——但日常几乎不用，所以收在头部
+ *  「谱系」按钮后面按需弹窗，不再常驻输入框上方（原先那块 <details> 每次重绘都带 open，等于每轮自己弹开）。
+ *  每行：引擎 · 模型 · 深度 · 时间 · 原生会话 ID · 复制恢复命令。
+ *  没有 nativeRef 的行（还没跑过一轮 / 归档）如实写「尚无原生会话 ID」，不编一个命令出来。 */
+function lineageRows(lineage) {
+  if (!Array.isArray(lineage) || !lineage.length) return [];
+  const when = (iso) => { const t = Date.parse(iso || ""); return Number.isFinite(t) ? new Date(t).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""; };
+  const row = (entry, label, ref, resume, extra = "") => `<div class="lineage-row" data-current="${!!entry.current}">
+      <span class="mode-tag" data-m="${esc(entry.providerId)}">${esc(entry.providerId)}</span>
+      <span class="lineage-meta">${esc(label)}${extra ? ` · ${esc(extra)}` : ""} · 模型 ${esc(entry.model || "默认")} · 深度 ${esc(entry.effort || "默认")}${entry.reason ? ` · ${esc(entry.reason)}` : ""}</span>
+      ${ref ? `<code title="原生会话 ID">${esc(ref)}</code>` : `<span class="lineage-meta muted">尚无原生会话 ID</span>`}
+      ${resume?.cmd ? `<button class="button sm secondary" onclick="copyResumeCmd('${jsq(resume.cmd)}')" title="${esc(resume.cmd)}">复制恢复命令</button>` : ""}
+    </div>`;
+  return lineage.flatMap((entry) => [
+    ...(entry.previousRefs || []).map((prev) => row(entry, `${when(entry.createdAt)} 起`, prev.nativeRef, prev.resume, "已被 /new 换掉")),
+    row(entry, entry.current ? `当前 · ${when(entry.createdAt)} 起` : `${when(entry.createdAt)} → ${when(entry.handedOffAt)} 已接力`, entry.nativeRef, entry.resume),
+  ]);
+}
+function openLineage() {
+  const dialog = $("#lineage-dialog"), body = $("#lineage-body"), rows = lineageRows(Tasks.dev?.lineage);
+  if (!dialog || !body) return;
+  if (!rows.length) { toast("这个会话还没有谱系记录"); return; }
+  body.innerHTML = `<div class="dialog-head"><div><div class="eyebrow">SESSION LINEAGE</div><h2 id="lineage-title">会话谱系与恢复命令</h2></div><button class="button ghost" id="lineage-close" type="button">关闭</button></div>
+    <p class="lineage-note"><span>接力链上每个引擎各一条：原生会话 ID，以及可直接粘贴到终端的恢复命令。</span><span class="lineage-count">${rows.length} 个原生会话</span></p>
+    <div class="lineage-list">${rows.join("")}</div>`;
+  $("#lineage-close").addEventListener("click", () => dialog.close());
+  dialog.showModal();
+}
+/** 额度徽标：按会话引擎取对应家的窗口（Claude 5h/周，Codex 按套餐返回的主/次窗口），写法对齐 statusline 的
+ *  5h:46%(3h10m)——百分比后括号里是距重置的时间。最高的那个窗口过 70%/90% 变色；拿不到就不画，空着比错数字好。 */
+function usageEta(iso) {
+  const ms = Date.parse(iso || "") - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const m = Math.round(ms / 60000), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  return d ? `${d}d${h ? `${h}h` : ""}` : h ? `${h}h${mm ? `${mm}m` : ""}` : `${mm}m`;
+}
+function usagePillHtml(backend) {
+  const u = Tasks.usage?.[backend];
+  if (!u?.windows?.length) return "";
+  const worst = Math.max(...u.windows.map((w) => Number(w.percent) || 0));
+  const tone = worst >= 90 ? "bad" : worst >= 70 ? "warn" : "";
+  const text = u.windows.map((w) => { const eta = usageEta(w.resetsAt); return `${w.label} ${Math.round(w.percent)}%${eta ? `(${eta})` : ""}`; }).join(" · ");
+  const title = `${backend} 订阅额度${u.plan ? `（${u.plan}）` : ""}：` + u.windows.map((w) =>
+    `${w.label} 窗口已用 ${Math.round(w.percent)}%${w.resetsAt ? `，${new Date(w.resetsAt).toLocaleString("zh-CN", { hour12: false })} 重置` : ""}`).join("；");
+  return `<span class="tag mono"${tone ? ` data-tone="${tone}"` : ""} title="${esc(title)}">额度 ${esc(text)}</span>`;
+}
+/** 额度独立于会话数据 60s 刷一次：就地换徽标内容，不为它整块重渲会话 */
+function renderUsagePill() {
+  const el = $("#tk-usage");
+  if (el) el.innerHTML = usagePillHtml(el.dataset.backend);
 }
 function tabsSave() { localStorage.setItem("ownward-session-tabs", JSON.stringify(Tasks.tabs)); }
 function tabUpsert(kind, id) {
@@ -606,11 +679,14 @@ async function pollDetail(force) {
 }
 
 /* ---- 详情头 ---- */
+/* 头部只放身份（项目 / 引擎 / 运行状态）和高频动作；ctx、额度、模型、深度、token、分支、目录这些读数
+ * 全下沉到输入框底下的信息条（sessionMetaHtml）——一行横着挤十来个徽标谁也读不清，而且它们本来就是
+ * "写指令时顺手瞄一眼"的东西，贴着输入框比贴着标题有用。 */
 function detailHead(t, extra) {
   const dev = Tasks.dev;
+  const inSession = !!(t.engine && dev);   // 会话视图：读数交给信息条，这里不重复画
   const btns = [];
   if (t.engine && dev) {
-    btns.push(`<button class="button sm ghost" title="给会话追加可写目录（codex 下一轮生效，claude 立即生效）" onclick="devAddDir('${esc(t.id)}')">＋目录</button>`);
     // 沙箱开关：仅 codex 会话（claude 权限派发时定死）；解除态高亮警示
     if (dev.backend === "codex") {
       const on = !!dev.fullAccess;
@@ -618,8 +694,6 @@ function detailHead(t, extra) {
     }
     if (dev.control === "observing") btns.push(`<button class="button sm secondary" onclick="devControl('${esc(t.id)}','take')">接管输入</button>`);
     else if (dev.control === "ownward") btns.push(`<button class="button sm ghost" onclick="devControl('${esc(t.id)}','release')">释放输入权</button>`);
-    const handoff = handoffState(dev);
-    btns.push(`<button class="button sm ghost session-config-trigger" type="button" title="${esc(handoff.reason || "切换 Provider，或调整当前会话的模型与思考深度")}" onclick="openSessionConfig('${jsq(t.id)}')" ${handoff.disabled ? "disabled" : ""}>${handoff.disabled ? "会话配置不可用" : "引擎 / 模型…"}</button>`);
   }
   if (t.mode === "terminal") {
     if (t.status === "running") btns.push(`<button class="button sm secondary" onclick="taskDone('${esc(t.id)}')">结束并收割</button>`);
@@ -628,39 +702,65 @@ function detailHead(t, extra) {
   if (t.kind === "evolve" && t.verify === "pass" && !t.applied) btns.push(`<button class="button sm primary" onclick="applyEvolveAction('${esc(t.id)}','evolve:${esc(t.id)}')">批准上线</button>`);
   if (t.flightState === "written") btns.push(`<button class="button sm ghost" onclick="post('/api/flight/open',{id:'${esc(t.id)}'}).then(r=>toast(r.msg))">飞行记录</button>`);
   btns.push(`<button class="button sm ${Tasks.repoOpen ? "secondary" : "ghost"}" onclick="toggleRepo('${esc(t.id)}')">仓库</button>`);
+  // 非会话视图（terminal / 日志）没有信息条，分支和用量还是留在头部
   const tok = dev?.tokens?.total || ((dev?.tokens?.input || 0) + (dev?.tokens?.output || 0));
-  // ctx 展示按后端区分（主仓 d8ce572 语义）：claude 按窗口换算 %（模型名带 1m 按 1M，其余 200k），
-  // 70%/90% 变色提醒该 /compact 了；codex 窗口不可知，只显原始占用不换算
-  let ctxPill = "";
-  if (dev?.ctxTokens) {
-    const kb = `ctx ${(dev.ctxTokens / 1000).toFixed(0)}k`;
-    if (dev.backend === "claude") {
-      const win = /\[?1m\]?/i.test(dev.model || "") ? 1_000_000 : 200_000;
-      const pct = Math.round((dev.ctxTokens / win) * 100);
-      const color = pct >= 90 ? "var(--danger)" : pct >= 70 ? "var(--warning)" : "";
-      ctxPill = `<span class="tag mono" title="上下文占用（窗口 ${win / 1000}k，超阈值会自动压缩）"${color ? ` style="color:${color}"` : ""}>${kb} · ${pct}%</span>`;
-    } else {
-      ctxPill = `<span class="tag mono" title="上下文占用（codex 窗口不换算）">${kb}</span>`;
-    }
-  }
   const pills = [
     `<span class="mode-tag" data-m="${esc(dev?.backend || dev?.providerId || t.mode)}">${esc(dev?.backend || dev?.providerId || t.mode)}</span>`,
-    t.branch ? `<span class="tag mono">${esc(t.branch)}</span>` : "",
-    tok ? `<span class="tag mono" title="token 用量">${(tok / 1000).toFixed(1)}k tok</span>` : "",
-    ctxPill,
-    `<span class="tag mono" title="当前模型">模型 ${esc(dev?.model || "默认")}</span>`,
-    `<span class="tag mono" title="当前思考深度">深度 ${esc(dev?.effort || "默认")}</span>`,
+    !inSession && t.branch ? `<span class="tag mono">${esc(t.branch)}</span>` : "",
+    !inSession && tok ? `<span class="tag mono" title="token 用量">${(tok / 1000).toFixed(1)}k tok</span>` : "",
   ].filter(Boolean).join("");
-  const dirs = dev?.cwd ? `<div class="session-dirs" aria-label="当前会话目录">
-    <span class="dir-chip primary" title="${esc(dev.cwd)}"><b>主目录</b> ${esc(dev.cwd.split("/").filter(Boolean).at(-1) || dev.cwd)}</span>
-    ${(dev.extraDirs || []).map((dir) => `<span class="dir-chip" title="${esc(dir)}"><b>附加</b> ${esc(dir.split("/").filter(Boolean).at(-1) || dir)}</span>`).join("")}
-  </div>` : "";
   return `<div class="session-head">
     <button class="button ghost sm tasks-back" onclick="tkBackToList()" aria-label="返回任务列表">← 返回</button>
     <span class="dot ${t.status === "running" ? "ok breathe" : t.exitCode === 0 || t.status === "done" ? "ok" : "bad"}"></span>
-    <span class="title">${esc(t.project)}</span>${pills}${dirs}
+    <span class="title">${esc(t.project)}</span>${pills}
     <div class="right">${btns.join("")}${extra || ""}</div>
   </div>` + repoPanelHtml(t);
+}
+
+/** ctx 窗口：优先用 provider 回报的 ctxWindow（CC result 帧 modelUsage.contextWindow）；没有时按模型名估——
+ *  2026 起 claude 主力型号（fable / opus / sonnet 4.6+）默认都是 1M 窗口，只有 haiku 还是 200k。
+ *  以前一律按 200k 算，1M 会话动辄显示 300%+（2026-09-13 实测 amt2：670k 占用被算成 335%）。 */
+function ctxWindowOf(dev) {
+  if (dev.ctxWindow > 0) return dev.ctxWindow;
+  return /haiku/i.test(dev.model || "") ? 200_000 : 1_000_000;
+}
+/** ctx 展示按后端区分（主仓 d8ce572 语义）：claude 按窗口换算 %，70%/90% 变色提醒该 /compact 了；
+ *  codex 窗口不可知，只显原始占用不换算 */
+function ctxPillHtml(dev) {
+  if (!dev?.ctxTokens) return "";
+  const kb = `ctx ${(dev.ctxTokens / 1000).toFixed(0)}k`;
+  if (dev.backend !== "claude") return `<span class="meta-item mono" title="上下文占用（codex 窗口不换算）">${kb}</span>`;
+  const win = ctxWindowOf(dev), measured = dev.ctxWindow > 0;
+  const pct = Math.round((dev.ctxTokens / win) * 100);
+  const tone = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "";
+  return `<span class="meta-item mono"${tone ? ` data-tone="${tone}"` : ""} title="上下文占用（窗口 ${win / 1000}k${measured ? "" : "，按模型估算"}，超阈值会自动压缩）">${kb} · ${pct}%</span>`;
+}
+
+/** 会话信息条：贴在输入框下面的一行小字，左右分家——
+ *  左边 .meta-read 全是只读读数（ctx / 额度 / token / 分支 / 目录），放不下自己横滚；
+ *  右边 .meta-act 全是能点的（模型·深度 → 引擎/模型面板、＋目录、谱系），固定靠右不滚。
+ *  以前读数和按钮穿插在一行里，眼睛得逐个分辨哪个能点；现在看左边、改右边。 */
+function sessionMetaHtml(t, dev) {
+  if (!dev) return "";
+  const handoff = handoffState(dev);
+  const tok = dev.tokens?.total || ((dev.tokens?.input || 0) + (dev.tokens?.output || 0));
+  const extraDirs = dev.extraDirs || [];
+  const base = (dir) => dir.split("/").filter(Boolean).at(-1) || dir;
+  const reads = [
+    ctxPillHtml(dev),
+    // 额度独立 60s 刷：保留 #tk-usage 让 renderUsagePill 就地换内容
+    `<span class="usage-pill" id="tk-usage" data-backend="${esc(dev.backend || dev.providerId || "")}">${usagePillHtml(dev.backend || dev.providerId)}</span>`,
+    tok ? `<span class="meta-item mono" title="token 用量">${(tok / 1000).toFixed(1)}k tok</span>` : "",
+    t.branch ? `<span class="meta-item mono" title="任务分支">${esc(t.branch)}</span>` : "",
+    dev.cwd ? `<span class="meta-item" title="${esc([`主目录 ${dev.cwd}`, ...extraDirs.map((d) => `附加 ${d}`)].join("\n"))}"><b>目录</b> ${esc(base(dev.cwd))}${extraDirs.length ? ` +${extraDirs.length}` : ""}</span>` : "",
+  ].filter(Boolean);
+  const acts = [
+    // 模型·深度既是读数也是入口：点它就是原来的「引擎 / 模型…」
+    `<button class="meta-chip session-config-trigger" type="button" title="${esc(handoff.reason || "切换 Provider，或调整当前会话的模型与思考深度")}" onclick="openSessionConfig('${jsq(t.id)}')" ${handoff.disabled ? "disabled" : ""}>${esc(dev.model || "默认")} · ${esc(dev.effort || "默认")}</button>`,
+    t.engine ? `<button class="meta-chip" type="button" title="给会话追加可写目录（codex 下一轮生效，claude 立即生效）" onclick="devAddDir('${jsq(t.id)}')">＋目录</button>` : "",
+    dev.lineage?.length ? `<button class="meta-chip" type="button" title="接力链上每个引擎的原生会话 ID 与恢复命令" onclick="openLineage()">谱系</button>` : "",
+  ].filter(Boolean);
+  return `<div class="session-meta" aria-label="会话状态"><div class="meta-read">${reads.join("")}</div><div class="meta-act">${acts.join("")}</div></div>`;
 }
 
 /* ---- Repo 验收面板（状态/diff/commit/push/PR/清 worktree，全在任务 cwd 执行） ---- */
@@ -864,6 +964,7 @@ function renderSession(t, dev) {
           <button class="button primary" id="tk-send" ${canInput ? "" : "disabled"}>发送</button>
         </div>
       </div>
+      ${sessionMetaHtml(t, dev)}
       <input type="file" id="tk-file" accept="image/*" multiple hidden>
     </div>`;
 
@@ -874,7 +975,7 @@ function renderSession(t, dev) {
     if (hadFocus) { input.focus(); input.setSelectionRange(draft.length, draft.length); }
     input.addEventListener("input", () => { autoGrow(input); ComposerDrafts.setText(draftKey, input.value); });
     // Enter 发送 / ↑↓ 翻本会话输入历史 / 输入 "/" 弹命令补全（命令表来自 CC init 帧回报）
-    bindComposer(input, { key: `task:${t.id}`, send: () => devSend(t.id), commands: dev.backend === "claude" ? (dev.commands || []) : null });
+    bindComposer(input, { key: `task:${t.id}`, send: () => devSend(t.id), commands: dev.backend === "claude" ? (dev.commands || []) : [] /* codex/codebuddy 没有 CLI 命令表，但 /new /model /effort 这些 Ownward 自己的命令照样要能补全 */ });
     input.addEventListener("paste", (e) => {
       const imgs = [...(e.clipboardData?.items || [])].filter((it) => it.type.startsWith("image/"));
       if (!imgs.length) return;
@@ -931,6 +1032,20 @@ async function devSend(id) {
   const text = draftSnapshot.trim();
   if (!text && !Tasks.images.length) return;
   const key = `task:${id}`;
+  // /model <名> 与 /effort <档>：Ownward 自己的命令，同引擎就地切换（不接力）。两家 CLI 的 headless 通道都没有这两条，
+  // 所以在这里拦下来打 reconfigure，不发给 agent。只打命令名不带参数 = 看当前值和可选项。
+  const local = text.match(/^\/(model|effort)(?:\s+(\S+))?$/);
+  if (local && !Tasks.images.length) {
+    const field = local[1], value = local[2] || "", dev = Tasks.dev || {}, providerId = dev.backend || dev.providerId || "claude";
+    const options = field === "model" ? workProviderCapability(providerId).models : workProviderEfforts(providerId, dev.model || "");
+    if (!value) { toast(`${field === "model" ? "当前模型" : "当前思考深度"}：${(field === "model" ? dev.model : dev.effort) || "Provider 默认"}；可选：${options.join(" / ")}`); return; }
+    input.value = ""; autoGrow(input);
+    const r = await post("/api/dev/reconfigure", { id, [field]: value });
+    if (r.ok) { ComposerDrafts.clearText(key, draftSnapshot); composerSent(key, text); toast(r.msg || "已切换"); }
+    else { input.value = draftSnapshot; autoGrow(input); toast(r.msg || "切换失败"); }
+    pollDetail(true);
+    return;
+  }
   input.value = "";
   autoGrow(input);
   const pics = Tasks.images;

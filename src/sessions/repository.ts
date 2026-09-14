@@ -353,6 +353,18 @@ export class SessionRepository {
     if (!changed) return structuredClone(target); target.updatedAt = new Date().toISOString(); atomicWrite(this.dataRoot, mutationPayload(view, store), expected); return new SessionRepository(this.dataRoot).getById(target.id)!;
   }
 
+  /** 同 Provider 就地改模型/思考深度（reconfigure）：只改这两个字段，Session 身份、nativeRef、历史都不动 */
+  updateOptions(id: string, patch: { model?: string; effort?: string }): SessionRecord {
+    if ((patch.model !== undefined && !validOptionText(patch.model, 128)) || (patch.effort !== undefined && !validOptionText(patch.effort, 64))) throw new SessionRepositoryError("options 非法");
+    const file = fileFor(this.dataRoot), expected = existsSync(file) ? readFileSync(file, "utf8") : null, view = mutableView(this.dataRoot), store = view.store; assertNotIsolated(view, id);
+    const target = store.sessions.find((s) => s.id === id || s.taskIds.includes(id)); if (!target) throw new SessionRepositoryError(`Session 不存在: ${id}`);
+    assertMutable(target);
+    let changed = false;
+    if (patch.model !== undefined && target.model !== patch.model) { target.model = patch.model; changed = true; }
+    if (patch.effort !== undefined && target.effort !== patch.effort) { target.effort = patch.effort; changed = true; }
+    if (!changed) return structuredClone(target); target.updatedAt = new Date().toISOString(); atomicWrite(this.dataRoot, mutationPayload(view, store), expected); return new SessionRepository(this.dataRoot).getById(target.id)!;
+  }
+
   clearNativeRef(id: string): SessionRecord {
     const file = fileFor(this.dataRoot), expected = existsSync(file) ? readFileSync(file, "utf8") : null, view = mutableView(this.dataRoot), store = view.store; assertNotIsolated(view, id);
     const target = store.sessions.find((s) => s.id === id || s.taskIds.includes(id)); if (!target) throw new SessionRepositoryError(`Session 不存在: ${id}`);

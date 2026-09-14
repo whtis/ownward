@@ -7,7 +7,12 @@ import type { RawSkillObservation, RawSkillSnapshot } from "./internal.ts";
 
 const DEFAULT_LIMITS = { maxEntries: 20_000, maxFiles: 250_000, maxBytes: 4 * 1024 * 1024 * 1024, maxFilesPerSkill: 100_000, maxBytesPerSkill: 2 * 1024 * 1024 * 1024, maxDepth: 48, deadlineMs: 30_000 };
 type Limits = typeof DEFAULT_LIMITS;
-type TreeDigestResult = { digest: string | null; files: number; bytes: number; bounded: boolean };
+// nestedSkills：条目内部**除自身 SKILL.md 之外**还嵌了多少个 SKILL.md。gstack 这类包顶层
+// 自己有 SKILL.md，扫描器只当它是一个观测，但里面压着 290 个技能——删一条就全没了。
+// symlinks / escaping：树里有多少文件是符号链接、其中多少指向条目之外。gstack 在顶层暴露子技能的
+// 方式是「目录里只放一个 SKILL.md → ../gstack/<x>/SKILL.md」——这种指针壳不是技能本身，
+// copy-tree 复制它会撞 SKILL_LINK_ESCAPE（2026-09-04 三次执行失败回滚）。
+type TreeDigestResult = { digest: string | null; files: number; bytes: number; bounded: boolean; nestedSkills: number; symlinks: number; escaping: number };
 type Budget = { entries: number; files: number; bytes: number; startedAt: number; partial: boolean; reasons: Set<string>; digestCache: Map<string, TreeDigestResult> };
 const identity = (s: { dev: number; ino: number; mode: number }): FileIdentity => ({ dev: s.dev, ino: s.ino, mode: s.mode });
 
@@ -39,20 +44,22 @@ function parseFrontmatter(text: string): { name?: string; description?: string; 
 function digestTree(entry: string, limits: Limits, budget: Budget) {
   let cacheKey = ""; try { const top = lstatSync(entry); if (!top.isSymbolicLink()) cacheKey = `${top.dev}:${top.ino}:${top.mode}`; } catch {}
   if (cacheKey) { const cached = budget.digestCache.get(cacheKey); if (cached) return { ...cached }; }
-  const hash = createHash("sha256"); let files = 0, bytes = 0, bounded = false;
+  const hash = createHash("sha256"); let files = 0, bytes = 0, bounded = false, nestedSkills = 0, symlinks = 0, escaping = 0; const entryRoot = resolve(entry);
   const walk = (path: string, rel: string, depth: number) => {
     if (exhausted(budget, limits) || depth > limits.maxDepth || files >= limits.maxFilesPerSkill || bytes >= limits.maxBytesPerSkill) { bounded = true; budget.partial = true; budget.reasons.add("skill-tree"); return; }
     const st = lstatSync(path);
-    if (st.isSymbolicLink()) { hash.update(`L\0${rel}\0${readlinkSync(path)}\0`); files++; budget.files++; return; }
+    if (st.isSymbolicLink()) { const target = readlinkSync(path); hash.update(`L\0${rel}\0${target}\0`); files++; budget.files++; symlinks++;
+      const resolved = resolve(dirname(path), target); if (!(resolved === entryRoot || resolved.startsWith(entryRoot + sep))) escaping++; return; }
     if (st.isFile()) {
       const remaining = Math.min(limits.maxBytesPerSkill - bytes, limits.maxBytes - budget.bytes);
       if (st.size > remaining) { hash.update(`F!\0${rel}\0${st.size}\0`); bounded = true; budget.partial = true; budget.reasons.add("bytes"); return; }
+      if (rel !== "SKILL.md" && rel.endsWith("/SKILL.md")) nestedSkills++;
       const content = readFileSync(path); hash.update(`F\0${rel}\0${content.length}\0`).update(content); files++; bytes += content.length; budget.files++; budget.bytes += content.length; return;
     }
     if (st.isDirectory()) { hash.update(`D\0${rel}\0`); for (const name of readdirSync(path).sort()) walk(join(path, name), rel ? `${rel}/${name}` : name, depth + 1); return; }
     hash.update(`O\0${rel}\0${st.mode}\0`); files++; budget.files++;
   };
-  walk(entry, "", 0); const result = { digest: bounded ? null : hash.digest("hex"), files, bytes, bounded }; if (cacheKey && !bounded) budget.digestCache.set(cacheKey, result); return result;
+  walk(entry, "", 0); const result = { digest: bounded ? null : hash.digest("hex"), files, bytes, bounded, nestedSkills, symlinks, escaping }; if (cacheKey && !bounded) budget.digestCache.set(cacheKey, result); return result;
 }
 
 function publicLinkTarget(entryPath: string, target: string, home: string) { return redactHome(resolve(dirname(entryPath), target), home); }
@@ -65,7 +72,7 @@ function observe(root: SkillRoot, rawEntryPath: string, options: SkillScanOption
     root: redactHome(root.path, home), entryPath, displayPath: entryPath, name: basename(rawEntryPath), description: null,
     rawRoot: root.path, rawEntryPath, rawRealPath: null, rawLinkTarget: null,
     parentIdentity: null, entryIdentity: null, physicalIdentity: null, realPath: null, linkTarget: null, treeDigest: null, targetTreeDigest: null,
-    bytes: 0, files: 0, ownership: (root.protected ? "protected" : "discovered") as SkillObservation["ownership"], findings: (root.protected ? ["protected"] : []) as SkillObservation["findings"],
+    bytes: 0, files: 0, nestedSkills: 0, ownership: (root.protected ? "protected" : "discovered") as SkillObservation["ownership"], findings: (root.protected ? ["protected"] : []) as SkillObservation["findings"],
   };
   try { base.parentIdentity = identity(statSync(dirname(rawEntryPath))); } catch {}
   try {
@@ -81,15 +88,20 @@ function observe(root: SkillRoot, rawEntryPath: string, options: SkillScanOption
       try { const manifest = readFileSync(join(rawRealPath, "SKILL.md")); if (manifest.length > 1024 * 1024) return { ...base, nodeType, state: "bounded", readError: null }; const fm = parseFrontmatter(manifest.toString("utf8")); base.name = fm.name || base.name; base.description = fm.description || null; base.treeDigest = createHash("sha256").update("protected-manifest-v1\0").update(manifest).digest("hex"); base.files = 1; base.bytes = manifest.length; return { ...base, nodeType, state: fm.malformed ? "malformed" : "healthy", readError: null }; }
       catch { return { ...base, nodeType, state: "malformed", readError: null }; }
     }
-    const linkTree = digestTree(rawEntryPath, limits, budget); base.treeDigest = linkTree.digest; base.files += linkTree.files; base.bytes += linkTree.bytes;
+    const linkTree = digestTree(rawEntryPath, limits, budget); base.treeDigest = linkTree.digest; base.files += linkTree.files; base.bytes += linkTree.bytes; base.nestedSkills = linkTree.nestedSkills;
     let bounded = linkTree.bounded;
-    if (nodeType === "symlink" && !exhausted(budget, limits)) { const target = digestTree(rawRealPath, limits, budget); base.targetTreeDigest = target.digest; base.files += target.files; base.bytes += target.bytes; bounded ||= target.bounded; }
+    if (nodeType === "symlink" && !exhausted(budget, limits)) { const target = digestTree(rawRealPath, limits, budget); base.targetTreeDigest = target.digest; base.files += target.files; base.bytes += target.bytes; bounded ||= target.bounded; base.nestedSkills = Math.max(base.nestedSkills, target.nestedSkills); }
     let malformed = false, hasManifest = true;
     try { const fm = parseFrontmatter(readFileSync(join(rawRealPath, "SKILL.md"), "utf8")); base.name = fm.name || base.name; base.description = fm.description || null; malformed = fm.malformed; } catch { hasManifest = false; }
-    const external = nodeType === "symlink" && !(rawRealPath === root.path || rawRealPath.startsWith(root.path + sep));
-    const managedRoot = resolve(options.storeRoot || join(home, ".ownward", "skills"), "managed");
+    // 两种 external：条目自身是指向根外的链接；或目录里的文件全是指向条目之外的链接（指针壳）。
+    const pointerShell = nodeType === "directory" && linkTree.files > 0 && linkTree.symlinks === linkTree.files && linkTree.escaping === linkTree.symlinks;
+    const external = (nodeType === "symlink" && !(rawRealPath === root.path || rawRealPath.startsWith(root.path + sep))) || pointerShell;
+    // 与 rawRealPath（realpathSync 的结果）比前缀，managedRoot 自己也得是 realpath：macOS 的 /var → /private/var、
+    // 用户把 ~/.ownward 做成符号链接之类的情况下，resolve() 出来的路径永远 startsWith 不上，纳管过的会被判成 discovered
+    const managedRoot = ((path) => { try { return realpathSync(path); } catch { return path; } })(resolve(options.storeRoot || join(home, ".ownward", "skills"), "managed"));
     const ownership = root.protected ? "protected" : rawRealPath.startsWith(managedRoot + sep) ? "managed" : base.ownership;
-    return { ...base, ownership, nodeType, state: bounded ? "bounded" : malformed || !hasManifest ? "malformed" : external ? "external" : "healthy", readError: null };
+    const empty = nodeType === "directory" && base.files === 0 && base.nestedSkills === 0;
+    return { ...base, ownership, nodeType, state: bounded ? "bounded" : empty ? "empty" : malformed || !hasManifest ? "malformed" : external ? "external" : "healthy", readError: null };
   } catch (error) { return { ...base, nodeType: "missing", ownership: root.protected ? "protected" : "missing", state: "unreadable", readError: errorText(error, home), findings: [...base.findings, "broken"] }; }
 }
 
@@ -145,14 +157,26 @@ export function scanSkillsRaw(options: SkillScanOptions): RawSkillSnapshot {
   for (const group of groups.values()) {
     if (group.length < 2) continue;
     const digests = new Set(group.map((x) => x.targetTreeDigest || x.treeDigest)); const finding = digests.size === 1 ? "duplicate" : "conflict";
+    // 一份 managed skill 被链接到 claude / codex / codebuddy = 同一内容出现 3 次。这是纳管之后的
+    // 正确终态，不是待清理的重复：标成 duplicate 会让摘要喊「107 重复」、用户以为还有活干，
+    // 而规则和 Agent 对 managed 都无能为力（实撞 2026-09-02：整理完 0 条建议，摘要却挂着 107）。
+    // 只豁免「全员 managed 且指纹一致」；managed 里混着 discovered 副本仍算 duplicate（那些才是要纳管/删的）。
+    if (finding === "duplicate" && group.every((x) => x.ownership === "managed")) continue;
     for (const item of group) item.findings.push(finding);
   }
   if (budget.partial) warnings.push(`扫描不完整：已触发 ${[...budget.reasons].sort().join(", ")} 预算。`);
   observations.sort((a, b) => a.engine.localeCompare(b.engine) || a.displayPath.localeCompare(b.displayPath));
-  const revision = createHash("sha256").update(JSON.stringify(observations.map(({ id, nodeType, parentIdentity, entryIdentity, physicalIdentity, treeDigest, targetTreeDigest, linkTarget, state, findings }) => ({ id, nodeType, parentIdentity, entryIdentity, physicalIdentity, treeDigest, targetTreeDigest, linkTarget, state, findings })))).digest("hex");
+  const identity = (list: typeof observations) => createHash("sha256").update(JSON.stringify(list.map(({ id, nodeType, parentIdentity, entryIdentity, physicalIdentity, treeDigest, targetTreeDigest, linkTarget, state, findings }) => ({ id, nodeType, parentIdentity, entryIdentity, physicalIdentity, treeDigest, targetTreeDigest, linkTarget, state, findings })))).digest("hex");
+  const revision = identity(observations);
+  // 只读根（codex 的 .system、plugins/cache）由别的工具自己维护：codex 每启动一次就重刷一遍
+  // ~/.codex/skills/.system/**（实测 88 个文件），而 planner 明确拒绝把只读根当写入目标——
+  // 它们的变化对已批准的计划不可能有影响。所以另算一个只覆盖可写根的指纹，供审批门比对：
+  // 用全量 revision 当门，等于让无关工具的日常动作否决用户的人工批准（实撞 2026-09-01）。
+  const mutableRoots = new Set(roots.filter((root) => root.mutationCapability !== "read-only").map((root) => root.path));
+  const mutableRevision = identity(observations.filter((item) => mutableRoots.has(item.rawRoot)));
   const publicObservations: SkillObservation[] = observations.map(({ rawRoot: _rawRoot, rawEntryPath: _rawEntryPath, rawRealPath: _rawRealPath, rawLinkTarget: _rawLinkTarget, ...item }) => item);
   const inventory: SkillInventory = {
-    revision, scannedAt: new Date().toISOString(), roots: roots.map((r) => ({ ...r, path: redactHome(r.path, options.home) })), observations,
+    revision, mutableRevision, scannedAt: new Date().toISOString(), roots: roots.map((r) => ({ ...r, path: redactHome(r.path, options.home) })), observations,
     summary: { total: observations.length, duplicates: observations.filter((x) => x.findings.includes("duplicate")).length, conflicts: observations.filter((x) => x.findings.includes("conflict")).length, protected: observations.filter((x) => x.findings.includes("protected")).length, broken: observations.filter((x) => x.findings.includes("broken")).length },
     warnings, completeness: budget.partial ? "partial" : "complete", budget: { entries: budget.entries, files: budget.files, bytes: budget.bytes, elapsedMs: Date.now() - startedAt }, adapters: probeSkillAdapters(options), catalog: catalogFor(publicObservations),
   };

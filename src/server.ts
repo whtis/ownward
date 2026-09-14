@@ -11,7 +11,7 @@ import { queueSize } from "./spool.ts";
 import { isDevDomainRoute, reloadVertical, routeVerticals, verticalDiagnostics } from "./verticals.ts";
 import { runTriage } from "./triage.ts";
 import { OWNWARD_DIR, VAULT_ROOT } from "./paths.ts";
-import { DATA, ROOT, cfg, fmt, loadState, log, run } from "./util.ts";
+import { DATA, ROOT, cfg, expandHome, fmt, loadState, log, run } from "./util.ts";
 import { handleWorkbench } from "./workbench.ts";
 import { connectorSourceSnapshot } from "./connector-config.ts";
 import { routeSettings } from "./settings/routes.ts";
@@ -34,6 +34,18 @@ export function shouldBroadcastTaskUpdate(method: string, pathname: string, resp
   return method === "POST" && pathname === "/api/work" && response?.ok === true;
 }
 
+/** 派发默认值下发前把目录里的 `~` 展开成绝对路径。
+ *  config 里写 `~/workspace` 便于迁移，但 /api/projects 的候选全是 realpath 绝对路径：
+ *  网页目录框预填 `~/workspace` 后，datalist 按子串匹配一条都对不上，「最近目录」就像丢了；
+ *  安卓/iOS 的候选 chip 也是按字符串相等判选中。展开只发生在下发这一步，不改配置文件。 */
+export function dispatchDefaultsSnapshot(defaults: unknown): Record<string, unknown> {
+  if (!defaults || typeof defaults !== "object") return {};
+  const out = { ...(defaults as Record<string, unknown>) };
+  const dir = typeof out.dir === "string" ? out.dir.trim() : "";
+  if (dir) out.dir = expandHome(dir);
+  return out;
+}
+
 function stateSnapshot() {
   const s = loadState();
   return {
@@ -50,7 +62,7 @@ function stateSnapshot() {
     vaultRoot: VAULT_ROOT,   // 客户端剥 vault 相对路径用（别在客户端硬编码目录名）
     allowFullAccess: cfg.architecture?.allowFullAccess === true,
     // 派发弹窗的默认值（config: dispatch.defaults = {dir, provider, model, permission}）——前端不硬编码
-    dispatchDefaults: cfg.dispatch?.defaults && typeof cfg.dispatch.defaults === "object" ? cfg.dispatch.defaults : {},
+    dispatchDefaults: dispatchDefaultsSnapshot(cfg.dispatch?.defaults),
     // 任意 gmail*.json 即视为已配置（多账号）
     gmailConfigured: (() => {
       try {
@@ -179,11 +191,19 @@ export function browserControlSession(req: Request): string | null {
 }
 
 /** 人工审批能力只在实际 dashboard 页面会话的 same-origin fetch 中成立。 */
-export function isBrowserApprovalRequest(req: Request): boolean {
+/** 返回 null 表示可以审批；否则返回**具体**是哪一条没过。四个前提塌成一句
+ *  「只有经过同源验证的交互式设置页可以执行此操作」时，用户和排查者都无从下手。 */
+export function browserApprovalDenial(req: Request): string | null {
   const session = browserControlSession(req), origin = req.headers.get("origin"), fetchSite = req.headers.get("sec-fetch-site");
-  if (!session || !origin || fetchSite !== "same-origin") return false;
-  try { return new URL(origin).origin === new URL(req.url).origin; } catch { return false; }
+  if (!session) return "页面没有 ownward_ui_session cookie（请重新打开 dashboard 首页）";
+  if (!origin) return "请求缺少 Origin 头";
+  if (fetchSite !== "same-origin") return `Sec-Fetch-Site 是 ${fetchSite || "（缺失）"}，不是 same-origin`;
+  try {
+    const from = new URL(origin).origin, to = new URL(req.url).origin;
+    return from === to ? null : `页面来自 ${from}，daemon 看到的是 ${to}（换成同一个地址访问）`;
+  } catch { return "Origin 或请求 URL 无法解析"; }
 }
+export function isBrowserApprovalRequest(req: Request): boolean { return browserApprovalDenial(req) === null; }
 
 /** HTTP 同源只能证明请求来自 dashboard，不能证明人真的看过计划。macOS v1 再加一层
  * 系统模态确认；agent 分析进程没有这项 GUI capability。 */
@@ -368,7 +388,7 @@ export function startServer() {
       if (p === "/api/state") return json(stateSnapshot());
       const browserSessionId = browserControlSession(req) || "";
       const settingsResponse = await routeSettings(req, url, undefined, {
-        browserSession: { id: browserSessionId, interactive: isBrowserApprovalRequest(req) },
+        browserSession: { id: browserSessionId, interactive: isBrowserApprovalRequest(req), denial: browserApprovalDenial(req) },
         confirmUserPresence: () => confirmNativeUserPresence("settings"),
         runtimeBuildIdentity: process.env.OWNWARD_BUILD_IDENTITY || "dev",
         requestOrigin: req.headers.get("origin") || new URL(req.url).origin,
@@ -393,7 +413,7 @@ export function startServer() {
       });
       if (settingsResponse) return settingsResponse;
       const skillsResponse = await routeSkills(req, url, undefined, {
-        browserSession: { id: browserSessionId, interactive: isBrowserApprovalRequest(req) },
+        browserSession: { id: browserSessionId, interactive: isBrowserApprovalRequest(req), denial: browserApprovalDenial(req) },
         confirmUserPresence: () => confirmNativeUserPresence("skills"),
         approvals: controlPlaneApprovals,
       });

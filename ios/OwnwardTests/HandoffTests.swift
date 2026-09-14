@@ -43,14 +43,15 @@ struct HandoffTests {
 
     @Test func 会话能力精确匹配模型矩阵() {
         #expect(workCodexModelEfforts == [
-            "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
             "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
             "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
             "gpt-5.5": ["low", "medium", "high", "xhigh"],
-            "gpt-5.4": ["low", "medium", "high", "xhigh"],
+            "gpt-5.3-codex-spark": ["low", "medium", "high", "xhigh"],
         ])
         #expect(workProviderEfforts("claude", model: "sonnet") == ["low", "medium", "high", "xhigh", "max"])
-        #expect(workProviderEfforts("codebuddy", model: "hy3") == workProviderEfforts("claude", model: "sonnet"))
+        #expect(workProviderEfforts("codebuddy", model: "hy3") == ["minimal"] + workProviderEfforts("claude", model: "sonnet"))
         #expect(workProviderEfforts("codex", model: "gpt-5.5-pro").isEmpty)
         #expect(workProviderDefaultModel("codex") == "gpt-5.6-sol")
         #expect(workProviderHandoffModel("codex") == "gpt-5.6-sol")
@@ -58,12 +59,12 @@ struct HandoffTests {
 
     @Test func 服务端默认模型表只有sol时_仍补齐所有任务模型() {
         #expect(workProviderModels("codex", providers: ["codex": ["gpt-5.6-sol"]]) == [
-            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4",
+            "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark",
         ])
     }
 
     @Test func 模型变化选择受支持默认值_旧非法组合不能提交() {
-        #expect(workProviderDefaultEffort("codex", model: "gpt-5.4") == "medium")
+        #expect(workProviderDefaultEffort("codex", model: "gpt-5.3-codex-spark") == "medium")
         #expect(workProviderSelectionIsValid("codex", model: "gpt-5.6-sol", effort: "ultra"))
         #expect(!workProviderSelectionIsValid("codex", model: "gpt-5.6-luna", effort: "ultra"))
         #expect(!workProviderSelectionIsValid("codex", model: "gpt-5.5-pro", effort: "xhigh"))
@@ -110,5 +111,30 @@ struct HandoffTests {
         #expect(decoded.model == "gpt-5.6-sol")
         #expect(decoded.effort == "xhigh")
         #expect(agentProvider(try state(#"{"backend":"claude"}"#)) == "claude")
+    }
+}
+
+// 额度胶囊（对齐 web/tasks.js usagePillHtml、android ui/UsageLabelTest.kt）：标签格式、距重置时间、变色阈值
+struct UsageLabelTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)   // 2027-01-15T08:00:00Z
+    private func usage(_ json: String) throws -> ProvidersUsage {
+        try JSONDecoder().decode(ProvidersUsage.self, from: Data(json.utf8))
+    }
+
+    @Test func 按引擎取对应家的窗口并带距重置时间() throws {
+        let u = try usage(#"{"ok":true,"claude":{"windows":[{"label":"5h","seconds":18000,"percent":46.4,"resetsAt":"2027-01-15T11:10:00.000Z"},{"label":"周","seconds":604800,"percent":42,"resetsAt":"2027-01-17T10:00:00+00:00"}]},"codex":{"windows":[{"label":"周","seconds":604800,"percent":91}],"plan":"pro"}}"#)
+        #expect(usageLabel(u.usage(for: "claude"), now: now) == "额度 5h 46%(3h10m) · 周 42%(2d2h)")
+        #expect(usageLabel(u.usage(for: "codex"), now: now) == "额度 周 91%")
+        #expect(usageLabel(u.usage(for: "codebuddy"), now: now) == nil)
+        #expect(usageSeverity(u.usage(for: "codex")) == 2)
+        #expect(usageSeverity(u.usage(for: "claude")) == 0)
+    }
+
+    @Test func 过期或坏掉的重置时间不画括号() throws {
+        #expect(usageEta("not-a-date", now: now) == "")
+        #expect(usageEta("2027-01-15T07:59:00Z", now: now) == "")
+        #expect(usageEta("2027-01-15T08:45:00Z", now: now) == "45m")
+        #expect(usageLabel(nil, now: now) == nil)
+        #expect(usageLabel(try usage(#"{"claude":{"windows":[]}}"#).claude, now: now) == nil)
     }
 }

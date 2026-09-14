@@ -125,6 +125,69 @@ interface Loaded {
   routeGrants?: { timeoutMs: number; maxBodyBytes: number; binary: boolean; frameMaxBytes: number };
 }
 
+/** A request body exceeded the grant while it was being consumed. */
+class RouteBodyTooLarge extends Error {
+  readonly code = "EXTENSION_REQUEST_TOO_LARGE";
+  constructor() {
+    super("request too large");
+    this.name = "RouteBodyTooLarge";
+  }
+}
+
+/**
+ * Consume an external route body without ever retaining more than the granted
+ * number of bytes.  Content-Length is checked by the caller before this runs;
+ * this path is still required for chunked/no-length requests and for a sender
+ * whose declared length does not match the bytes it actually sends.
+ */
+async function readBoundedRequestBody(
+  request: Request,
+  maxBytes: number,
+): Promise<Buffer> {
+  const body = request.body;
+  if (!body) return Buffer.alloc(0);
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      const value = next.value;
+      const chunkSize = value?.byteLength ?? 0;
+      size += chunkSize;
+      if (size > maxBytes) {
+        // Do not await cancellation: a custom/malicious stream must not be
+        // able to hold the route open after the hard limit was observed.
+        try {
+          void reader.cancel().catch(() => {});
+        } catch {
+          // The body is already over the limit; cancellation is best effort.
+        }
+        throw new RouteBodyTooLarge();
+      }
+      if (chunkSize) chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A body implementation may release its own reader during cancellation.
+    }
+  }
+  return Buffer.concat(chunks, size);
+}
+
+/** Only these browser-controlled headers cross the external Host boundary. */
+function externalRouteHeaders(request: Request): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const name of ["accept", "content-type", "idempotency-key"]) {
+    const value = request.headers.get(name);
+    if (value !== null) headers[name] = value;
+  }
+  return headers;
+}
+
 function strictObject(value: unknown, label: string): Record<string, any> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new ExtensionPolicyError(
@@ -1030,20 +1093,21 @@ export class ExtensionRuntime {
           return new Response("invalid content-length", { status: 400 });
         if (declaredHeader !== null && Number(declaredHeader) > grants.maxBodyBytes)
           return new Response("request too large", { status: 413 });
-        const bytes = Buffer.from(await req.arrayBuffer());
-        if (bytes.length > grants.maxBodyBytes)
-          return new Response("request too large", { status: 413 });
+        let bytes: Buffer;
+        try {
+          bytes = await readBoundedRequestBody(req, grants.maxBodyBytes);
+        } catch (error) {
+          if (error instanceof RouteBodyTooLarge)
+            return new Response("request too large", { status: 413 });
+          throw error;
+        }
         try {
           const result = await item.host.request(
             "route",
             {
               method: req.method,
               url: url.toString(),
-              headers: Object.fromEntries(
-                [...req.headers].filter(([k]) =>
-                  ["accept", "content-type"].includes(k.toLowerCase()),
-                ),
-              ),
+              headers: externalRouteHeaders(req),
               body: bytes.toString("base64"),
               timeoutMs: grants.timeoutMs,
               maxResponseBytes: grants.maxBodyBytes,

@@ -24,7 +24,7 @@ export interface RunnerEnvelope {
 }
 
 export type RunnerSubmitBody = {
-  commandId: string; kind: "start-run" | "resume-run" | "send-input" | "add-dir" | "set-access" | "new-session"; runId: string; sessionId: string; providerId: string; input: string;
+  commandId: string; kind: "start-run" | "resume-run" | "send-input" | "add-dir" | "set-access" | "set-options" | "new-session"; runId: string; sessionId: string; providerId: string; input: string;
 };
 export type RunnerInterruptBody = { commandId: string; runId: string; sessionId: string; providerId: string };
 export type RunnerApprovalBody = RunnerInterruptBody & { approvalRequestId: string; input: string };
@@ -67,7 +67,7 @@ export function parseRunnerRequestBody(envelope: RunnerEnvelope): RunnerRequestB
   for (const key of ["runId", "sessionId", "providerId"]) requiredId(body, key);
   if (kind === "interrupt") return structuredClone(body) as RunnerInterruptBody;
   if (kind === "approval-response") { requiredId(body, "approvalRequestId"); requiredText(body, "input"); return structuredClone(body) as RunnerApprovalBody; }
-  if (!["start-run", "resume-run", "send-input", "add-dir", "set-access", "new-session"].includes(String(body.kind))) throw new Error("Runner submit command kind 非法");
+  if (!["start-run", "resume-run", "send-input", "add-dir", "set-access", "set-options", "new-session"].includes(String(body.kind))) throw new Error("Runner submit command kind 非法");
   requiredText(body, "input");
   return structuredClone(body) as RunnerSubmitBody;
 }

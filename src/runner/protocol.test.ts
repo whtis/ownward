@@ -38,7 +38,7 @@ describe("Runner protocol", () => {
     expect(() => parseRunnerRequestBody({ ...envelope(), kind: "submit", body: { commandId: "c", kind: "shell", runId: "r", sessionId: "s", providerId: "fake", input: "x" } })).toThrow("kind");
     let oversized: unknown; try { parseRunnerRequestBody({ ...envelope(), kind: "submit", body: { commandId: "c", kind: "start-run", runId: "r", sessionId: "s", providerId: "fake", input: "x".repeat(RUNNER_MAX_INLINE_INPUT_BYTES + 1) } }); } catch (error) { oversized = error; }
     expect(oversized).toMatchObject({ code: "RUNNER_INPUT_TOO_LARGE" });
-    for (const kind of ["start-run", "resume-run", "send-input", "add-dir", "set-access", "new-session"] as const) {
+    for (const kind of ["start-run", "resume-run", "send-input", "add-dir", "set-access", "set-options", "new-session"] as const) {
       expect(parseRunnerRequestBody({ ...envelope(), kind: "submit", body: { commandId: `c-${kind}`, kind, runId: "r", sessionId: "s", providerId: "claude", input: "{}" } })).toMatchObject({ kind });
     }
   });

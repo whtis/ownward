@@ -51,6 +51,7 @@ export interface AgentState {
   model?: string;         // 当前模型（P1-5）
   commands?: string[];    // provider 回报的命令补全
   ctxTokens?: number;     // 当前上下文占用
+  ctxWindow?: number;     // 上下文窗口大小（provider 回报；缺省时客户端按模型估算）
   lastActivityAt?: number;
   fullAccess?: boolean;   // 仅支持热切换访问级别的 provider 返回
 }

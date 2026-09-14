@@ -47,12 +47,12 @@ describe("generic external Vertical navigation UI", () => {
     const { api, desktop, mobile } = harness(pendingFetch);
     const label = '<img src=x onerror="globalThis.pwned=1">';
     const items = api.normalizeNavigation([
-      { verticalId: "content-studio", id: "content-studio", label, href: "/verticals/content-studio/index.html", state: "ready" },
+      { verticalId: "sample-vertical", id: "sample-vertical", label, href: "/verticals/sample-vertical/index.html", state: "ready" },
     ]);
     api.renderNavigation(items);
     for (const container of [desktop, mobile]) {
       expect(container.children).toHaveLength(1);
-      expect(container.children[0]).toMatchObject({ tagName: "a", textContent: label, href: "/verticals/content-studio/index.html" });
+      expect(container.children[0]).toMatchObject({ tagName: "a", textContent: label, href: "/verticals/sample-vertical/index.html" });
       expect(container.children[0]?.attributes["aria-label"]).toBe(label);
     }
     expect(source).toContain('document.createElement("a")');
@@ -62,14 +62,14 @@ describe("generic external Vertical navigation UI", () => {
 
   test("client validation rejects malicious hrefs/states and removes duplicate ids or hrefs", () => {
     const { api } = harness(pendingFetch);
-    const good = { verticalId: "content-studio", id: "content-studio", label: "内容工作室", href: "/verticals/content-studio/index.html", state: "degraded" };
+    const good = { verticalId: "sample-vertical", id: "sample-vertical", label: "示例扩展", href: "/verticals/sample-vertical/index.html", state: "degraded" };
     expect(api.normalizeNavigation([
       good,
       { ...good, label: "duplicate" },
       { ...good, id: "other", label: "same href" },
       { ...good, id: "cross", href: "/verticals/other/index.html" },
-      { ...good, id: "traversal", href: "/verticals/content-studio/../secret" },
-      { ...good, id: "encoded", href: "/verticals/content-studio/%2e%2e/secret" },
+      { ...good, id: "traversal", href: "/verticals/sample-vertical/../secret" },
+      { ...good, id: "encoded", href: "/verticals/sample-vertical/%2e%2e/secret" },
       { ...good, id: "failed", state: "failed" },
     ])).toEqual([good]);
   });
@@ -86,13 +86,13 @@ describe("generic external Vertical navigation UI", () => {
 
   test("successful API data appears once in both desktop and mobile entry points", async () => {
     const navigation = [
-      { verticalId: "content-studio", id: "content-studio", label: "内容工作室", href: "/verticals/content-studio/index.html", state: "ready" },
-      { verticalId: "content-studio", id: "content-studio", label: "重复", href: "/verticals/content-studio/other.html", state: "ready" },
+      { verticalId: "sample-vertical", id: "sample-vertical", label: "示例扩展", href: "/verticals/sample-vertical/index.html", state: "ready" },
+      { verticalId: "sample-vertical", id: "sample-vertical", label: "重复", href: "/verticals/sample-vertical/other.html", state: "ready" },
     ];
     const shell = harness(async () => ({ ok: true, json: async () => ({ navigation }) }));
     await shell.api.loadNavigation();
-    expect(shell.desktop.children.map((entry) => entry.textContent)).toEqual(["内容工作室"]);
-    expect(shell.mobile.children.map((entry) => entry.textContent)).toEqual(["内容工作室"]);
+    expect(shell.desktop.children.map((entry) => entry.textContent)).toEqual(["示例扩展"]);
+    expect(shell.mobile.children.map((entry) => entry.textContent)).toEqual(["示例扩展"]);
   });
 
   test("the shell loads dedicated assets and gives mobile navigation its own responsive surface", () => {
@@ -105,3 +105,30 @@ describe("generic external Vertical navigation UI", () => {
     expect(css).toContain(".topbar-menu a.mobile-menu-item { display: flex; }");
   });
 });
+
+// 扩展的启停在 config 里、要重启 daemon 才生效。入口只在首屏拉一次的话，关掉的扩展会一直
+// 挂在导航上直到用户手动刷新（点进去 404）——「界面显示一个已经不存在的东西」同样是假成功。
+describe("扩展入口跟着扩展的启停走", () => {
+  const app = readFileSync(join(import.meta.dir, "..", "web", "app.js"), "utf8");
+
+  test("SSE 重连时重拉入口（daemon 重启必然重连，启停正是那时生效）", () => {
+    const open = app.slice(app.indexOf('es.addEventListener("open"'), app.indexOf('es.addEventListener("state"'));
+    expect(open).toContain("VerticalNav?.loadNavigation?.()");
+  });
+
+  test("回到前台也补拉一次", () => {
+    expect(source).toContain("visibilitychange");
+  });
+
+  test("模块把 api 挂到 window 上，宿主才叫得动它", () => {
+    const win: any = {};
+    Function("document", "fetch", "location", "window", `return ${source}`)(
+      { getElementById: () => null, createElement: (tag: string) => new FakeElement(tag) },
+      () => new Promise<never>(() => {}),
+      { origin: "http://ownward.local" },
+      win,
+    );
+    expect(typeof win.VerticalNav?.loadNavigation).toBe("function");
+  });
+});
+

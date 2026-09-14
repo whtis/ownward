@@ -33,7 +33,7 @@ describe("Claude Code Runner Provider contract", () => {
     const provider = new ClaudeCodeRunnerProvider(command, { ...process.env, HOME: home }); providers.push(provider); expect(await provider.readHistory({ nativeRef: "native-history" })).toEqual([{ role: "user", text: "question", ts: "2026-08-01T00:00:00Z" }, { role: "assistant", text: "answer", ts: "2026-08-01T00:00:01Z" }]); expect((await provider.readHistory({ nativeRef: "missing" }))[0]).toMatchObject({ role: "system", name: "history" });
   });
   test("声明阶段 2 capability，参数只由 Kernel grant 映射", () => {
-    expect([...CLAUDE_PROVIDER_CAPABILITIES]).toEqual(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "new-session", "model", "effort"]);
+    expect([...CLAUDE_PROVIDER_CAPABILITIES]).toEqual(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort"]);
     expect(buildClaudeProviderArgs(["claude"], { access: "standard", extraDirs: ["/a"] }, "native")).toContain("--permission-prompt-tool");
     expect(buildClaudeProviderArgs(["claude"], { access: "bypass", extraDirs: [] })).toContain("--dangerously-skip-permissions");
   });
@@ -44,7 +44,9 @@ describe("Claude Code Runner Provider contract", () => {
     expect(buildClaudeProviderArgs(["claude"], parsed)).toEqual(expect.arrayContaining(["--model", "claude-sonnet-4.5", "--effort", "high"]));
     for (const bad of ["", "--opus", "opus latest", "opus\0"]) expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], model: bad })).toThrow("model 非法");
     for (const effort of CLAUDE_EFFORTS) expect(parseClaudeOptions({ access: "standard", extraDirs: [], effort })).toMatchObject({ effort });
-    for (const bad of ["", "minimal", "ultra", "HIGH", "high --resume bad"]) expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], effort: bad })).toThrow("effort 非法");
+    for (const bad of ["", "ultra", "HIGH", "high --resume bad"]) expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], effort: bad })).toThrow("effort 非法");
+    // minimal 是 codebuddy 独有档位：协议层放行（同一套 protocol 两家共用），真 claude 由 adapter 按 providerId 拒
+    expect(parseClaudeOptions({ access: "standard", extraDirs: [], effort: "minimal" }).effort).toBe("minimal");
     expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], temperature: 1 })).toThrow("options 含未知字段");
   });
   test("explicit effort either reaches argv or fails before spawn when unsupported/probe-failed",async()=>{for(const mode of["supported","unsupported","probe-failed"] as const){const spawnRecord=join(root(),`${mode}.jsonl`),{data,server,client,provider}=await fixture({}, {}, {FAKE_CLAUDE_EFFORT:mode==="unsupported"?"0":"1",FAKE_CLAUDE_HELP_DELAY_MS:"40",FAKE_CLAUDE_HELP_FAIL:mode==="probe-failed"?"1":"0",FAKE_CLAUDE_SPAWN_RECORD:spawnRecord});try{await Promise.all([client.request("submit",startBody(`effort-first-${mode}`,"capability")),client.request("submit",startBody(`effort-concurrent-${mode}`,"capability-2"))]);const first=await waitTerminal(client,`effort-first-${mode}`),second=await waitTerminal(client,`effort-concurrent-${mode}`);if(mode==="supported"){expect(JSON.stringify(payloads(data,first))).toContain("--effort|high");expect(JSON.stringify(payloads(data,second))).toContain("--effort|high");expect(readFileSync(spawnRecord,"utf8").trim().split("\n")).toHaveLength(2);}else{for(const events of[first,second]){expect(events.at(-1)).toMatchObject({type:"failed",reason:"unsupported_command"});expect(events.some(event=>event.type==="started"||event.type==="session-updated")).toBeFalse();}expect(() => readFileSync(spawnRecord,"utf8")).toThrow();}expect(provider.metrics.effortProbePending).toBeGreaterThan(0);expect(provider.metrics.effortUnsupported).toBe(mode==="supported"?0:2);expect(provider.metrics.effortProbeFailures).toBe(mode==="probe-failed"?1:0);}finally{client.close();server.stop();}}});
@@ -57,6 +59,10 @@ describe("Claude Code Runner Provider contract", () => {
       expect(events.map((event) => event.type)).toEqual(["dispatching", "started", "session-updated", "delta", "message-completed", "usage", "usage", "completed"]);
       expect(events.find((event) => event.type === "session-updated")?.nativeRef).toBe("native-claude-1");
       expect(JSON.stringify(events)).not.toContain("reply:hello"); expect(payloads(data, events).some((value) => value.text?.includes("reply:hello") && value.text?.includes("envleak:none"))).toBe(true);
+      // ctx 窗口：request 级 usage 只有占用；turn 级从 result.modelUsage 取各模型最大 contextWindow（主循环 1M > 子代理 200k）
+      const usages = payloads(data, events).filter((value) => typeof value.scope === "string");
+      expect(usages.find((value) => value.scope === "request")).not.toHaveProperty("contextWindow");
+      expect(usages.find((value) => value.scope === "turn")).toMatchObject({ contextWindow: 1_000_000 });
     } finally { client.close(); server.stop(); }
   });
 
@@ -107,6 +113,33 @@ describe("Claude Code Runner Provider contract", () => {
       let events = await waitTerminal(client, "resume"), values = payloads(data, events); expect(JSON.stringify(values)).toContain("--resume|native-claude-1"); expect(JSON.stringify(values)).toContain("--add-dir|/extra"); expect(JSON.stringify(values)).toContain("--dangerously-skip-permissions");
       await client.request("submit", { commandId: "new", kind: "new-session", runId: "run-new", sessionId: "shared", providerId: "claude", input: "{}" }); await waitTerminal(client, "new");
       await client.request("submit", { commandId: "fresh", kind: "send-input", runId: "run-fresh", sessionId: "shared", providerId: "claude", input: JSON.stringify({ text: "three", images: [] }) }); events = await waitTerminal(client, "fresh"); values = payloads(data, events); expect(JSON.stringify(values)).not.toContain("--resume|native-claude-1");
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("claude 不认 codebuddy 独有的 minimal：start 与 set-options 都在 started 前按 providerId 拒绝", async () => {
+    const { server, client } = await fixture(); try {
+      const body: any = startBody("min", "one", "min-session"); body.input = JSON.stringify({ text: "one", cwd: tmpdir(), images: [], options: { ...options, effort: "minimal" } });
+      await client.request("submit", body); const events = await waitTerminal(client, "min"); expect(events.at(-1)).toMatchObject({ type: "failed", reason: "provider_input_invalid" });
+      await client.request("submit", startBody("base", "one", "shared")); await waitTerminal(client, "base");
+      await client.request("submit", { commandId: "min-opts", kind: "set-options", runId: "run-min-opts", sessionId: "shared", providerId: "claude", input: JSON.stringify({ effort: "minimal" }) });
+      const rejected = await waitTerminal(client, "min-opts"); expect(rejected.at(-1)).toMatchObject({ type: "failed", reason: "provider_input_invalid" }); expect(rejected.some((e) => e.type === "started")).toBe(false);
+    } finally { client.close(); server.stop(); }
+  });
+  test("set-options 就地换模型/思考深度：下一轮仍 --resume 同一会话且带新参数；非法档位在 started 前拒绝；无内存态直接 completed", async () => {
+    const { data, server, client } = await fixture(); try {
+      await client.request("submit", startBody("base", "one", "shared")); await waitTerminal(client, "base");
+      await client.request("submit", { commandId: "opts", kind: "set-options", runId: "run-opts", sessionId: "shared", providerId: "claude", input: JSON.stringify({ model: "opus", effort: "high" }) });
+      expect((await waitTerminal(client, "opts")).at(-1)).toMatchObject({ type: "completed" });
+      await client.request("submit", { commandId: "after", kind: "send-input", runId: "run-after", sessionId: "shared", providerId: "claude", input: JSON.stringify({ text: "two", images: [] }) });
+      const values = JSON.stringify(payloads(data, await waitTerminal(client, "after")));
+      expect(values).toContain("--resume|native-claude-1"); expect(values).toContain("--model|opus"); expect(values).toContain("--effort|high");
+      // 之后 Kernel 带着新 options 的恢复快照来 resume，身份比对必须通过（键序已按 protocol 重建）
+      await client.request("submit", { commandId: "recover", kind: "send-input", runId: "run-recover", sessionId: "shared", providerId: "claude", input: JSON.stringify({ text: "three", images: [], cwd: tmpdir(), options: { access: "standard", extraDirs: [], model: "opus", effort: "high" }, nativeRef: "native-claude-1" }) });
+      expect((await waitTerminal(client, "recover")).at(-1)).toMatchObject({ type: "completed" });
+      await client.request("submit", { commandId: "bad", kind: "set-options", runId: "run-bad", sessionId: "shared", providerId: "claude", input: JSON.stringify({ effort: "ultra" }) });
+      const bad = await waitTerminal(client, "bad"); expect(bad.at(-1)).toMatchObject({ type: "failed", reason: "provider_input_invalid" }); expect(bad.some((e) => e.type === "started")).toBe(false);
+      await client.request("submit", { commandId: "ghost", kind: "set-options", runId: "run-ghost", sessionId: "never-started", providerId: "claude", input: JSON.stringify({ model: "sonnet" }) });
+      expect((await waitTerminal(client, "ghost")).at(-1)).toMatchObject({ type: "completed" });
     } finally { client.close(); server.stop(); }
   });
 
@@ -291,6 +324,28 @@ describe("Claude Code Runner Provider contract", () => {
       expect(events.at(-1)).toMatchObject({ type: "completed" });
       expect(provider.metrics.droppedFrames).toBeGreaterThan(0);                     // 伪 turn 的 result 是可观测地丢的
     } finally { client.close(); server.stop(); }
+  });
+
+  test("partial 帧按 reason 分类、计数不漏、日志按里程碑采样", async () => {
+    // 2026-09-09：--include-partial-messages 的非 text_delta 帧全落到 unsupported-frame，
+    // 每帧一行 → runner.log 一天 7 万行（且当时无轮转）。丢弃仍必须可观测（SELF.md 规则 9），
+    // 但可观测 ≠ 每帧一行：真正值钱的「没见过的帧」信号被这堆预期内的噪音淹掉了。
+    const lines: string[] = [], realError = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      const { server, client, provider } = await fixture(); try {
+        const before = provider.metrics.droppedFrames;
+        await client.request("submit", startBody("partial", "PARTIAL_FRAMES", "partial-session"));
+        expect((await waitTerminal(client, "partial")).at(-1)).toMatchObject({ type: "completed" });
+        expect(provider.metrics.droppedFrames - before).toBe(26);                    // 26 帧一帧不少地进了计数器
+        const dropped = lines.filter((line) => line.includes("claude-frame-dropped"));
+        const byReason = (reason: string) => dropped.filter((line) => line.includes(`reason=${reason} `));
+        expect(byReason("stream_event:content_block_delta")).toHaveLength(2);        // 25 帧只落里程碑 1、10 两行
+        expect(byReason("stream_event:message_stop")).toHaveLength(1);               // 不同 reason 各自分桶
+        expect(dropped.every((line) => !line.includes("unsupported-frame"))).toBe(true);
+        expect(dropped.at(-1)).toContain("seen=");                                   // 行里带累计数，量级不丢
+      } finally { client.close(); server.stop(); }
+    } finally { console.error = realError; }
   });
 
   test("stderr 仅保留有界 ring 并作为 notice blob，不进入 terminal/journal 明文", async () => {

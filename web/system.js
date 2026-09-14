@@ -12,7 +12,7 @@ TABS.system = {
           <div class="panel">
             <div class="rail-section"><h3>事件源</h3><div id="sy-health"></div></div>
             <div class="rail-section"><h3>节奏</h3><div id="sy-rhythm"></div></div>
-            <div class="rail-section"><h3>Claude 订阅</h3><div id="sy-usage" class="kv"><span>加载中…</span></div></div>
+            <div class="rail-section"><h3>订阅额度</h3><div id="sy-usage" class="kv"><span>加载中…</span></div></div>
             <div class="rail-section rail-actions" style="display:flex;flex-direction:column;gap:6px">
               <h3>快捷动作</h3>
               <button class="button ghost" data-action="heartbeat" style="justify-content:flex-start">立即心跳</button>
@@ -115,19 +115,20 @@ async function loadSystem() {
   renderSysState();
   loadLog();
   const [usage, schedules, rules, stock, verticals] = await Promise.all([
-    getJSON("/api/claude-usage").catch(() => null),
+    getJSON("/api/usage").catch(() => null),
     getJSON("/api/schedules").catch(() => null),
     getJSON("/api/approvals").catch(() => null),
     getJSON("/api/stock/watchlist").catch(() => null),
     getJSON("/api/system/verticals").catch(() => null),
   ]);
   renderVerticals(verticals);
-  const u = usage?.usage;
-  // 额度 70%/90% 变色（主仓 SwiftUI 的 usageColor 语义）：接近额度顶要肉眼可见
+  // 额度 70%/90% 变色（主仓 SwiftUI 的 usageColor 语义）：接近额度顶要肉眼可见。
+  // 两家各一行：窗口按各家实际返回画（Codex Pro 只有周窗口），拿不到的那家如实说
   const pctHtml = (v) => { const n = Number(v); return `<b${n >= 90 ? ` style="color:var(--danger)"` : n >= 70 ? ` style="color:var(--warning)"` : ""}>${Number.isFinite(n) ? n : "?"}%</b>`; };
-  $("#sy-usage").innerHTML = u
-    ? `<span>5h 窗口 ${pctHtml(u.fiveHourPercent)}${u.weeklyPercent != null ? ` · 周 ${pctHtml(u.weeklyPercent)}` : ""}</span>`
-    : `<span style="color:var(--text-tertiary)">拿不到额度数据</span>`;
+  const usageLine = (name, u) => `<span><b>${name}</b> ${u?.windows?.length
+    ? u.windows.map((w) => `${esc(w.label)} ${pctHtml(w.percent)}`).join(" · ")
+    : `<span style="color:var(--text-tertiary)">拿不到额度数据</span>`}</span>`;
+  $("#sy-usage").innerHTML = usageLine("Claude", usage?.claude) + usageLine("Codex", usage?.codex);
   renderSchedules(schedules);
   renderStockPanel(stock);
   $("#sy-approvals").innerHTML = rules === null ? stateBox("批准规则暂时无法载入", "error") : rules.length ? rules.map((r) => `

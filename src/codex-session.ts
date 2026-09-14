@@ -268,64 +268,6 @@ export function setCodexControl(taskId: string, control: AgentControl) {
   persistMeta(s);
 }
 
-/** codex-bg 派发首轮：managed 子进程（非 nohup——nohup 组会被 daemon 重启连坐杀掉且不留退出标记，
- *  任务永远挂 running）。事件流与追问同一套解析；thread.started 捕获 rolloutId 落盘供续聊；
- *  退出时写 OWNWARD_EXIT 标记接既有 reap（状态翻转/通知/收割/飞行记录）。 */
-export function startCodexTask(taskId: string, cwd: string, task: string, logFile: string, images: DevImage[] = [], model?: string, fullAccess = false): number {
-  assertLegacyWriteAllowed(taskId);
-  const s: CodexTakeover = {
-    taskId, cwd, home: "codex", rolloutId: "", turn: "running", proc: null, logFile,
-    messages: [{ role: "user", text: images.length ? `📎×${images.length} ${task}` : task, ts: now() }], control: "ownward",
-    queued: [], plan: [], tokens: {}, lastActivityAt: Date.now(), cfgModel: model, model, fullAccess,
-  };
-  sessions.set(taskId, s);
-  captureTurnHead(s);
-  // 图片经临时文件 + --image=（用 = 连写：-i 是贪婪多值参数，空格分隔会把后面的 prompt 吞成图片路径）
-  const imgFiles = writeImageFiles(taskId, images);
-  s.activeRun = acceptCodexProviderRun(s);
-  let proc: ReturnType<typeof Bun.spawn>;
-  try {
-    proc = dispatchCodexProviderProcess(s.activeRun, () => Bun.spawn(
-      ["codex", "exec", "--full-auto", "--json", "--skip-git-repo-check",
-        ...(model ? ["-m", model] : []), ...sandboxArgs(s), ...writableRootArgs(s), ...imgFiles.map((f) => `--image=${f}`), task],
-      { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" },
-    ), s.runSidecarDeps);
-  } catch (error) { diagnoseUnstartedRunSidecar(s.activeRun, error, s.runSidecarDeps); cleanupImageFiles(imgFiles); throw error; }
-  s.proc = proc;
-  s.killReason = undefined;
-  touch(s);
-  armWatchdog(s, proc);
-  readLoop(s, proc).catch((e) => log(`codex task [${taskId}] read error: ${e}`));
-  drainStderr(proc, logFile);   // codex 的 ERROR/警告走 stderr：留档 + 防管道缓冲区塞死
-  proc.exited.then((code) => {
-    cleanupImageFiles(imgFiles);
-    if (s.proc !== proc) return;
-    s.proc = null;
-    clearInterval(s.watchdog);
-    touch(s);
-    finishCodexProviderExit(s, code);
-    if (s.turn === "running") {
-      s.turn = "idle";
-      if (code !== 0) pushMsg(s, { role: "system", text: `codex 进程退出 (code ${code})`, ts: now() });
-    }
-    emitTurnChanges(s);
-    // 首轮完成走 OWNWARD_EXIT + reap（通知/收割一次，与 claude 引擎首轮对称）
-    try { appendFileSync(logFile, `\nOWNWARD_EXIT:${code}\n`); } catch { /* 日志写不进不阻塞 */ }
-    s.firstTurnDone = true;
-    refreshFlightRecord(taskId);
-    if (s.queued.length && s.control === "ownward") {
-      const batch = s.queued;
-      const merged = mergeQueued(batch);
-      s.queued = [];
-      if (merged.text.trim() || merged.images.length) {
-        // 续发失败原样放回队列（对齐 kernel flushQueue）：清空要在确认发出之后，否则抛异常就把用户消息吞了
-        try { codexFollowUp(taskId, merged.text, merged.images); } catch (e) { s.queued = batch.concat(s.queued); log(`codex task [${taskId}] flush queue failed: ${e}`); }
-      }
-    }
-  });
-  return proc.pid;
-}
-
 /** 排空 stderr：codex 往 stderr 写日志，不读会塞满管道缓冲区把进程卡死；顺手留档 */
 function drainStderr(proc: ReturnType<typeof Bun.spawn>, logFile?: string) {
   new Response(proc.stderr as ReadableStream).text().then((text) => {

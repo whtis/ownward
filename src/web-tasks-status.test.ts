@@ -42,11 +42,12 @@ describe("task session status badges", () => {
     expect(sessionState("cc", { active: true }).key).toBe("running");
   });
 
-  test("recent snapshots refresh on the detail cadence with a re-entry guard", () => {
+  test("recent snapshots stay on the slow auxiliary cadence", () => {
     const timer = source.slice(source.indexOf("Tasks.timer = setInterval"), source.indexOf("hide() { clearInterval"));
-    expect(timer).toContain("refreshRecentSessions();");
+    expect(timer).not.toContain("refreshRecentSessions();");
     expect(timer).toContain("}, 2500)");
-    expect(source).toContain("if (Tasks.recentBusy) return;");
+    expect(timer).toContain("if (++Tasks.auxTick % 24 === 0) loadTasksAux().then(renderTaskList)");
+    expect(source).toContain('getJSON("/api/dev/recent")');
   });
 });
 

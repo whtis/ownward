@@ -29,11 +29,15 @@ describe("multi-directory UI contract", () => {
     expect(html).toContain('id="add-dir-status"');
   });
 
-  test("session detail renders canonical main and additional directory chips with full-path titles", () => {
-    expect(tasks).toContain('aria-label="当前会话目录"');
-    expect(tasks).toContain('title="${esc(dev.cwd)}"');
-    expect(tasks).toContain('(dev.extraDirs || []).map');
-    expect(tasks).toContain('<span class="title">${esc(t.project)}</span>${pills}${dirs}');
-    expect(tasks).not.toContain('</div>${dirs}` + repoPanelHtml(t)');
+  // 目录从头部挪到输入框下面的信息条：只显主目录末段 + 附加数量，完整路径进 title——
+  // 头部一行横着摆十来个徽标（额度/分支/token/ctx/模型/深度/目录）谁也读不清
+  test("session meta bar renders the main directory with a full-path title and an extra-dir count", () => {
+    expect(tasks).toContain('<div class="session-meta" aria-label="会话状态">');
+    expect(tasks).toContain('`主目录 ${dev.cwd}`');
+    expect(tasks).toContain('extraDirs.map((d) => `附加 ${d}`)');
+    expect(tasks).toContain('${extraDirs.length ? ` +${extraDirs.length}` : ""}');
+    expect(tasks).toContain('onclick="devAddDir(\'${jsq(t.id)}\')">＋目录</button>');
+    expect(tasks).toContain('<span class="title">${esc(t.project)}</span>${pills}');
+    expect(tasks).not.toContain('${pills}${dirs}');
   });
 });

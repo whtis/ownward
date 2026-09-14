@@ -37,13 +37,29 @@ TRANSACTION=1;mv -f "$TMP_PLIST" "$PLIST";chmod 600 "$PLIST";launchctl bootout "
 # provider 只比身份字段（id/version/capabilities）：lastSuccessAt/metrics/activeDepth 是流量易变字段——
 # daemon 启动的 resumePending 会在观察窗内合法重放未终态命令（at-least-once 设计），拿易变字段全等比较
 # 会把自己的恢复动作误判成漂移，形成「有悬置命令→部署必回滚」死循环（2026-08-20 连炸两次的教训）
+# 观察窗只该抓「daemon 崩溃循环 / 身份漂移」，不该要求连续 120 次亚秒响应：真实机器上 daemon 会因为
+# 主线程同步读大文件（runner/events.jsonl 已 6.4MB、transcript 扫描）周期性卡几秒。实测正在跑的健康
+# daemon 150 次探测失败 9 次、连续 8 秒无响应——这道门于是把健康版本也判死，任何人都装不上
+# （2026-09-02 连挂 5 次）。改成「连续 miss 超过上限才算失败」：真死循环仍然会被抓（探测会一直失败），
+# 偶发卡顿放过。身份漂移检查一个字不动，只在探到时比对。
 if [ "$OBSERVATION_SEC" -gt 0 ];then
-  DAEMON_BASE="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/system/runtime-health")"||exit 70
+  OBSERVE_TIMEOUT="${OWNWARD_OBSERVATION_TIMEOUT_SEC:-5}"; OBSERVE_MAX_MISS="${OWNWARD_OBSERVATION_MAX_MISS:-8}"
+  [ "$OBSERVE_MAX_MISS" -lt "$OBSERVATION_SEC" ]||echo "⚠ break-glass: OWNWARD_OBSERVATION_MAX_MISS($OBSERVE_MAX_MISS) >= 观察窗($OBSERVATION_SEC)，探测失败已无法判死" >&2
+  observe_daemon(){ curl -fsS --max-time "$OBSERVE_TIMEOUT" "http://127.0.0.1:$PORT/api/system/runtime-health"; }
+  DAEMON_BASE="$(observe_daemon)"||exit 70
   RUNNER_BASE="$(runner_status)"||exit 70
+  MISS=0
   for _ in $(seq 1 "$OBSERVATION_SEC");do
-    DAEMON_NOW="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/system/runtime-health")"||{ echo "❌ observation daemon probe failed" >&2;exit 70; }
-    RUNNER_NOW="$(runner_status)"||{ echo "❌ observation Runner probe failed" >&2;exit 70; }
+    if DAEMON_NOW="$(observe_daemon)";then
+      if RUNNER_NOW="$(runner_status)";then
+        MISS=0
     "$BUN" -e 'const [d0,d1,r0,r1]=process.argv.slice(1).map(JSON.parse);const fail=(m)=>{console.error(`❌ observation identity drift: ${m}`);process.exit(70)};for(const k of ["pid","generation","buildIdentity"])if(d0[k]!==d1[k])fail(`daemon ${k}`);for(const k of ["pid","buildIdentity","runnerApiVersion"])if(r0[k]!==r1[k])fail(`Runner ${k}`);if(r1.draining!==false)fail("Runner draining");if(JSON.stringify(r0.capabilities)!==JSON.stringify(r1.capabilities))fail("Runner capabilities");const identity=(ps)=>(ps??[]).map(({id,version,capabilities})=>({id,version,capabilities}));if(JSON.stringify(identity(r0.providers))!==JSON.stringify(identity(r1.providers)))fail("Runner providers");' "$DAEMON_BASE" "$DAEMON_NOW" "$RUNNER_BASE" "$RUNNER_NOW"||exit 70
+      else
+        MISS=$((MISS+1));[ "$MISS" -le "$OBSERVE_MAX_MISS" ]||{ echo "❌ observation Runner probe failed" >&2;exit 70; }
+      fi
+    else
+      MISS=$((MISS+1));[ "$MISS" -le "$OBSERVE_MAX_MISS" ]||{ echo "❌ observation daemon probe failed" >&2;exit 70; }
+    fi
     sleep 1
   done
 fi

@@ -39,6 +39,9 @@ export interface InternalSkillEffect {
 
 export interface InternalSkillPlan {
   public: import("./contracts.ts").SkillPlan;
+  /** 建计划那一刻【可写根】的指纹。审批后的复扫比对它：只读根（codex 自带 skill、plugin 缓存）
+   *  由外部工具维护、也永远不是写入目标，它们变了不该否决用户已经点过的批准。 */
+  mutableRevision: string;
   effects: InternalSkillEffect[];
   registryAfter: import("./registry.ts").SkillRegistry;
 }

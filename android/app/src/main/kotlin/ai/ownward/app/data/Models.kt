@@ -216,6 +216,8 @@ data class AgentState(
     val errorCode: String? = null,
     val operability: String = "active", // active | read-only（归档/隔离会话禁止输入）
     val resume: ResumeInfo? = null, // 释放输入权后在别的终端续聊的命令（kernel/sessions/contracts.ts）
+    // 会话谱系：接力链上每个 Session（含当前）各一条，带原生会话 ID 与恢复命令（kernel/sessions/contracts.ts SessionLineageEntry）
+    val lineage: List<SessionLineageEntry> = emptyList(),
 )
 
 @Serializable
@@ -223,6 +225,58 @@ data class ResumeInfo(
     val id: String = "",
     val tool: String = "",
     val cmd: String = "",
+)
+
+/** GET /api/usage：各家订阅额度窗口（src/provider-usage.ts）。窗口按各家实际返回：Claude 5h + 周，
+ *  Codex 按套餐（Pro 只有周）；label 已是「5h」「周」这种展示用短标签，resetsAt 是标准 ISO */
+@Serializable
+data class UsageWindow(
+    val label: String = "",
+    val seconds: Long = 0,
+    val percent: Double = 0.0,
+    val resetsAt: String? = null,
+)
+
+@Serializable
+data class ProviderUsage(
+    val windows: List<UsageWindow> = emptyList(),
+    val plan: String? = null,
+    val fetchedAt: String? = null,
+)
+
+@Serializable
+data class ProvidersUsage(
+    val claude: ProviderUsage? = null,
+    val codex: ProviderUsage? = null,
+) {
+    /** 会话是谁的引擎就取谁的额度；codebuddy 之类没有额度源返回 null */
+    fun forProvider(providerId: String): ProviderUsage? = when (providerId) {
+        "claude" -> claude
+        "codex" -> codex
+        else -> null
+    }
+}
+
+@Serializable
+data class SessionLineageEntry(
+    val sessionId: String = "",
+    val providerId: String = "",
+    val model: String? = null,
+    val effort: String? = null,
+    val cwd: String = "",
+    val nativeRef: String? = null,
+    val resume: ResumeInfo? = null,
+    val createdAt: String = "",
+    val handedOffAt: String? = null,
+    val reason: String? = null,
+    val current: Boolean = false,
+    val previousRefs: List<PreviousRef> = emptyList(),
+)
+
+@Serializable
+data class PreviousRef(
+    val nativeRef: String = "",
+    val resume: ResumeInfo? = null,
 )
 
 /** POST /api/dev/control 回执：control 是切换后的租约状态 */

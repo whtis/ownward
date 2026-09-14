@@ -132,11 +132,14 @@ test("外部 Host 的 sources capability 只拿到 Kernel 标准化的文档快�
 
 describe("受信路由授权（B-lite ADR 批次 B）：deadline/body 上限/二进制透传 + frame 协商", () => {
   const BIG_ENTRY = `let context;
+let echoCount = 0;
 export default {
   async activate(ctx) { context = ctx; },
   async route({ request, url }) {
     const op = url.searchParams.get("op");
-    if (op === "echo-size") { const bytes = new Uint8Array(await request.arrayBuffer()); return new Response(JSON.stringify({ size: bytes.length }), { headers: { "content-type": "application/json" } }); }
+    if (op === "echo-size") { echoCount++; const bytes = new Uint8Array(await request.arrayBuffer()); return new Response(JSON.stringify({ size: bytes.length }), { headers: { "content-type": "application/json" } }); }
+    if (op === "echo-count") { return new Response(JSON.stringify({ count: echoCount }), { headers: { "content-type": "application/json" } }); }
+    if (op === "headers") { return new Response(JSON.stringify(Object.fromEntries(request.headers)), { headers: { "content-type": "application/json" } }); }
     if (op === "png") { return new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { headers: { "content-type": "image/png" } }); }
     if (op === "download") { return new Response("col1,col2", { headers: { "content-type": "text/csv" } }); }
     if (op === "form") { const form = await request.formData(); const file = form.get("file"); return new Response(JSON.stringify({ name: form.get("name"), fileSize: file instanceof Blob ? file.size : -1 }), { headers: { "content-type": "application/json" } }); }
@@ -191,6 +194,64 @@ export default {
     await plain.start();
     expect((await call(plain, "echo-size", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: new Uint8Array(8) }))!.status).toBe(415);
     expect((await call(plain, "echo-size", { method: "POST", headers: { "content-type": "application/json" }, body: new Uint8Array(300 * 1024) }))!.status).toBe(413);
+    await plain.stop();
+  });
+  test("chunked/no-length bodies are bounded before invoking the external handler and only normalized headers cross the Host", async () => {
+    const rt = grantedRuntime(pkg(["storage"], BIG_ENTRY));
+    await rt.start();
+    const headersUrl = new URL("http://x/api/verticals/deskcap/probe?op=headers");
+    const headersResponse = await rt.route(new Request(headersUrl.toString(), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "Idempotency-Key": "authoring-123",
+        Authorization: "Bearer must-not-cross",
+        "X-Forwarded-Host": "attacker.example",
+      },
+      body: "{}",
+    }), headersUrl);
+    expect(await headersResponse!.json()).toEqual({
+      accept: "application/json",
+      "content-type": "application/json; charset=utf-8",
+      "idempotency-key": "authoring-123",
+    });
+
+    // No Content-Length is present on a streaming Request. The reader must
+    // cancel as soon as it observes maxBodyBytes + 1 and the route must never
+    // reach the external Host (the count remains zero).
+    await rt.stop();
+    const plain = new ExtensionRuntime({
+      dataRoot: root(),
+      externalPaths: [pkg(["storage"], BIG_ENTRY)],
+      config: { verticals: { deskcap: { enabled: true, trusted: true, grantedCapabilities: ["storage"] } } },
+      routeTimeoutMs: 2_000,
+    });
+    runtimes.add(plain);
+    await plain.start();
+    const chunks = [new Uint8Array(128 * 1024), new Uint8Array(128 * 1024 + 1)];
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks.shift();
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const url = new URL("http://x/api/verticals/deskcap/probe?op=echo-size");
+    const response = await plain.route(new Request(url.toString(), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: stream,
+      duplex: "half",
+    }), url);
+    expect(response?.status).toBe(413);
+    expect(cancelled).toBeTrue();
+    const countUrl = new URL("http://x/api/verticals/deskcap/probe?op=echo-count");
+    expect(await (await plain.route(new Request(countUrl.toString()), countUrl))!.json()).toEqual({ count: 0 });
     await plain.stop();
   });
 });

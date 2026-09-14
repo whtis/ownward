@@ -19,6 +19,7 @@ import {
   listChats,
   providers,
   resolveChatBinding,
+  resetChatResidents,
   saveChatCandidate,
   streamChat,
   type AiChat,
@@ -95,26 +96,114 @@ afterAll(() => {
 async function collectChat(...args:Parameters<typeof streamChat>){const events=[] as any[];for await(const event of streamChat(...args))events.push(event);return events;}
 
 describe("Codex chat model/effort defaults",()=>{
+  // 这条用例要改全局 cfg（codexBin / codexEffort / providers.codex）和 OWNWARD_CHAT_CALLS。
+  // 还原必须挂在 afterEach 上，不能只写在用例的 finally 里：用例一旦超时被杀，finally 未必
+  // 跑得完，脏 cfg 就会漏给同文件后面的用例（实撞：本条超时 → 「候选归属 target=project」
+  // 跟着报「vault 里没有项目 ownward」，一个根因两条红）。afterEach 无论用例成功、失败还是
+  // 超时都会执行。
+  let restoreCodexCfg: (() => void) | null = null;
+  afterEach(() => { restoreCodexCfg?.(); restoreCodexCfg = null; });
+  // 超时给足：这条要起 5 次 `#!/usr/bin/env bun` 假 CLI，bun 默认 5s 在机器忙时必爆。
+  // 30s 既有余量，又还能抓住真的挂死。
   test("new chats use gpt-5.6-sol, existing models stay immutable, and unsupported explicit models visibly fall back",async()=>{
     freshVault();
     const fixture=mkdtempSync(join(tmpdir(),"ownward-chat-codex-"));roots.push(fixture);const fake=join(fixture,"fake-codex.ts"),calls=join(fixture,"calls.jsonl");
-    writeFileSync(fake,`#!/usr/bin/env bun\nimport {appendFileSync} from "fs";\nappendFileSync(process.env.OWNWARD_CHAT_CALLS!,JSON.stringify(process.argv.slice(2))+"\\n");\nif(process.argv.includes("unsupported-model")){process.stderr.write("model not supported\\n");process.exit(1);}\nprocess.stdout.write("fake reply\\n");\n`);chmodSync(fake,0o755);
+    writeFileSync(fake,`#!/usr/bin/env bun\nimport {appendFileSync} from "fs";\nappendFileSync(process.env.OWNWARD_CHAT_CALLS!,JSON.stringify(process.argv.slice(2))+"\\n");\nif(process.argv.includes("unsupported-model")){process.stderr.write("model not supported\\n");process.exit(1);}\nif(process.argv.includes("resume")&&process.env.FAKE_CODEX_LOSE_THREAD==="1"){process.stderr.write("thread/resume failed: not found\\n");process.exit(1);}\nconst out=(o)=>process.stdout.write(JSON.stringify(o)+"\\n");out({type:"thread.started",thread_id:"019ffae9-ad07-7ef0-ab0a-761b9a426650"});out({type:"turn.started"});out({type:"item.started",item:{id:"m1",type:"agent_message",text:""}});out({type:"item.updated",item:{id:"m1",type:"agent_message",text:"fake "}});out({type:"item.completed",item:{id:"m1",type:"agent_message",text:"fake reply"}});out({type:"turn.completed",usage:{input_tokens:1,output_tokens:2}});\n`);chmodSync(fake,0o755);
     const oldBin=cfg.llm?.codexBin,oldEffort=cfg.chat?.codexEffort,oldModels=[...cfg.chat.providers.codex],oldCalls=process.env.OWNWARD_CHAT_CALLS;
+    restoreCodexCfg=()=>{cfg.llm.codexBin=oldBin;cfg.chat.codexEffort=oldEffort;cfg.chat.providers.codex=oldModels;if(oldCalls===undefined)delete process.env.OWNWARD_CHAT_CALLS;else process.env.OWNWARD_CHAT_CALLS=oldCalls;};
     try{
       cfg.llm.codexBin=fake;cfg.chat.codexEffort="max";cfg.chat.providers.codex=["gpt-5.6-sol","gpt-explicit-alternative","default"];process.env.OWNWARD_CHAT_CALLS=calls;
-      const defaults=JSON.parse(readFileSync(join(import.meta.dir,"../config.default.json"),"utf8"));expect(defaults.chat.providers.codex).toEqual(["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","gpt-5.4","default"]);expect(defaults.llm.codexModel).toBe("gpt-5.6-sol");expect(providers().codex).toEqual(["gpt-5.6-sol","gpt-explicit-alternative","default"]);
+      const defaults=JSON.parse(readFileSync(join(import.meta.dir,"../config.default.json"),"utf8"));expect(defaults.chat.providers.codex).toEqual(["gpt-6-astra","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","default"]);expect(defaults.llm.codexModel).toBe("gpt-5.6-sol");expect(providers().codex).toEqual(["gpt-5.6-sol","gpt-explicit-alternative","default"]);
 
       let events=await collectChat("new",undefined,"codex"),done=events.find(event=>event.type==="done");expect(done.chat.model).toBe("gpt-5.6-sol");chatFiles.push(join(DATA,"chats",`${done.chat.id}.json`));let argv=JSON.parse(readFileSync(calls,"utf8").trim());expect(argv).toEqual(expect.arrayContaining(["-m","gpt-5.6-sol","-c",'model_reasoning_effort="max"']));
 
+      // 首轮：增量按 item.updated/completed 的前缀差流出，回复落盘的是完整文本，thread id 记进对话
+      expect(events.filter(event=>event.type==="delta").map(event=>event.text)).toEqual(["fake ","reply"]);expect(done.chat.messages.at(-1).text).toBe("fake reply");expect(done.chat.codexThreadId).toBe("019ffae9-ad07-7ef0-ab0a-761b9a426650");expect(argv).toContain("--json");expect(argv).not.toContain("resume");expect(argv.at(-2)).toBe("--");
+      // 同一对话第二轮：原生 resume 同一 thread，只发这条新消息（system/历史都在线程里），不再重放历史
+      writeFileSync(calls,"");events=await collectChat("second",done.chat.id);argv=JSON.parse(readFileSync(calls,"utf8").trim());expect(argv.slice(-4)).toEqual(["resume","--","019ffae9-ad07-7ef0-ab0a-761b9a426650","second"]);expect(argv.indexOf("--json")).toBeLessThan(argv.indexOf("resume"));
+      // 线程丢了：回退历史重放开新线程，不让对话卡死在旧 id 上
+      writeFileSync(calls,"");process.env.FAKE_CODEX_LOSE_THREAD="1";try{events=await collectChat("third",done.chat.id);}finally{delete process.env.FAKE_CODEX_LOSE_THREAD;}expect(events.some(event=>event.type==="done")).toBeTrue();const retries=readFileSync(calls,"utf8").trim().split("\n").map(line=>JSON.parse(line));expect(retries).toHaveLength(2);expect(retries[0]).toContain("resume");expect(retries[1]).not.toContain("resume");expect(retries[1].at(-1)).toContain("以下是此前的对话历史");
       writeFileSync(calls,"");const existingId=writeChatFile({id:`test-codex-existing-${Math.random().toString(36).slice(2,8)}`,title:"existing",provider:"codex",model:"gpt-existing",createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z",messages:[]});events=await collectChat("continue",existingId);done=events.find(event=>event.type==="done");expect(done.chat.model).toBe("gpt-existing");argv=JSON.parse(readFileSync(calls,"utf8").trim());expect(argv).toEqual(expect.arrayContaining(["-m","gpt-existing"]));expect(argv).not.toContain("-c");
 
       writeFileSync(calls,"");cfg.chat.codexEffort="ultra";events=await collectChat("invalid effort stays local",existingId);expect(events.some(event=>event.type==="done")).toBeTrue();argv=JSON.parse(readFileSync(calls,"utf8").trim());expect(argv).not.toContain("-c");expect(argv.some((part:string)=>part.startsWith("model_reasoning_effort="))).toBeFalse();cfg.chat.codexEffort="max";
 
       writeFileSync(calls,"");events=await collectChat("fallback",undefined,"codex","unsupported-model");done=events.find(event=>event.type==="done");expect(done.chat.model).toBe("default");chatFiles.push(join(DATA,"chats",`${done.chat.id}.json`));const attempts=readFileSync(calls,"utf8").trim().split("\n").map(line=>JSON.parse(line));expect(attempts).toHaveLength(2);expect(attempts[0]).toEqual(expect.arrayContaining(["-m","unsupported-model"]));expect(attempts[1]).not.toContain("unsupported-model");expect(attempts.every(args=>!args.includes("-c")&&!args.some((part:string)=>part.startsWith("model_reasoning_effort=")))).toBeTrue();
     }finally{
-      cfg.llm.codexBin=oldBin;cfg.chat.codexEffort=oldEffort;cfg.chat.providers.codex=oldModels;if(oldCalls===undefined)delete process.env.OWNWARD_CHAT_CALLS;else process.env.OWNWARD_CHAT_CALLS=oldCalls;
+      restoreCodexCfg?.();restoreCodexCfg=null;   // 正常路径立刻还原；被杀时由 afterEach 兜底
     }
-  });
+  },30_000);
+});
+
+describe("常驻 claude 进程", () => {
+  let restore: (() => void) | null = null;
+  afterEach(() => { restore?.(); restore = null; resetChatResidents(); });
+  // 假 claude：stream-json 长驻——每读到一帧 user 就回 init + 两段 text_delta + result，进程不退出（除非 FAKE_CLAUDE_EXIT_AFTER=1）；
+  // argv 与 pid 记到 calls 文件，用它数「到底起了几次进程」
+  test("同一对话复用一条进程；模型变了带 --resume 换进程；进程退出后下一条自动重拉", async () => {
+    freshVault();
+    const fixture = mkdtempSync(join(tmpdir(), "ownward-chat-claude-")); roots.push(fixture);
+    const fake = join(fixture, "fake-claude.ts"), calls = join(fixture, "calls.jsonl");
+    writeFileSync(fake, `#!/usr/bin/env bun
+import {appendFileSync} from "fs";
+appendFileSync(process.env.OWNWARD_CHAT_CALLS!, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2) }) + "\\n");
+const out = (o: unknown) => process.stdout.write(JSON.stringify(o) + "\\n");
+const sid = "sess-" + process.pid;
+let buf = "";
+for await (const chunk of process.stdin) {
+  buf += new TextDecoder().decode(chunk as Uint8Array);
+  let idx: number;
+  while ((idx = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, idx); buf = buf.slice(idx + 1); if (!line.trim()) continue;
+    const frame = JSON.parse(line); const text = frame.message.content.find((c: any) => c.type === "text")?.text ?? "";
+    out({ type: "system", subtype: "init", session_id: sid, model: "fake" });
+    out({ type: "stream_event", session_id: sid, event: { type: "content_block_delta", delta: { type: "text_delta", text: "echo:" } } });
+    out({ type: "stream_event", session_id: sid, event: { type: "content_block_delta", delta: { type: "text_delta", text: text } } });
+    out({ type: "result", subtype: "success", session_id: sid, result: "echo:" + text, is_error: false });
+    if (process.env.FAKE_CLAUDE_EXIT_AFTER === "1") process.exit(0);
+  }
+}
+`); chmodSync(fake, 0o755);
+    const oldBin = cfg.llm?.claudeBin, oldCalls = process.env.OWNWARD_CHAT_CALLS;
+    restore = () => { cfg.llm.claudeBin = oldBin; if (oldCalls === undefined) delete process.env.OWNWARD_CHAT_CALLS; else process.env.OWNWARD_CHAT_CALLS = oldCalls; delete process.env.FAKE_CLAUDE_EXIT_AFTER; };
+    cfg.llm.claudeBin = fake; process.env.OWNWARD_CHAT_CALLS = calls;
+    const spawns = () => readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+    let events = await collectChat("你好", undefined, "claude", "sonnet");
+    const done = events.find((event) => event.type === "done"); chatFiles.push(join(DATA, "chats", `${done.chat.id}.json`));
+    expect(events.filter((event) => event.type === "delta").map((event) => event.text)).toEqual(["echo:", "你好"]);
+    expect(done.chat.messages.at(-1).text).toBe("echo:你好");
+    expect(spawns()).toHaveLength(1);
+    expect(spawns()[0].argv).toEqual(expect.arrayContaining(["--input-format", "stream-json", "--model", "sonnet"]));
+    expect(spawns()[0].argv).not.toContain("--resume");
+    const sid = `sess-${spawns()[0].pid}`;
+    expect(done.chat.claudeSessionId).toBe(sid);
+
+    // 第二条：不再起进程，直接写帧
+    events = await collectChat("再来", done.chat.id);
+    expect(events.find((event) => event.type === "done").chat.messages.at(-1).text).toBe("echo:再来");
+    expect(spawns()).toHaveLength(1);
+
+    // 换模型：换进程，但带 --resume 续同一会话
+    events = await collectChat("换模型", done.chat.id, "claude", "opus");
+    expect(events.find((event) => event.type === "done").chat.model).toBe("opus");
+    expect(spawns()).toHaveLength(2);
+    expect(spawns()[1].argv).toEqual(expect.arrayContaining(["--model", "opus", "--resume", sid]));
+
+    // 进程自己退出（限流/崩溃/被 kill）：下一条自动重拉并 --resume，对话不中断。
+    // 环境变量只影响新起的进程，所以先把常驻的那条回收掉，让下一条起的进程带上「答完即退」
+    process.env.FAKE_CLAUDE_EXIT_AFTER = "1";
+    resetChatResidents();
+    events = await collectChat("退出后", done.chat.id);
+    expect(spawns()).toHaveLength(3);
+    expect(spawns()[2].argv).toEqual(expect.arrayContaining(["--resume", `sess-${spawns()[1].pid}`]));
+    expect(events.find((event) => event.type === "done").chat.messages.at(-1).text).toBe("echo:退出后");
+    // Give the fake process exit callback time to clear the resident binding before the next turn.
+    await Bun.sleep(50);
+    events = await collectChat("再重拉", done.chat.id);   // 上一条进程答完就退了：这条必须自动重拉
+    expect(spawns()).toHaveLength(4);
+    expect(spawns()[3].argv).toEqual(expect.arrayContaining(["--resume", `sess-${spawns()[2].pid}`]));
+    expect(events.find((event) => event.type === "done").chat.messages.at(-1).text).toBe("echo:再重拉");
+  }, 30_000);
 });
 
 describe("旧对话 JSON 兼容", () => {

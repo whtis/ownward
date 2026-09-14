@@ -177,6 +177,16 @@ struct RoutineCard: Decodable, Sendable, Equatable, Identifiable {
     @Defaulted var hasDraft: Bool
     var taskId: String?
     @Defaulted var stale: Bool
+    var docUrl: String?
+}
+
+/// GET /api/routines/draft（android data/Models.kt RoutineDraft 同款）
+struct RoutineDraft: Decodable, Sendable, Equatable {
+    @Defaulted var ok: Bool
+    @Defaulted var draft: String
+    @Defaulted var status: String
+    @Defaulted var stale: Bool
+    @Defaulted var msg: String
 }
 
 struct Meeting: Decodable, Sendable, Equatable, Hashable {
@@ -267,6 +277,27 @@ struct ResumeInfo: Decodable, Sendable, Equatable {
     @Defaulted var cmd: String
 }
 
+struct SessionLineageEntry: Decodable, Sendable, Equatable, Identifiable {
+    @Defaulted var sessionId: String
+    @Defaulted var providerId: String
+    var model: String?
+    var effort: String?
+    @Defaulted var cwd: String
+    var nativeRef: String?
+    var resume: ResumeInfo?
+    @Defaulted var createdAt: String
+    var handedOffAt: String?
+    var reason: String?
+    @Defaulted var current: Bool
+    @Defaulted var previousRefs: [PreviousRef]
+    var id: String { sessionId }
+}
+
+struct PreviousRef: Decodable, Sendable, Equatable {
+    @Defaulted var nativeRef: String
+    var resume: ResumeInfo?
+}
+
 /// POST /api/dev/control 回执：control 是切换后的租约状态
 struct ControlResult: Decodable, Sendable, Equatable {
     @Defaulted var ok: Bool
@@ -297,9 +328,33 @@ struct AgentState: Decodable, Sendable, Equatable {
     // provider init 帧回报的 slash_commands（输入框 / 补全用）；codex 之类不回报时为空
     @Defaulted var commands: [String]
     var resume: ResumeInfo?              // 释放输入权后在别的终端续聊的命令
+    // 会话谱系：接力链上每个 Session（含当前）各一条，带原生会话 ID 与恢复命令（kernel/sessions/contracts.ts SessionLineageEntry）
+    @Defaulted var lineage: [SessionLineageEntry]
 
     var isRunning: Bool { turn == "running" }
     var canInput: Bool { control == "ownward" && operability != "read-only" }
+}
+
+/// GET /api/usage：各家订阅额度窗口（src/provider-usage.ts）。窗口按各家实际返回：Claude 5h + 周，
+/// Codex 按套餐（Pro 只有周）；label 已是「5h」「周」这种展示用短标签，resetsAt 是标准 ISO
+struct UsageWindow: Decodable, Sendable, Equatable {
+    @Defaulted var label: String
+    @Defaulted var seconds: Int64
+    @Defaulted var percent: Double
+    var resetsAt: String?
+}
+struct ProviderUsage: Decodable, Sendable, Equatable {
+    @Defaulted var windows: [UsageWindow]
+    var plan: String?
+    var fetchedAt: String?
+}
+struct ProvidersUsage: Decodable, Sendable, Equatable {
+    var claude: ProviderUsage?
+    var codex: ProviderUsage?
+    /// 会话是谁的引擎就取谁的额度；codebuddy 之类没有额度源返回 nil
+    func usage(for provider: String) -> ProviderUsage? {
+        switch provider { case "claude": return claude; case "codex": return codex; default: return nil }
+    }
 }
 
 // MARK: - 外部会话旁观 / 接管
@@ -393,6 +448,13 @@ struct OutImage: Encodable, Sendable, Equatable, Hashable {
 struct OkMsg: Decodable, Sendable {
     @Defaulted var ok: Bool
     @Defaulted var msg: String
+
+    /// HTTP 200 但 ok:false 也是失败（android requireOk 同款）：msg 是中文可直接展示
+    @discardableResult
+    func requireOk(_ fallback: String = "操作失败") throws -> OkMsg {
+        if ok { return self }
+        throw ApiError(code: 200, message: msg.isEmpty ? fallback : msg)
+    }
 }
 
 /// GET /api/app/ios：daemon 端 data/app/ios.json（由 scripts/ios-release.sh 写入）

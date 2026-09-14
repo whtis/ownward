@@ -53,10 +53,10 @@ TEST_FILES=()
 SERIAL_TEST_FILES=()
 while IFS= read -r -d '' f; do
   [ -f "$f" ] || continue  # 已删除但尚未暂存的 tracked test 不应传给 Bun。
-  # This test spawns a release shell transaction and deliberately changes
-  # filesystem permissions. Keep it in an independent Bun process so no other
-  # test file can supply inherited process state to that transaction.
-  if [ "$f" = "src/release/install-release-lock.test.ts" ]; then
+  # These tests spawn long-lived provider processes or deliberately change
+  # process/filesystem state. Keep them in independent Bun processes so no other
+  # test file can supply inherited state to them.
+  if [ "$f" = "src/release/install-release-lock.test.ts" ] || [ "$f" = "src/chat.test.ts" ]; then
     SERIAL_TEST_FILES+=("$PWD/$f")
     continue
   fi

@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
+  <title id="title">Ownward local AI workbench</title>
+  <desc id="desc">A product overview showing phone, web, and terminal inputs flowing through the Ownward daemon to AI providers and a local project memory vault.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080f1d"/>
+      <stop offset="0.55" stop-color="#101b32"/>
+      <stop offset="1" stop-color="#0a1224"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#55b8ff"/>
+      <stop offset="1" stop-color="#3976ff"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9385ff"/>
+      <stop offset="1" stop-color="#4b64ff"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#6e8fc5" stroke-opacity=".08"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity=".35"/>
+    </filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="720" rx="28" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1598" height="718" rx="27" fill="url(#grid)" stroke="#2c4778" stroke-opacity=".6"/>
+  <circle cx="1430" cy="-40" r="260" fill="#3976ff" opacity=".12" filter="url(#glow)"/>
+  <circle cx="220" cy="780" r="250" fill="#5d6dff" opacity=".10" filter="url(#glow)"/>
+
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+    <rect x="82" y="58" width="290" height="34" rx="17" fill="#162946" stroke="#3462a3"/>
+    <circle cx="103" cy="75" r="5" fill="#5cc3ff"/>
+    <text x="119" y="81" font-size="14" font-weight="700" letter-spacing="1.8" fill="#a9d9ff">LOCAL-FIRST  •  CONTINUITY</text>
+    <text x="82" y="157" font-size="62" font-weight="800" letter-spacing="-2" fill="#f3f7ff">Ownward</text>
+    <text x="84" y="196" font-size="23" fill="#aabbd7">Your work, carried forward.</text>
+    <text x="84" y="226" font-size="16" fill="#7890b8">One calm home for tasks, agents, and the facts they leave behind.</text>
+
+    <!-- Surfaces -->
+    <g filter="url(#shadow)">
+      <rect x="82" y="275" width="300" height="295" rx="20" fill="#121f37" stroke="#2d4d7d"/>
+      <rect x="103" y="298" width="76" height="18" rx="9" fill="#203b61"/>
+      <text x="113" y="311" font-size="11" font-weight="700" letter-spacing="1.4" fill="#84baff">INPUTS</text>
+      <rect x="104" y="336" width="254" height="58" rx="12" fill="#172a47" stroke="#29466f"/>
+      <rect x="121" y="351" width="20" height="28" rx="5" fill="url(#blue)"/>
+      <circle cx="131" cy="357" r="3" fill="#fff" opacity=".8"/>
+      <path d="M126 369h10M126 374h7" stroke="#fff" stroke-width="2" stroke-linecap="round" opacity=".8"/>
+      <text x="155" y="360" font-size="15" font-weight="700" fill="#eaf3ff">Phone</text>
+      <text x="155" y="380" font-size="12" fill="#89a4c8">dispatch from anywhere</text>
+      <rect x="104" y="408" width="254" height="58" rx="12" fill="#172a47" stroke="#29466f"/>
+      <rect x="121" y="425" width="25" height="21" rx="4" fill="#3f74d9"/>
+      <path d="M127 432h13M127 437h9" stroke="#e8f3ff" stroke-width="2" stroke-linecap="round"/>
+      <text x="155" y="432" font-size="15" font-weight="700" fill="#eaf3ff">Web desk</text>
+      <text x="155" y="452" font-size="12" fill="#89a4c8">watch, ask, approve</text>
+      <rect x="104" y="480" width="254" height="58" rx="12" fill="#172a47" stroke="#29466f"/>
+      <text x="121" y="514" font-size="20" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#5cc3ff">&gt;_</text>
+      <text x="155" y="504" font-size="15" font-weight="700" fill="#eaf3ff">Terminal</text>
+      <text x="155" y="524" font-size="12" fill="#89a4c8">own work · own tasks</text>
+    </g>
+
+    <!-- Connector arrow -->
+    <path d="M392 422H435" stroke="#5cc3ff" stroke-width="3" stroke-linecap="round"/>
+    <path d="m427 414 10 8-10 8" fill="none" stroke="#5cc3ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Daemon -->
+    <g filter="url(#shadow)">
+      <rect x="450" y="275" width="520" height="295" rx="20" fill="#142847" stroke="#3e78bf" stroke-width="1.5"/>
+      <rect x="474" y="299" width="150" height="21" rx="10.5" fill="#1b3c65"/>
+      <circle cx="490" cy="309.5" r="5" fill="#5cc3ff"/>
+      <text x="505" y="314" font-size="11" font-weight="700" letter-spacing="1.4" fill="#a4d8ff">OWNWARD DAEMON</text>
+      <text x="474" y="367" font-size="26" font-weight="750" fill="#f1f7ff">Make every turn count.</text>
+      <text x="474" y="394" font-size="14" fill="#9db4d6">Kernel keeps sessions, tasks, actions and approvals together.</text>
+      <g>
+        <rect x="474" y="430" width="146" height="83" rx="12" fill="#172f52" stroke="#35639b"/>
+        <text x="491" y="457" font-size="14" font-weight="700" fill="#deeeff">Task</text>
+        <text x="491" y="479" font-size="12" fill="#83a7d5">goal + status + result</text>
+        <path d="M491 493h77" stroke="#3976ff" stroke-width="3" stroke-linecap="round"/>
+      </g>
+      <g>
+        <rect x="636" y="430" width="146" height="83" rx="12" fill="#172f52" stroke="#35639b"/>
+        <text x="653" y="457" font-size="14" font-weight="700" fill="#deeeff">Session</text>
+        <text x="653" y="479" font-size="12" fill="#83a7d5">resume + interrupt</text>
+        <path d="M653 493h77" stroke="#57baff" stroke-width="3" stroke-linecap="round"/>
+      </g>
+      <g>
+        <rect x="798" y="430" width="146" height="83" rx="12" fill="#172f52" stroke="#35639b"/>
+        <text x="815" y="457" font-size="14" font-weight="700" fill="#deeeff">Action</text>
+        <text x="815" y="479" font-size="12" fill="#83a7d5">human in the loop</text>
+        <path d="M815 493h77" stroke="#9187ff" stroke-width="3" stroke-linecap="round"/>
+      </g>
+    </g>
+
+    <!-- Runner arrow -->
+    <path d="M980 422h45" stroke="#5cc3ff" stroke-width="3" stroke-linecap="round"/>
+    <path d="m1017 414 10 8-10 8" fill="none" stroke="#5cc3ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Memory / provider outcome -->
+    <g filter="url(#shadow)">
+      <rect x="1040" y="275" width="478" height="295" rx="20" fill="#121f37" stroke="#2d4d7d"/>
+      <rect x="1064" y="298" width="194" height="21" rx="10.5" fill="#21355a"/>
+      <circle cx="1080" cy="308.5" r="5" fill="#9187ff"/>
+      <text x="1095" y="313" font-size="11" font-weight="700" letter-spacing="1.3" fill="#c0bcff">RUNNER + MEMORY</text>
+      <text x="1064" y="366" font-size="23" font-weight="750" fill="#f1f7ff">Providers do the work.</text>
+      <text x="1064" y="392" font-size="14" fill="#9db4d6">Ownward keeps the hand-off and the evidence.</text>
+      <g>
+        <rect x="1064" y="424" width="202" height="55" rx="11" fill="#182b49" stroke="#31527e"/>
+        <circle cx="1085" cy="451" r="10" fill="#4b77ff"/>
+        <text x="1104" y="447" font-size="14" font-weight="700" fill="#eaf3ff">Claude Code</text>
+        <text x="1104" y="465" font-size="11" fill="#86a6cf">stream · tools · resume</text>
+      </g>
+      <g>
+        <rect x="1280" y="424" width="202" height="55" rx="11" fill="#182b49" stroke="#31527e"/>
+        <circle cx="1301" cy="451" r="10" fill="#58b5ff"/>
+        <text x="1320" y="447" font-size="14" font-weight="700" fill="#eaf3ff">Codex / CodeBuddy</text>
+        <text x="1320" y="465" font-size="11" fill="#86a6cf">same task · next turn</text>
+      </g>
+      <g>
+        <rect x="1064" y="495" width="418" height="52" rx="11" fill="#192b43" stroke="#3b5d86"/>
+        <path d="M1084 513h18l8 8-8 8h-18l-8-8z" fill="url(#violet)"/>
+        <text x="1123" y="519" font-size="14" font-weight="700" fill="#eaf3ff">Vault / Markdown</text>
+        <text x="1123" y="537" font-size="11" fill="#86a6cf">run facts · project log · memory</text>
+      </g>
+    </g>
+
+    <g transform="translate(82 635)">
+      <text x="0" y="0" font-size="13" fill="#7e99bf">BUILT FOR THE MOMENT AFTER THE AGENT STOPS</text>
+      <path d="M388 -5h103" stroke="#31547f"/>
+      <text x="525" y="0" font-size="13" fill="#91b7df">TASK  →  RUN  →  RECORD  →  NEXT TASK</text>
+    </g>
+  </g>
+</svg>

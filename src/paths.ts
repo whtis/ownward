@@ -57,6 +57,7 @@ export const THESIS_DIR = join(VAULT_ROOT, "investing", "thesis");
 
 export const inboxDir = (scope: Scope = WORK_SCOPE) => join(scopeDir(scope), "inbox");
 export const dailyDir = (scope: Scope = WORK_SCOPE) => join(scopeDir(scope), "daily");
+export const meetingSourcesDir = (scope: Scope = WORK_SCOPE, root: string = VAULT_ROOT) => join(scopeDir(scope, root), "meetings");
 export const flightsDir = (scope: Scope = WORK_SCOPE) => join(scopeDir(scope), "flights");
 export const memoryDir = (scope: Scope = WORK_SCOPE) => join(scopeDir(scope), "memory");
 export const projectsDir = (scope: Scope = WORK_SCOPE, root: string = VAULT_ROOT) => join(scopeDir(scope, root), "projects");

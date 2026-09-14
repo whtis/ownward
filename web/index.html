@@ -45,7 +45,6 @@
       <button class="nav-tab" data-tab="pr">PR <span class="badge" id="b-pr"></span></button>
       <button class="nav-tab" data-tab="roles">角色</button>
       <button class="nav-tab" data-tab="notes">笔记</button>
-      <button class="nav-tab" data-tab="settings">设置</button>
       <span class="vertical-nav-desktop" id="vertical-nav-desktop" aria-label="扩展导航"></span>
     </nav>
     <div class="topbar-actions">
@@ -129,6 +128,7 @@
       <button class="icon-btn" id="w-browse" title="浏览目录" type="button"><svg class="ui-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.8 5.5h5l1.5 1.7h7.9v8.3H2.8z"/><path d="M2.8 7.2V4.5h4.5l1.4 1.6"/></svg></button>
     </div>
     <datalist id="w-dir-list"></datalist>
+    <div class="dir-chips recent-dirs" id="w-dir-recent" aria-label="最近目录" hidden></div>
     <div class="extra-dir-row" id="w-extra-wrap" title="后台 agent 可同时读写多个项目">
       <span class="label-hint">附加目录（可选）</span>
       <div class="dir-chips" id="w-extra-chips"></div>
@@ -163,10 +163,11 @@
 
 <!-- routine 草稿 modal -->
 <div class="overlay" id="draft-overlay">
-  <div class="modal" role="dialog" aria-label="routine 草稿">
+  <div class="modal draft" role="dialog" aria-label="routine 草稿">
     <h2 id="d-title">草稿</h2>
-    <textarea id="d-text" style="min-height:300px;font-family:var(--font-mono);font-size:12px"></textarea>
+    <textarea id="d-text" style="font-family:var(--font-mono);font-size:12px"></textarea>
     <div class="actions">
+      <span id="d-autosave" class="quiet" style="margin-right:auto;font-size:11px"></span>
       <button class="button ghost" id="d-cancel">关闭</button>
       <button class="button danger" id="d-skip">跳过本次</button>
       <button class="button secondary" id="d-regen" style="display:none" onclick="regenDraft()">重新生成</button>
@@ -257,6 +258,10 @@
 <dialog class="control-dialog session-config-dialog" id="session-config-dialog" aria-labelledby="session-config-title">
   <div id="session-config-body"></div>
 </dialog>
+<!-- 会话谱系（接力链上各引擎的原生会话 ID + 恢复命令）：日常几乎不用，收在会话头部「谱系」按钮后面，内容由 tasks.js 渲染 -->
+<dialog class="control-dialog" id="lineage-dialog" aria-labelledby="lineage-title">
+  <div id="lineage-body"></div>
+</dialog>
 <!-- 皮肤选择 modal（内容由 skin.js 渲染） -->
 <div class="overlay" id="skin-overlay">
   <div class="modal" style="width:min(680px,96vw)" role="dialog" aria-label="皮肤">
@@ -273,7 +278,7 @@
     <div class="palette-list" id="pal-list"></div>
   </div>
 </div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" popover="manual"></div>
 
 <script src="/app.js"></script>
 <script src="/image-viewer.js"></script>

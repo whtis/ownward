@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 760" role="img" aria-labelledby="title desc">
+  <title id="title">Ownward architecture overview</title>
+  <desc id="desc">Four layers of Ownward: phone and web surfaces, the local daemon kernel, an isolated runner with AI providers, and Markdown project memory.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#08101f"/><stop offset="1" stop-color="#101d35"/></linearGradient>
+    <linearGradient id="kernel" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1f4e88"/><stop offset="1" stop-color="#193163"/></linearGradient>
+    <linearGradient id="runner" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1f3e70"/><stop offset="1" stop-color="#332b6e"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="12" stdDeviation="13" flood-color="#000" flood-opacity=".35"/></filter>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#6689bd" stroke-opacity=".08"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#61c6ff"/></marker>
+  </defs>
+
+  <rect width="1400" height="760" rx="28" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1398" height="758" rx="27" fill="url(#grid)" stroke="#2a4777"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+    <text x="72" y="78" font-size="38" font-weight="800" fill="#f1f6ff">How Ownward fits together</text>
+    <text x="74" y="111" font-size="16" fill="#91a8cb">A local control plane keeps the interface, execution, and memory connected.</text>
+
+    <!-- layer captions -->
+    <g font-size="12" font-weight="700" letter-spacing="1.4">
+      <text x="72" y="163" fill="#77c9ff">01  SURFACES</text>
+      <text x="404" y="163" fill="#77c9ff">02  DAEMON / KERNEL</text>
+      <text x="782" y="163" fill="#a8a0ff">03  RUNNER / PROVIDERS</text>
+      <text x="1110" y="163" fill="#77c9ff">04  LOCAL MEMORY</text>
+    </g>
+
+    <!-- surfaces -->
+    <g filter="url(#shadow)">
+      <rect x="72" y="190" width="280" height="420" rx="18" fill="#13223a" stroke="#35557f"/>
+      <rect x="95" y="215" width="234" height="84" rx="13" fill="#172f51" stroke="#376aa0"/>
+      <rect x="113" y="237" width="33" height="40" rx="7" fill="#4287dd"/>
+      <circle cx="129.5" cy="245" r="4" fill="#e9f5ff"/><path d="M123 259h13M123 266h9" stroke="#e9f5ff" stroke-width="2" stroke-linecap="round"/>
+      <text x="164" y="251" font-size="17" font-weight="750" fill="#edf6ff">Android / iPhone</text>
+      <text x="164" y="273" font-size="12" fill="#8eadd5">dispatch · watch · approve</text>
+      <rect x="95" y="316" width="234" height="84" rx="13" fill="#172f51" stroke="#376aa0"/>
+      <rect x="113" y="340" width="36" height="28" rx="5" fill="#4279cd"/><path d="M120 348h22M120 355h15" stroke="#e9f5ff" stroke-width="2" stroke-linecap="round"/>
+      <text x="164" y="351" font-size="17" font-weight="750" fill="#edf6ff">Web workbench</text>
+      <text x="164" y="373" font-size="12" fill="#8eadd5">tasks · sessions · notes</text>
+      <rect x="95" y="417" width="234" height="84" rx="13" fill="#172f51" stroke="#376aa0"/>
+      <text x="113" y="463" font-size="22" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" fill="#61c6ff">&gt;_</text>
+      <text x="164" y="452" font-size="17" font-weight="750" fill="#edf6ff">Terminal</text>
+      <text x="164" y="474" font-size="12" fill="#8eadd5">own work · own tasks</text>
+      <text x="95" y="550" font-size="12" fill="#6685ae">All clients talk to one local API</text>
+      <text x="95" y="572" font-size="12" fill="#6685ae">and never execute code on the phone.</text>
+    </g>
+
+    <!-- arrows surface to kernel -->
+    <path d="M363 307h35M363 358h35M363 455h35" fill="none" stroke="#61c6ff" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="369" y="284" font-size="11" fill="#6f96c5">API</text>
+
+    <!-- kernel -->
+    <g filter="url(#shadow)">
+      <rect x="415" y="190" width="320" height="420" rx="18" fill="url(#kernel)" stroke="#4d9bd5" stroke-width="1.5"/>
+      <rect x="440" y="215" width="130" height="22" rx="11" fill="#285b91"/>
+      <circle cx="456" cy="226" r="5" fill="#61c6ff"/>
+      <text x="469" y="231" font-size="11" font-weight="700" letter-spacing="1.2" fill="#c0e8ff">LOCAL DAEMON</text>
+      <text x="440" y="286" font-size="24" font-weight="750" fill="#f2f8ff">Kernel</text>
+      <text x="440" y="311" font-size="13" fill="#b4cbe8">one durable control plane</text>
+      <g fill="#173b69" stroke="#579fdd">
+        <rect x="440" y="341" width="124" height="62" rx="11"/>
+        <rect x="586" y="341" width="124" height="62" rx="11"/>
+        <rect x="440" y="419" width="124" height="62" rx="11"/>
+        <rect x="586" y="419" width="124" height="62" rx="11"/>
+        <rect x="440" y="497" width="270" height="62" rx="11"/>
+      </g>
+      <g font-size="14" font-weight="700" fill="#e6f3ff">
+        <text x="458" y="368">Tasks</text><text x="604" y="368">Sessions</text>
+        <text x="458" y="446">Actions</text><text x="604" y="446">Approvals</text>
+        <text x="458" y="524">Event bus · scheduler · policy · API</text>
+      </g>
+      <g font-size="11" fill="#8eb9e6">
+        <text x="458" y="389">goal, status, result</text><text x="604" y="389">resume, interrupt, lease</text>
+        <text x="458" y="467">human-in-the-loop</text><text x="604" y="467">explicit boundaries</text>
+        <text x="458" y="545">observable, append-only facts</text>
+      </g>
+    </g>
+
+    <!-- arrows kernel to runner -->
+    <path d="M746 325h31M746 455h31" fill="none" stroke="#61c6ff" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="749" y="302" font-size="11" fill="#7199c7">commands</text>
+    <text x="752" y="482" font-size="11" fill="#7199c7">events</text>
+
+    <!-- runner -->
+    <g filter="url(#shadow)">
+      <rect x="795" y="190" width="280" height="420" rx="18" fill="url(#runner)" stroke="#756fd0" stroke-width="1.5"/>
+      <rect x="820" y="215" width="126" height="22" rx="11" fill="#433f83"/>
+      <circle cx="836" cy="226" r="5" fill="#a8a0ff"/>
+      <text x="849" y="231" font-size="11" font-weight="700" letter-spacing="1.2" fill="#d9d3ff">ISOLATED RUNNER</text>
+      <text x="820" y="286" font-size="24" font-weight="750" fill="#f5f3ff">Provider adapters</text>
+      <text x="820" y="311" font-size="13" fill="#c2bde7">the daemon survives a provider restart</text>
+      <g>
+        <rect x="820" y="345" width="230" height="58" rx="11" fill="#2a2d61" stroke="#6c73c3"/>
+        <circle cx="843" cy="374" r="10" fill="#587cff"/><text x="862" y="370" font-size="15" font-weight="700" fill="#f0efff">Claude Code</text><text x="862" y="388" font-size="11" fill="#b6b5e7">stream · tools · resume</text>
+      </g>
+      <g>
+        <rect x="820" y="418" width="230" height="58" rx="11" fill="#2a2d61" stroke="#6c73c3"/>
+        <circle cx="843" cy="447" r="10" fill="#59b8ff"/><text x="862" y="443" font-size="15" font-weight="700" fill="#f0efff">Codex</text><text x="862" y="461" font-size="11" fill="#b6b5e7">handoff · scoped access</text>
+      </g>
+      <g>
+        <rect x="820" y="491" width="230" height="58" rx="11" fill="#2a2d61" stroke="#6c73c3"/>
+        <circle cx="843" cy="520" r="10" fill="#9a8aff"/><text x="862" y="516" font-size="15" font-weight="700" fill="#f0efff">CodeBuddy</text><text x="862" y="534" font-size="11" fill="#b6b5e7">same task chain</text>
+      </g>
+    </g>
+
+    <!-- arrows runner to memory -->
+    <path d="M1086 370h20M1086 500h20" fill="none" stroke="#61c6ff" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="1088" y="346" font-size="11" fill="#7199c7">runs</text>
+    <text x="1088" y="524" font-size="11" fill="#7199c7">facts</text>
+
+    <!-- memory -->
+    <g filter="url(#shadow)">
+      <rect x="1125" y="190" width="205" height="420" rx="18" fill="#13223a" stroke="#35557f"/>
+      <path d="M1152 253h35l14 14v40h-49z" fill="#3d6cc7"/><path d="M1187 253v15h14" fill="#7fbfff"/>
+      <text x="1152" y="348" font-size="22" font-weight="750" fill="#f1f6ff">Vault</text>
+      <text x="1152" y="375" font-size="13" fill="#9bb6db">plain Markdown</text>
+      <path d="M1152 413h151M1152 448h151M1152 483h116" stroke="#3d6594" stroke-width="8" stroke-linecap="round"/>
+      <g font-size="12" fill="#a9c4e5"><text x="1152" y="535">inbox</text><text x="1201" y="535">projects/log</text><text x="1152" y="560">flights</text><text x="1201" y="560">memory</text></g>
+    </g>
+
+    <g transform="translate(72 678)">
+      <circle cx="5" cy="-4" r="5" fill="#61c6ff"/><text x="19" y="0" font-size="13" fill="#9bb4d5">Blue arrows = controlled hand-offs</text>
+      <circle cx="260" cy="-4" r="5" fill="#a8a0ff"/><text x="274" y="0" font-size="13" fill="#9bb4d5">Purple = provider boundary</text>
+      <text x="1012" y="0" font-size="13" fill="#708eb9">macOS · local-first · zero runtime npm deps</text>
+    </g>
+  </g>
+</svg>

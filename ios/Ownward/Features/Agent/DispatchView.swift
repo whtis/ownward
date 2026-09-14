@@ -14,21 +14,22 @@ let workEngines: [(key: String, label: String)] = [
 /// 服务端 chat.providers 没配该引擎时的兜底型号表（与 web/app.js 同一份）
 private let fallbackModels: [String: [String]] = [
     "claude": ["fable", "opus", "sonnet", "haiku"],
-    "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
-    "codebuddy": ["hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"],
+    "codex": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"],
+    "codebuddy": ["hy3", "hy3-x", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo", "minimax-m3-pay", "minimax-m2.7", "kimi-k3-2", "kimi-k2.7", "kimi-k2.6", "deepseek-v4-pro", "deepseek-v4-flash"],
 ]
 
 private let workProviderEffortsByProvider: [String: [String]] = [
     "claude": ["low", "medium", "high", "xhigh", "max"],
-    "codebuddy": ["low", "medium", "high", "xhigh", "max"],
+    "codebuddy": ["minimal", "low", "medium", "high", "xhigh", "max"],   // codebuddy --help 比 claude 多一档 minimal
 ]
 
 let workCodexModelEfforts: [String: [String]] = [
+    "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
     "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
     "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
     "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
     "gpt-5.5": ["low", "medium", "high", "xhigh"],
-    "gpt-5.4": ["low", "medium", "high", "xhigh"],
+    "gpt-5.3-codex-spark": ["low", "medium", "high", "xhigh"],
 ]
 
 func workProviderDefaultModel(_ provider: String) -> String {

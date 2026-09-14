@@ -1,7 +1,7 @@
 import { lstatSync, readFileSync, readdirSync } from "fs";
 import { extname, join, relative, resolve } from "path";
 import type { PublicSkillTransaction, SkillAnalysisProposal, SkillInventory, SkillPlan, SkillProposalAction, SkillScanOptions } from "./contracts.ts";
-import { analyzeSkillMetadataWithAgent, redactSkillMetadataText, type SkillAnalysisInvoke } from "./analysis.ts";
+import { analyzeSkillMetadata, analyzeSkillMetadataWithAgent, redactSkillMetadataText, type SkillAnalysisInvoke } from "./analysis.ts";
 import { consumeSkillApproval, mintSkillApproval } from "./approval.ts";
 import { atomicWrite } from "./filesystem.ts";
 import type { InternalSkillPlan, RawSkillSnapshot } from "./internal.ts";
@@ -49,6 +49,9 @@ export class SkillInventoryService {
   private scanning: Promise<SkillInventory> | null = null;
   private executor: SkillTransactionExecutor;
   private analysisInvoke?: SkillAnalysisInvoke;
+  /** 正在进行的 Agent 分析（null = 没在跑）。UI 每秒轮询，没有它用户只能盯着灰按钮猜。 */
+  private analysisProgress: import("./contracts.ts").SkillAnalysisProgress | null = null;
+  analysisStatus(): { running: boolean; progress: import("./contracts.ts").SkillAnalysisProgress | null; elapsedMs: number } { const p = this.analysisProgress; return { running: !!p, progress: p, elapsedMs: p ? Date.now() - Date.parse(p.startedAt) : 0 }; }
   readonly options: SkillScanOptions;
   constructor(options: SkillScanOptions, deps: { analysisInvoke?: SkillAnalysisInvoke; transactionHooks?: SkillTransactionHooks } = {}) { this.options = { ...options, storeRoot: resolve(options.storeRoot || join(options.home, ".ownward", "skills")) }; this.executor = new SkillTransactionExecutor(this.options, deps.transactionHooks); this.analysisInvoke = deps.analysisInvoke; }
   current() { return this.snapshot?.inventory || null; }
@@ -60,8 +63,32 @@ export class SkillInventoryService {
   }
   registry() { return readRegistry(this.options.storeRoot!); }
   publicRegistry() { const registry = this.registry(); return { ...registry, skills: registry.skills.map((skill) => ({ id: skill.id, name: skill.name, description: skill.description, digest: skill.digest, lastVerifiedTransaction: skill.lastVerifiedTransaction, sources: skill.sources.map((source) => ({ ...source, path: redactHome(source.path, this.options.home) })), deployments: skill.deployments.map((deployment) => ({ ...deployment, path: redactHome(deployment.path, this.options.home) })) })) }; }
-  contentPreview(expectedRevision: string, ids: unknown) { const snapshot = this.raw(); if (expectedRevision !== snapshot.inventory.revision) fail("SKILL_INVENTORY_STALE", "Skill inventory 已变化"); return conflictContent(snapshot, ids, false, this.options.home); }
-  async analysis(expectedRevision?: string, contentObservationIds?: unknown): Promise<SkillAnalysisProposal> { const snapshot = this.raw(), inventory = snapshot.inventory; if (expectedRevision && expectedRevision !== inventory.revision) fail("SKILL_INVENTORY_STALE", "Skill inventory 已变化"); const approved = conflictContent(snapshot, contentObservationIds, true, this.options.home).map((item) => ({ observationId: item.observationId, files: item.files.map(({ pathAlias, text }) => ({ pathAlias, text: text || "" })) })); return analyzeSkillMetadataWithAgent(inventory, this.analysisInvoke, approved); }
+  /** 冲突两侧的逐文件差异，给本机用户在浏览器里看自己的文件、决定以哪一版为准。
+   *  只允许明确冲突项、恰好两个；正文经 conflictContent 同一套裁剪与脱敏。 */
+  conflictDiff(expectedRevision: string, ids: unknown) {
+    const snapshot = this.raw(); if (expectedRevision !== snapshot.inventory.mutableRevision) fail("SKILL_INVENTORY_STALE", "Skill inventory 已变化");
+    if (!Array.isArray(ids) || ids.length !== 2) fail("SKILL_CONTENT_OPT_IN_INVALID", "差异比较需要恰好两个冲突项");
+    const [a, b] = conflictContent(snapshot, ids, true, this.options.home);
+    const byPath = (side: typeof a) => new Map(side.files.map((f) => [f.pathAlias, f.text ?? ""]));
+    const left = byPath(a), right = byPath(b), paths = [...new Set([...left.keys(), ...right.keys()])].sort();
+    const files = paths.map((path) => {
+      const l = left.get(path), r = right.get(path);
+      if (l === undefined) return { path, status: "only-right" as const };
+      if (r === undefined) return { path, status: "only-left" as const };
+      if (l === r) return { path, status: "same" as const };
+      // 最小行级差异：只列两边不同的行（限 40 行），够看清「只是路径不同」这类情况
+      const ll = l.split("\n"), rl = r.split("\n"), lines: Array<{ n: number; left?: string; right?: string }> = [];
+      for (let i = 0; i < Math.max(ll.length, rl.length) && lines.length < 40; i++) if (ll[i] !== rl[i]) lines.push({ n: i + 1, left: ll[i], right: rl[i] });
+      return { path, status: "different" as const, lines, truncated: lines.length >= 40 };
+    });
+    return { left: { observationId: a.observationId, bytes: a.bytes, files: a.files.length }, right: { observationId: b.observationId, bytes: b.bytes, files: b.files.length }, files };
+  }
+  contentPreview(expectedRevision: string, ids: unknown) { const snapshot = this.raw(); if (expectedRevision !== snapshot.inventory.mutableRevision) fail("SKILL_INVENTORY_STALE", "Skill inventory 已变化"); return conflictContent(snapshot, ids, false, this.options.home); }
+  async analysis(expectedRevision?: string, contentObservationIds?: unknown, mode: "rules" | "agent" = "rules"): Promise<SkillAnalysisProposal> { const snapshot = this.raw(), inventory = snapshot.inventory; if (expectedRevision && expectedRevision !== inventory.mutableRevision) fail("SKILL_INVENTORY_STALE", "Skill inventory 已变化");
+    // 默认走确定性规则，不经过模型。Agent 只在用户显式选择时才用——它是唯一会提出错误建议的来源
+    // （2026-09-02：把 6 个不同 Skill 打成一组、对技能包提 delete），而这台机器上可去重的组本就为 0。
+    if (mode !== "agent") return analyzeSkillMetadata(inventory);
+    const approved = conflictContent(snapshot, contentObservationIds, true, this.options.home).map((item) => ({ observationId: item.observationId, files: item.files.map(({ pathAlias, text }) => ({ pathAlias, text: text || "" })) })); if (this.analysisProgress) fail("SKILL_ANALYSIS_BUSY", "上一次 Agent 分析还在进行中"); try { return await analyzeSkillMetadataWithAgent(inventory, this.analysisInvoke, approved, (progress) => { this.analysisProgress = progress; }); } finally { this.analysisProgress = null; } }
   private planFile(id: string) { return join(this.options.storeRoot!, "plans", `${id}.json`); }
   private persistPlan(plan: InternalSkillPlan) { atomicWrite(this.planFile(plan.public.id), JSON.stringify(plan, null, 2) + "\n"); }
   private internalPlan(id: string): InternalSkillPlan { if (!/^[0-9a-f-]{36}$/i.test(id)) fail("SKILL_PLAN_NOT_FOUND", "Skill 计划不存在"); let plan: InternalSkillPlan; try { plan = JSON.parse(readFileSync(this.planFile(id), "utf8")); } catch { return fail("SKILL_PLAN_NOT_FOUND", "Skill 计划不存在或不可读取"); } if (plan.public?.id !== id || !/^[0-9a-f-]{36}$/i.test(plan.public?.transactionId || "") || !Array.isArray(plan.effects) || plan.effects.some((x, index) => x.index !== index) || computeSkillPlanDigest(plan) !== plan.public.digest || plan.registryAfter?.revision !== plan.public.registryRevision) fail("SKILL_PLAN_INVALID", "Skill 计划验签失败"); if (Date.parse(plan.public.expiresAt) <= Date.now()) fail("SKILL_PLAN_EXPIRED", "Skill 计划已过期，请重新扫描"); return plan; }
@@ -69,12 +96,22 @@ export class SkillInventoryService {
   mintApproval(planId: string, expectedPlanDigest: string, browserSession: string) { const plan = this.internalPlan(planId); if (plan.public.digest !== expectedPlanDigest) fail("SKILL_PLAN_DIGEST_MISMATCH", "计划摘要不匹配"); return mintSkillApproval(this.options.storeRoot!, { planId, planDigest: plan.public.digest, inventoryRevision: plan.public.inventoryRevision, browserSession }); }
   async apply(input: { planId: string; expectedPlanDigest: string; expectedRevision: string; idempotencyKey: string; approval?: { id: string; nonce: string; browserSession: string } }): Promise<PublicSkillTransaction> {
     const plan = this.internalPlan(input.planId); if (plan.public.digest !== input.expectedPlanDigest) fail("SKILL_PLAN_DIGEST_MISMATCH", "计划摘要不匹配"); if (plan.public.inventoryRevision !== input.expectedRevision) fail("SKILL_INVENTORY_STALE", "计划 revision 与请求不一致");
-    return this.executor.apply(plan, input.idempotencyKey, () => { const next = scanSkillsRaw(this.options); this.snapshot = next; return next; }, () => { const fresh = scanSkillsRaw(this.options); if (fresh.inventory.revision !== plan.public.inventoryRevision || fresh.inventory.completeness !== "complete") fail("SKILL_INVENTORY_STALE", "文件系统在审批后发生变化"); this.snapshot = fresh; if (plan.public.requiresApproval) { if (!input.approval) fail("SKILL_APPROVAL_REQUIRED", "此 Skill 计划需要人工审批"); consumeSkillApproval(this.options.storeRoot!, { ...input.approval, planId: plan.public.id, planDigest: plan.public.digest, inventoryRevision: plan.public.inventoryRevision }); } });
+    return this.executor.apply(plan, input.idempotencyKey, () => { const next = scanSkillsRaw(this.options); this.snapshot = next; return next; }, () => { const fresh = scanSkillsRaw(this.options);
+      // 只比可写根：只读根（~/.codex/skills/.system、plugins/cache）由 codex 自己维护，每启动
+      // 一次就重刷一遍，而 planner 拒绝把只读根当写入目标——拿全量 revision 当门，等于让无关工具
+      // 的日常动作否决用户刚点下的批准（2026-09-01 实撞：51/323 个观测在只读根里，批准直接被拒，
+      // 而当时可写根一处没动，计划完全有效）。
+      if (fresh.inventory.mutableRevision !== plan.mutableRevision || fresh.inventory.completeness !== "complete") fail("SKILL_INVENTORY_STALE", "文件系统在审批后发生变化"); this.snapshot = fresh; if (plan.public.requiresApproval) { if (!input.approval) fail("SKILL_APPROVAL_REQUIRED", "此 Skill 计划需要人工审批"); consumeSkillApproval(this.options.storeRoot!, { ...input.approval, planId: plan.public.id, planDigest: plan.public.digest, inventoryRevision: plan.public.inventoryRevision }); } });
   }
   transaction(id: string) { return this.executor.get(id); }
   transactions() { return this.executor.list(); }
   rollbackPreview(id: string) { return this.executor.rollbackPreview(id); }
   mintRollbackApproval(transactionId: string, expectedRevision: string, browserSession: string) { const tx = this.executor.get(transactionId), planId = `rollback:${transactionId}`, digest = `rollback:${transactionId}:${tx.updatedAt}:${expectedRevision}`; return { ...mintSkillApproval(this.options.storeRoot!, { planId, planDigest: digest, inventoryRevision: expectedRevision, browserSession }), planId, digest }; }
-  rollback(input: { transactionId: string; expectedRevision: string; approval: { id: string; nonce: string; browserSession: string } }): PublicSkillTransaction { const current = this.raw(); if (current.inventory.revision !== input.expectedRevision) fail("SKILL_INVENTORY_STALE", "回滚前 inventory 已变化"); const tx = this.executor.get(input.transactionId), planId = `rollback:${input.transactionId}`, digest = `rollback:${input.transactionId}:${tx.updatedAt}:${input.expectedRevision}`; consumeSkillApproval(this.options.storeRoot!, { ...input.approval, planId, planDigest: digest, inventoryRevision: input.expectedRevision }); const result = this.executor.rollbackCommitted(input.transactionId); this.snapshot = scanSkillsRaw(this.options); return result; }
+  rollback(input: { transactionId: string; expectedRevision: string; approval: { id: string; nonce: string; browserSession: string } }): PublicSkillTransaction { const current = this.raw();
+    // 必须比 mutableRevision 而不是 revision：revision 覆盖只读根，codex 每次运行都重写
+    // ~/.codex/skills/.system/** 里的 88 个文件，实测几分钟内变了两次；拿它当门，恢复这条路
+    // 结构上就走不通（2026-09-03：用户点了恢复、原生弹窗也过了，审批铸出却永远消费不掉）。
+    // 与 apply 的审批门口径一致：只有可写根变了才该拦。
+    if (current.inventory.mutableRevision !== input.expectedRevision) fail("SKILL_INVENTORY_STALE", "回滚前 inventory 已变化"); const tx = this.executor.get(input.transactionId), planId = `rollback:${input.transactionId}`, digest = `rollback:${input.transactionId}:${tx.updatedAt}:${input.expectedRevision}`; consumeSkillApproval(this.options.storeRoot!, { ...input.approval, planId, planDigest: digest, inventoryRevision: input.expectedRevision }); const result = this.executor.rollbackCommitted(input.transactionId); this.snapshot = scanSkillsRaw(this.options); return result; }
   recover(): void { this.executor.recover(() => { const next = scanSkillsRaw(this.options); this.snapshot = next; return next; }); }
 }

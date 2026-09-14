@@ -7,7 +7,7 @@ import { SettingsOperationError, SettingsOperationStore, abandonSettingsOperatio
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
 export interface SettingsRouteContext {
-  browserSession?: { id: string; interactive: boolean };
+  browserSession?: { id: string; interactive: boolean; denial?: string | null };
   approvals?: ApprovalStore;
   operations?: SettingsOperationStore;
   runtimeBuildIdentity?: string;

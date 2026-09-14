@@ -19,6 +19,24 @@ import { saveStockConnectorConfig } from "./connector-control.ts";
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 
+const DOWNLOADS_ROOT = resolve(expandHome("~/Downloads"));
+export function isDownloadsPath(dir: string): boolean {
+  const absolute = resolve(expandHome(dir));
+  return absolute === DOWNLOADS_ROOT || absolute.startsWith(`${DOWNLOADS_ROOT}${sep}`);
+}
+
+export function createAsyncSnapshotCache<T>(ttlMs:number,now:()=>number=Date.now){
+  let cached:{at:number;value:T}|undefined,inflight:Promise<T>|undefined;
+  return async(load:()=>Promise<T>):Promise<T>=>{
+    if(cached&&now()-cached.at<ttlMs)return cached.value;
+    if(inflight)return inflight;
+    inflight=load().then(value=>{cached={at:now(),value};return value;}).finally(()=>{inflight=undefined;});
+    return inflight;
+  };
+}
+// 最近会话从派生索引读（session-index.ts），已经很便宜；短 TTL 只为把多端同时轮询合并成一次扫描。
+const recentSessionsSnapshot=createAsyncSnapshotCache<any[]>(3_000);
+
 /**
  * 忙时输入队列：GET 投影；POST {action:"remove",queueId} 撤一条还没发出的。
  * 只认 queueId，不认下标——客户端手里是轮询快照，按下标撤会删掉另一条且无人察觉。
@@ -35,7 +53,7 @@ export async function queueRouteResponse(method:string,id:string,state:()=>Promi
   if(!r.removed)return json({ok:false,errorCode:"QUEUE_ITEM_GONE",msg:"这条已经发出，或已不在队列里",queued:r.queued},409);
   return json({ok:true,msg:"已撤回",queued:r.queued});
 }
-function sessionError(error:any):Response{const code=typeof error?.code==="string"?error.code:undefined,unavailable=new Set(["RUNNER_UNAVAILABLE","RUNNER_CONTROL_TIMEOUT","RUNNER_PROVIDER_UNAVAILABLE","RUNNER_PROVIDER_MISSING","RUNNER_PROVIDER_DEGRADED"]),conflict=code==="SESSION_RUNNER_DRAIN_REQUIRED"||!!code?.startsWith("SESSION_HANDOFF_"),status=unavailable.has(code??"")?503:conflict?409:400,known:Record<string,string>={RUNNER_UNAVAILABLE:"Runner 不可用，请使用原 commandId 查询结果",RUNNER_CONTROL_TIMEOUT:"Runner 结果未知，请使用原 commandId 查询结果",SESSION_RUNNER_DRAIN_REQUIRED:"Runner 命令尚未收敛，暂不能切回旧链写入"},raw=String(error instanceof Error?error.message:error),safe=/(?:ENOENT|lstat|\/Users\/|\/var\/|\.sock)/.test(raw)?"Session 操作失败":raw.slice(0,240);return json({ok:false,msg:code?(known[code]??safe):safe,...(code?{errorCode:code}:{}),...(typeof error?.commandId==="string"?{commandId:error.commandId}:{}),...(typeof error?.runId==="string"?{runId:error.runId}:{}),...(error?.outcomeUnknown===true?{outcomeUnknown:true}:{})},status);}
+function sessionError(error:any):Response{const code=typeof error?.code==="string"?error.code:undefined,unavailable=new Set(["RUNNER_UNAVAILABLE","RUNNER_CONTROL_TIMEOUT","RUNNER_PROVIDER_UNAVAILABLE","RUNNER_PROVIDER_MISSING","RUNNER_PROVIDER_DEGRADED"]),conflict=code==="SESSION_RUNNER_DRAIN_REQUIRED"||!!code?.startsWith("SESSION_HANDOFF_")||!!code?.startsWith("SESSION_RECONFIGURE_"),status=unavailable.has(code??"")?503:conflict?409:400,known:Record<string,string>={RUNNER_UNAVAILABLE:"Runner 不可用，请使用原 commandId 查询结果",RUNNER_CONTROL_TIMEOUT:"Runner 结果未知，请使用原 commandId 查询结果",SESSION_RUNNER_DRAIN_REQUIRED:"Runner 命令尚未收敛，暂不能切回旧链写入"},raw=String(error instanceof Error?error.message:error),safe=/(?:ENOENT|lstat|\/Users\/|\/var\/|\.sock)/.test(raw)?"Session 操作失败":raw.slice(0,240);return json({ok:false,msg:code?(known[code]??safe):safe,...(code?{errorCode:code}:{}),...(typeof error?.commandId==="string"?{commandId:error.commandId}:{}),...(typeof error?.runId==="string"?{runId:error.runId}:{}),...(error?.outcomeUnknown===true?{outcomeUnknown:true}:{})},status);}
 
 async function sessionService(taskId: string) { const mode=effectiveSessionMode(taskId);return{mode,service:createSessionService(taskId,cfg.architecture?.allowedRoots??[])}; }
 
@@ -471,7 +489,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     if (!body.text?.trim()) return json({ ok: false, msg: "内容为空" }, 400);
     const { appendDaily } = await import("./obsidian.ts");
     appendDaily("手记", [{ source: "system", summary: body.text.trim() }]);
-    return json({ ok: true, msg: "已追加到今日" });
+    return json({ ok: true, msg: "已记进今日流水" });
   }
 
   // ---- Gmail 动作 ----
@@ -575,6 +593,17 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     try { return json({ ok: true, msg: "规则已更新", rules: updateRoutineRule(body.id, body.patch || {}) }); }
     catch (e) { return json({ ok: false, msg: String(e instanceof Error ? e.message : e) }, 400); }
   }
+  if (req.method === "POST" && p === "/api/routines/archive") {
+    const body = await req.json() as { id: string };
+    const { archiveRoutine } = await import("./routines.ts");
+    try { return json({ ok: true, sources: await archiveRoutine(body.id), msg: "会议材料已归档" }); }
+    catch (e) { return json({ ok: false, msg: String(e instanceof Error ? e.message : e) }, 400); }
+  }
+  if (req.method === "GET" && p === "/api/routines/archive") {
+    const { routineArchiveStatus } = await import("./routines.ts");
+    try { return json({ ok: true, sources: await routineArchiveStatus(url.searchParams.get("id") || "") }); }
+    catch (e) { return json({ ok: false, msg: String(e instanceof Error ? e.message : e) }, 400); }
+  }
   if (req.method === "GET" && p === "/api/routines/draft") {
     // 必须限定 GET：否则会抢先吃掉下面的 POST 保存请求（读空 query→占坑返回「没有草稿」，
     // saveDraft 永远调不到）——这正是「编辑草稿不生效」的真凶。
@@ -644,6 +673,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     try { wtRoot = realpathSync(wtRoot); } catch { /* 尚未创建时沿用展开路径 */ }
     const push = (dir?: string | null, name?: string) => {
       if (!dir) return;
+      if (isDownloadsPath(dir)) return;
       let actual: string;
       try { actual = realpathSync(resolve(expandHome(dir))); if (!statSync(actual).isDirectory()) return; }
       catch { return; }
@@ -654,6 +684,9 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     };
     for (const project of fav) push(project.dir, project.name);
     for (const t of [...loadTasks()].reverse()) {
+      // 已退出任务的目录可能是临时目录或受 macOS TCC 保护的路径（例如 Downloads）。
+      // 项目启动器只需要可继续工作的活动任务，避免为历史记录触发 realpath/stat。
+      if ((t as any).status === "exited") continue;
       push((t as any).projectDir);
       for (const dir of (t as any).extraDirs ?? []) push(dir);
     }
@@ -702,67 +735,54 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
 
   // ---- 最近会话：ownward 原生引擎对话（人派的，排除 routine/evolve 代笔与 terminal/旁观） ----
   if (p === "/api/dev/recent") {
-    const { codexSessionPath, readCodexMessages } = await import("./codex-sessions.ts");
+    return json(await recentSessionsSnapshot(async()=>{
+    // 读数全部来自派生索引：扫描只重投影签名变了的会话（没事发生时就是几十次 stat），不再把 100 个会话各重放一遍
+    const { sessionIndex, sweepSessionIndex } = await import("./session-index.ts");
+    await sweepSessionIndex({ maxAgeMs: 2_000, roots: cfg.architecture?.allowedRoots ?? [] });
     const { SessionRepository } = await import("./sessions/repository.ts");
-    const tasks = loadTasks().filter((t) => t.engine && t.kind !== "routine" && t.kind !== "evolve"), taskIds = new Set(tasks.map((t) => t.id));
-    const sessionByTask = new Map<string, string>(), runnerSessions = new Map<string, any>();
-    try {
-      for (const session of new SessionRepository(DATA).list()) {
-        for (const taskId of session.taskIds) sessionByTask.set(taskId, session.id);
-        if (session.source !== "legacy" && session.taskIds.some((taskId) => taskIds.has(taskId))) runnerSessions.set(session.id, session);
-      }
-    } catch (e) { log(`recent sessions repository read failed, fallback legacy: ${e}`); }
-    let runnerStates = new Map<string, any>();
-    try {
-      if (runnerSessions.size) {
-        runnerStates = await createNewSessionService(cfg.architecture?.allowedRoots ?? []).states([...runnerSessions.keys()]);
-      }
-    } catch (e) { runnerStates = new Map(); log(`recent sessions runner snapshot failed, fallback legacy: ${e}`); }
+    const tasks = loadTasks().filter((t) => t.engine && t.kind !== "routine" && t.kind !== "evolve");
+    const sessionByTask = new Map<string, string>();
+    try { for (const session of new SessionRepository(DATA).list()) for (const taskId of session.taskIds) sessionByTask.set(taskId, session.id); }
+    catch (e) { log(`recent sessions repository read failed, fallback legacy: ${e}`); }
+    const rows = new Map(sessionIndex().list().map((r) => [r.key, r]));
     const list = tasks
       .map((t) => {
-        let msgs = 0, userMsgs = 0, last = "", pending: any[] = [], runnerTurn = "", lastAt = +new Date(t.endedAt || t.startedAt) || 0;
-        const derive = (mm: any[]) => {
-          msgs = mm.length;
-          for (const m of mm) if (m.role === "user") userMsgs++;
-          const real = [...mm].reverse().find((m) => (m.role === "assistant" || m.role === "user") && m.text?.trim());
-          last = real ? `${real.role === "user" ? "我：" : ""}${String(real.text).trim().slice(0, 160)}` : "";
-        };
-        let dk = t.id;   // 去重键：同一 codex rollout 被多次接管会生成多个任务，只留最新
-        const sessionId = sessionByTask.get(t.id), runnerState = sessionId ? runnerStates.get(sessionId) : undefined;
-        if (runnerState) {
-          const messages = runnerState.messages ?? [];
-          derive(messages);
-          pending = (runnerState.pending ?? []).map((p: any) => ({ toolName: p.toolName, brief: p.brief }));
-          runnerTurn = runnerState.turn || "";
-          lastAt = Math.max(lastAt, runnerState.lastActivityAt || 0, ...messages.map((m) => Date.parse(m.ts || "") || 0));
-          dk = sessionId!;
-        } else try {
-          const s = JSON.parse(readFileSync(join(DATA, "tasks", `${t.id}.session.json`), "utf8"));
-          derive(s.messages || []);
-          pending = (s.pending ?? s.pendingPerms ?? []).map((p: any) => ({ toolName: p.toolName, brief: p.brief }));
-          runnerTurn = s.turn || "";
-          if (s.lastActivityAt) lastAt = s.lastActivityAt;
-        } catch {
-          // codex 引擎：data/tasks 只有 meta（rolloutId），消息本体在 codex 的 rollout 文件里
-          try {
-            const meta = JSON.parse(readFileSync(join(DATA, "tasks", `${t.id}.codex.json`), "utf8"));
-            const rp = codexSessionPath(`cdx:${meta.home || "codex"}:${meta.rolloutId}`);
-            derive(readCodexMessages(rp).messages);
-            lastAt = statSync(rp).mtimeMs;
-            dk = sessionByTask.get(t.id) ?? `cdx:${meta.rolloutId}`;
-          } catch { /* rollout 掉出最近窗口/已清理：按空壳处理 */ }
-        }
+        const sessionId = sessionByTask.get(t.id);
+        const row = (sessionId ? rows.get(`runner:${sessionId}`) : undefined) ?? rows.get(`legacy:${t.id}`) ?? rows.get(`codex:${t.id}`);
+        let lastAt = +new Date(t.endedAt || t.startedAt) || 0, dk = t.id;   // 去重键：同一 codex rollout 被多次接管会生成多个任务，只留最新
+        if (row) { lastAt = row.kind === "legacy" ? (row.lastAt || lastAt) : Math.max(lastAt, row.lastAt); if (row.kind === "runner") dk = sessionId!; else if (row.kind === "codex") dk = sessionByTask.get(t.id) ?? row.sessionId; }
         // Claude 的 /new 会轮换 native ref，但每个真实 Task 仍须单独展示；仅 Codex 接管副本去重。
         if (t.mode === "codex-bg") dk = sessionByTask.get(t.id) ?? dk;
+        const provider = row?.kind === "runner" ? row.providerId : (t.mode === "codex-bg" ? "codex" : "claude");
         return { id: t.id, project: t.project, title: t.title || String(t.task || "").slice(0, 80),
-          mode: t.mode, backend: runnerState?.providerId ?? (t.mode === "codex-bg" ? "codex" : "claude"), providerId: runnerState?.providerId ?? (t.mode === "codex-bg" ? "codex" : "claude"), status: t.status, exitCode: t.exitCode, uncertain: !!t.uncertain, runnerState: { pending, turn: runnerTurn }, startedAt: t.startedAt, lastAt, msgs, userMsgs, last, dk };
+          mode: t.mode, backend: provider, providerId: provider, status: t.status, exitCode: t.exitCode, uncertain: !!t.uncertain,
+          runnerState: { pending: row?.pending ?? [], turn: row?.turn ?? "" }, startedAt: t.startedAt, lastAt, msgs: row?.msgs ?? 0, userMsgs: row?.userMsgs ?? 0, last: row?.lastText ?? "", dk };
       })
       .filter((s) => s.msgs > 0)   // 两边都没消息的空壳不算「有过对话」
       .sort((a, b) => b.lastAt - a.lastAt || (+new Date(b.startedAt) || 0) - (+new Date(a.startedAt) || 0) || (a.id < b.id ? 1 : -1));
     const seenDk = new Set<string>();
-    const deduped = list.filter((s) => !seenDk.has(s.dk) && seenDk.add(s.dk))
-      .map(({ dk, ...s }) => s).slice(0, 100);
-    return json(deduped);
+    return list.filter((s) => !seenDk.has(s.dk) && seenDk.add(s.dk)).map(({ dk, ...s }) => s).slice(0, 100);
+    }));
+  }
+
+  // ---- 跨会话全文搜索：读派生索引，不打开任何会话 ----
+  if (p === "/api/search") {
+    const q = (url.searchParams.get("q") || "").trim(), limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 30));
+    if (!q) return json({ ok: true, q, hits: [] });
+    const { sessionIndex, sweepSessionIndex } = await import("./session-index.ts");
+    await sweepSessionIndex({ maxAgeMs: 5_000, roots: cfg.architecture?.allowedRoots ?? [] });
+    const tasks = new Map(loadTasks().map((t) => [t.id, t]));
+    const hits = sessionIndex().search(q, limit).map((h) => { const t = tasks.get(h.taskId); return { ...h, project: t?.project ?? "", title: t?.title || String(t?.task || "").slice(0, 80), mode: t?.mode ?? "", archived: !t }; });
+    return json({ ok: true, q, hits });
+  }
+  if (p === "/api/index/status") {
+    const { sessionIndex, lastSweepReport } = await import("./session-index.ts");
+    return json({ ok: true, ...sessionIndex().stats(), lastSweep: lastSweepReport() ?? null });
+  }
+  if (req.method === "POST" && p === "/api/index/rebuild") {
+    const { sweepSessionIndex } = await import("./session-index.ts");
+    const report = await sweepSessionIndex({ force: true, roots: cfg.architecture?.allowedRoots ?? [] });
+    return json({ ok: true, msg: `已重建：${report.updated} 个会话，${report.ms}ms${report.errors.length ? `，${report.errors.length} 个来源出错` : ""}`, report });
   }
 
   // ---- 开发会话（引擎任务：追问/审批/中断/接管；CC 与 codex 统一走 agent-backend 分发层） ----
@@ -837,7 +857,14 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   if(req.method==="POST"&&p==="/api/dev/handoff"){
     const body=await req.json().catch(()=>({})) as {id?:string;providerId?:"claude"|"codex"|"codebuddy";model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean};
     if(!body.id||!body.providerId||!["claude","codex","codebuddy"].includes(body.providerId))return json({ok:false,msg:"缺少合法 id/providerId"},400);
-    try{const result=await(await sessionService(body.id)).service.handoff(body.id,{providerId:body.providerId,...(body.model?{model:body.model}:{}),...(body.effort?{effort:body.effort}:{}),...(body.reason?{reason:body.reason}:{}),...(body.confirmUnknownOutcome===true?{confirmUnknownOutcome:true}:{})});return json({ok:true,msg:`已接力到 ${body.providerId}`,...result});}catch(e){return sessionError(e);}
+    try{const result=await(await sessionService(body.id)).service.handoff(body.id,{providerId:body.providerId,...(body.model?{model:body.model}:{}),...(body.effort?{effort:body.effort}:{}),...(body.reason?{reason:body.reason}:{}),...(body.confirmUnknownOutcome===true?{confirmUnknownOutcome:true}:{})});return json({ok:true,msg:(result as {inPlace?:boolean}).inPlace?`已就地切换${body.model?` 模型 ${body.model}`:""}${body.effort?` 深度 ${body.effort}`:""}，下一轮生效`:`已接力到 ${body.providerId}`,...result});}catch(e){return sessionError(e);}
+  }
+  // 同 Provider 就地改模型/思考深度（不接力、不重放历史）。/model、/effort 斜杠命令和会话配置弹窗都打这里。
+  if(req.method==="POST"&&p==="/api/dev/reconfigure"){
+    const body=await req.json().catch(()=>({})) as {id?:string;model?:string;effort?:string};
+    if(!body.id)return json({ok:false,msg:"缺 id"},400);
+    if(!body.model&&!body.effort)return json({ok:false,msg:"要给 model 或 effort"},400);
+    try{const result=await(await sessionService(body.id)).service.reconfigure(body.id,{...(body.model?{model:body.model}:{}),...(body.effort?{effort:body.effort}:{})});return json({ok:true,msg:`已就地切换${body.model?` 模型 ${result.model}`:""}${body.effort?` 深度 ${result.effort}`:""}，下一轮生效`,...result});}catch(e){return sessionError(e);}
   }
   // 忙时输入队列：GET 投影 / POST {action:"remove",queueId} 撤一条还没发出的
   if (p === "/api/dev/queue") {
@@ -931,6 +958,11 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   if (p === "/api/claude-usage") {
     const { claudeUsage } = await import("./claude-usage.ts");
     return json({ ok: true, usage: await claudeUsage() });
+  }
+  // ---- 各家订阅额度（Claude 5h/周、Codex 主/次窗口）：会话头部按引擎显示、系统页全列 ----
+  if (p === "/api/usage") {
+    const { providersUsage } = await import("./provider-usage.ts");
+    return json({ ok: true, ...(await providersUsage()) });
   }
 
   // ---- 会话置顶（任务列顶部 pin 长期对话，daemon 重启不丢） ----
@@ -1101,6 +1133,8 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     return c ? json({ ...c, binding: await chatBinding(c) }) : json({ ok: false, msg: "会话不存在" }, 404);
   }
   if (p === "/api/chat/providers") return json(providers());
+  // 派发 / 会话重配用的 Provider 能力目录：Codex 部分来自 CLI 的官方模型缓存，客户端内置表只是兜底
+  if (p === "/api/providers/catalog") return json(await (await import("./provider-catalog.ts")).providerCatalog());
   // 附件只读接口：id 白名单在 readChatImage 里（必须出现在这个对话的消息中），
   // 鉴权就是外面这层（localhost Host/Origin 或远程 token），不额外开门
   if (p === "/api/chat/image" && (req.method === "GET" || req.method === "HEAD")) {

@@ -1,4 +1,4 @@
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { fsyncSync } from "../../fs-durable.ts";
 import { dirname, join } from "path";
 import type { DevMsg } from "./types.ts";
@@ -17,6 +17,8 @@ function parse(raw: unknown): InitialHistorySnapshot {
   return { ...x, status };
 }
 export function readInitialHistorySnapshot(root: string, sessionId: string): InitialHistorySnapshot | null { const file = pathFor(root, sessionId); if (!existsSync(file)) return null; try{return structuredClone(parse(JSON.parse(readFileSync(file,"utf8"))));}catch{try{renameSync(file,`${file}.invalid.${Date.now()}`);}catch{}return null;} }
+/** 快照文件的廉价指纹（size:mtime）：投影缓存/索引只想知道"变没变"，不必每次把整份 JSON 解析出来。 */
+export function initialHistorySignature(root: string, sessionId: string): string { try { const st = statSync(pathFor(root, sessionId)); return `${st.size}:${st.mtimeMs}`; } catch { return "missing"; } }
 export function readInitialHistory(root: string, sessionId: string): DevMsg[] { return readInitialHistorySnapshot(root, sessionId)?.messages ?? []; }
 export function clearInitialHistory(root:string,sessionId:string):void{rmSync(pathFor(root,sessionId),{force:true});}
 export function writeInitialHistory(root: string, snapshot: { status?: "ok" | "unavailable"; sessionId: string; providerId: SessionProviderId; nativeRef: string; messages: Array<Pick<DevMsg,"role"|"text">&Partial<Omit<DevMsg,"role"|"text">>>;attempts?:number;nextRetryAt?:string }): void {

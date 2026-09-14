@@ -24,6 +24,9 @@ export interface SettingsSchema {
   nodes: Record<string, SettingSchemaNode>;
 }
 
+// verticals 整体仍是 internal——trusted / grantedCapabilities / token / 路径这些是安全边界，
+// 设置页永远不许改。只有 `/verticals/<id>/enabled` 放开成 advanced：它只决定「跑不跑」，
+// 关掉一个已装扩展不会提权，而这正是用户唯一需要在界面上做的动作。
 const TIERS: Record<string, SettingTier> = {
   owner: "public", timezone: "public", quietHours: "public", notify: "public",
   vault: "public", heartbeat: "public", digest: "public", chat: "public",
@@ -41,9 +44,9 @@ function valueType(value: unknown): SettingValueType {
   throw new Error(`不支持的设置默认值类型：${typeof value}`);
 }
 
-const INTERNAL_PATH = /^(?:\/architecture\/(?:sessionRunnerMode|sessionRunnerTaskIds)|\/release\/|\/verticals\/|\/connectors\/externalPaths$|\/connectors\/lark\/eventKeys$|\/providers\/[^/]+\/version$)/;
-const ADVANCED_PATH = /^(?:\/dashboard\/|\/triage\/|\/llm\/|\/dispatch\/|\/engine\/|\/strategy\/|\/providers\/|\/architecture\/)/;
-const HIGH_RISK_PATH = /(?:\/dashboard\/(?:port|listen)$|Bin$|\/command$|\/positionsCmd$|\/allowedRoots$|\/allowFullAccess$|\/worktreeRoot$|\/vault\/root$)/;
+const INTERNAL_PATH = /^(?:\/architecture\/(?:sessionRunnerMode|sessionRunnerTaskIds)|\/release\/|\/verticals\/(?![^/]+\/enabled$)|\/connectors\/externalPaths$|\/connectors\/lark\/eventKeys$|\/providers\/[^/]+\/version$)/;
+const ADVANCED_PATH = /^(?:\/dashboard\/|\/triage\/|\/llm\/|\/dispatch\/|\/engine\/|\/strategy\/|\/providers\/|\/architecture\/|\/verticals\/)/;
+const HIGH_RISK_PATH = /(?:\/verticals\/[^/]+\/enabled$|\/dashboard\/(?:port|listen)$|Bin$|\/command$|\/positionsCmd$|\/allowedRoots$|\/allowFullAccess$|\/worktreeRoot$|\/vault\/root$)/;
 const SENSITIVE_PATH = /(?:password|secret|token|api[-_]?key|credential)/i;
 
 function leafTier(path: string, inherited: SettingTier): SettingTier {

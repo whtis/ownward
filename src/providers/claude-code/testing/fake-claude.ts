@@ -18,10 +18,12 @@ function init() {
 function complete(text = "done") {
   write({ type: "stream_event", event: { delta: { type: "text_delta", text } } });
   write({ type: "assistant", message: { model: "fake-claude", usage: { input_tokens: 3, cache_read_input_tokens: 2, output_tokens: 1 }, content: [{ type: "text", text }, { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "/tmp/example" } }] } });
-  write({ type: "result", is_error: false, usage: { input_tokens: 3, cache_read_input_tokens: 2, output_tokens: 1 } });
+  write({ type: "result", is_error: false, usage: { input_tokens: 3, cache_read_input_tokens: 2, output_tokens: 1 }, modelUsage: { "fake-claude": { inputTokens: 5, outputTokens: 1, contextWindow: 1_000_000 }, "fake-haiku": { inputTokens: 1, outputTokens: 1, contextWindow: 200_000 } } });
 }
 function completeWithUsage(text: string, usage: Record<string, number>) {
-  write({ type: "assistant", message: { model: "fake-claude", usage, content: [{ type: "text", text }] } }); write({ type: "result", is_error: false, usage });
+  write({ type: "assistant", message: { model: "fake-claude", usage, content: [{ type: "text", text }] } });
+  // 真 CLI 的 result 帧按模型报 modelUsage.contextWindow（主循环 1M，子代理 haiku 200k）——adapter 取最大值往下传
+  write({ type: "result", is_error: false, usage, modelUsage: { "fake-claude": { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0, contextWindow: 1_000_000 }, "fake-haiku": { inputTokens: 1, outputTokens: 1, contextWindow: 200_000 } } });
 }
 function onFrame(frame: any) {
   if (frame?.type === "user") {
@@ -29,6 +31,9 @@ function onFrame(frame: any) {
     if (text === "MALFORMED") { process.stdout.write("{not-json\n{still-bad\n[broken\n"); return; }
     if (text === "ONE_BAD") { process.stdout.write("not-json\n"); complete("after-bad-line"); return; }
     if (text === "GIANT_HALF") { process.stdout.write("x".repeat(4096)); return; }
+    // 真 CLI 在 --include-partial-messages 下刷的整条 SSE 流：只有 text_delta 会被消费，
+    // 其余（thinking_delta / content_block_stop / message_stop…）是预期内忽略的高频帧
+    if (text === "PARTIAL_FRAMES") { for (let i = 0; i < 25; i++) write({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "t" } } }); write({ type: "stream_event", event: { type: "message_stop" } }); complete("partial-done"); return; }
     if (text === "MULTI_DELTA") { write({ type: "stream_event", event: { delta: { type: "text_delta", text: "a" } } }); write({ type: "stream_event", event: { delta: { type: "text_delta", text: "b" } } }); write({ type: "stream_event", event: { delta: { type: "text_delta", text: "c" } } }); completeWithUsage("abc", { input_tokens: 1, output_tokens: 1 }); return; }
     if (text === "NOTICES") { write({ type: "system", subtype: "status", status: "compacting" }); write({ type: "system", subtype: "status", compact_result: "failed", compact_error: "compact boom" }); write({ type: "system", subtype: "status", compact_result: "success" }); write({ type: "system", subtype: "status", status: "some_future_status" }); write({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "rate limit exceeded" }] } }); write({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "authentication token expired" }] } }); write({ type: "assistant", isSidechain: true, message: { model: "fake", content: [{ type: "text", text: "hidden" }] } }); write({ type: "user", message: { content: [{ type: "tool_result", is_error: true, content: "tool failed" }] } }); complete("notice-done"); return; }
     if (text === "LARGE_TOOL_IMAGE") {

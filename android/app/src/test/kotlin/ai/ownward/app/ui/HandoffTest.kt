@@ -37,16 +37,17 @@ class HandoffTest {
     @Test fun sessionCapabilitiesMatchExactModelSpecificContract() {
         assertEquals(
             linkedMapOf(
-                "gpt-5.6-sol" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
+                "gpt-6-astra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
+    "gpt-5.6-sol" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
                 "gpt-5.6-terra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
                 "gpt-5.6-luna" to listOf("low", "medium", "high", "xhigh", "max"),
                 "gpt-5.5" to listOf("low", "medium", "high", "xhigh"),
-                "gpt-5.4" to listOf("low", "medium", "high", "xhigh"),
+                "gpt-5.3-codex-spark" to listOf("low", "medium", "high", "xhigh"),
             ),
             WORK_CODEX_MODEL_EFFORTS,
         )
         assertEquals(listOf("low", "medium", "high", "xhigh", "max"), workProviderEfforts("claude", "sonnet"))
-        assertEquals(workProviderEfforts("claude", "sonnet"), workProviderEfforts("codebuddy", "hy3"))
+        assertEquals(listOf("minimal") + workProviderEfforts("claude", "sonnet"), workProviderEfforts("codebuddy", "hy3"))
         assertEquals(emptyList<String>(), workProviderEfforts("codex", "gpt-5.5-pro"))
         assertEquals("gpt-5.6-sol", workProviderDefaultModel("codex"))
         assertEquals("gpt-5.6-sol", workProviderHandoffModel("codex"))
@@ -54,13 +55,13 @@ class HandoffTest {
 
     @Test fun defaultServerModelListStillExposesAllKnownTaskModels() {
         assertEquals(
-            listOf("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"),
+            listOf("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"),
             workProviderModels("codex", mapOf("codex" to listOf("gpt-5.6-sol"))),
         )
     }
 
     @Test fun modelChangesChooseSupportedDefaultAndLegacyPairsCannotSubmit() {
-        assertEquals("medium", workProviderDefaultEffort("codex", "gpt-5.4"))
+        assertEquals("medium", workProviderDefaultEffort("codex", "gpt-5.3-codex-spark"))
         assertEquals(true, workProviderSelectionIsValid("codex", "gpt-5.6-sol", "ultra"))
         assertEquals(false, workProviderSelectionIsValid("codex", "gpt-5.6-luna", "ultra"))
         assertEquals(false, workProviderSelectionIsValid("codex", "gpt-5.5-pro", "xhigh"))

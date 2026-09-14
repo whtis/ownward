@@ -80,6 +80,14 @@ struct InboxView: View {
     let openSettings: () -> Void
     @State private var store: InboxStore
     @Environment(\.openURL) private var openURL
+    /// DEBUG 直达：-ownward.debugRoutineDraft <routineId> 启动即打开该例行的审稿页（截图/自动化用）
+    private var debugRoutineDraft: String? {
+        #if DEBUG
+        UserDefaults.standard.string(forKey: "ownward.debugRoutineDraft")
+        #else
+        nil
+        #endif
+    }
 
     init(client: OwnwardClient, openTask: @escaping (String) -> Void, openChat: @escaping (String) -> Void, openSettings: @escaping () -> Void) {
         self.client = client; self.openTask = openTask; self.openChat = openChat; self.openSettings = openSettings
@@ -113,7 +121,10 @@ struct InboxView: View {
                 }
                 if !store.routines.isEmpty {
                     SectionHeader(text: "例行")
-                    ForEach(store.routines) { r in RoutineRow(routine: r, client: client) { Task { await store.refresh() } } }
+                    ForEach(store.routines) { r in
+                        RoutineRow(routine: r, client: client, openTask: openTask, onChanged: { Task { await store.refresh() } },
+                                   autoOpen: debugRoutineDraft == r.id)
+                    }
                 }
                 if !store.actions.isEmpty {
                     SectionHeader(text: "行动卡")
@@ -199,37 +210,66 @@ private struct AttentionRow: View {
 private struct RoutineRow: View {
     let routine: RoutineCard
     let client: OwnwardClient
+    let openTask: (String) -> Void
     let onChanged: () -> Void
+    var autoOpen = false   // DEBUG 直达：启动即打开审稿页（模拟器没法脚本化点按）
+    @Environment(\.openURL) private var openURL
+    @State private var reviewing = false
+    @State private var busy = false
+    @State private var error: String?
+
     var body: some View {
         let r = routine
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(r.name).listBody()
-                Text(statusText).font(.owBodyS).foregroundStyle(r.overdue ? OW.warn : OW.textDim)
+        let actions = routineActions(r)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(r.name).listBody()
+                    Text(statusText).font(.owBodyS).foregroundStyle(r.overdue || r.stale ? OW.warn : OW.textDim)
+                    if r.stale { Text("素材已更新，草稿可能过期").font(.owBodyS).foregroundStyle(OW.warn) }
+                }
+                Spacer(minLength: 8)
+                HStack(spacing: 12) {
+                    if actions.contains("generate") {
+                        Button("生成草稿") { Haptics.tap(); submit { try await client.routineGenerate(id: r.id).requireOk("生成失败") } }
+                    }
+                    if actions.contains("view") { Button("查看") { Haptics.tap(); reviewing = true } }
+                    if actions.contains("task"), let t = r.taskId { Button("查看任务") { Haptics.tap(); openTask(t) } }
+                    if actions.contains("document"), let s = r.docUrl, let u = URL(string: s) { Button("原文") { Haptics.tap(); openURL(u) } }
+                    if actions.contains("skip") {
+                        Button("跳过") { Haptics.tap(); submit { try await client.routineSkip(id: r.id, date: r.date).requireOk("跳过失败") } }
+                            .foregroundStyle(OW.textDim)
+                    }
+                }
+                .font(.owLabel).buttonStyle(.borderless).disabled(busy)
+                .padding(.top, 2)
             }
-            Spacer()
-            switch r.status {
-            case "pending":
-                Button("生成草稿") { Haptics.tap(); Task { _ = try? await client.routineGenerate(id: r.id); onChanged() } }.font(.owLabel)
-            case "draft":
-                Button("写入") { Haptics.action(); Task { _ = try? await client.routineWrite(id: r.id, date: r.date); onChanged() } }.font(.owLabel)
-                Button("跳过") { Haptics.tap(); Task { _ = try? await client.routineSkip(id: r.id, date: r.date); onChanged() } }
-                    .font(.owLabel).foregroundStyle(OW.textDim)
-            default: EmptyView()
-            }
+            if let error { Text(error).font(.owBodyS).foregroundStyle(OW.danger) }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(OW.surface1, in: RoundedRectangle(cornerRadius: OWRadius.m))
         .padding(.horizontal, 12).padding(.vertical, 3)
+        .sheet(isPresented: $reviewing) { RoutineDraftSheet(routine: r, client: client, onChanged: onChanged, autoFocus: autoOpen) }
+        .onAppear { if autoOpen, actions.contains("view") { reviewing = true } }
     }
     private var statusText: String {
         switch routine.status {
         case "pending": routine.overdue ? "已到期，待生成" : "今天 \(routine.time)"
-        case "draft": "草稿待审" + (routine.stale ? "（已过期）" : "")
+        case "draft": "草稿待审"
         case "writing": "正在写入…"
         case "written": "已写入"
         case "skipped": "已跳过"
         default: routine.nextLabel
+        }
+    }
+    private func submit(_ op: @escaping () async throws -> Void) {
+        guard !busy else { return }
+        busy = true
+        error = nil
+        Task {
+            do { try await op(); onChanged() }
+            catch { Haptics.error(); self.error = error.userMessage }
+            busy = false
         }
     }
 }

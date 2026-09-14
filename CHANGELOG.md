@@ -2,6 +2,49 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.2.2] - 2026-09-14
+
+### Added
+
+- Codex models and their supported reasoning levels now come from the CLI's own official catalog (`~/.codex/models_cache.json`), so new models such as GPT-6-Astra appear without a code change; a built-in snapshot is only a fallback. Exposed to clients as `/api/providers/catalog`.
+- Switching the model or reasoning depth within the same engine now happens in place: the native session is resumed with the new parameters instead of creating a handoff session with a truncated transcript. Mobile clients get this automatically through the existing handoff API.
+- The session composer understands `/model <name>` and `/effort <level>` (Web) and shows Ownward's own slash commands for Codex sessions too.
+- Claude Code and CodeBuddy reasoning levels, and the CodeBuddy model list, are parsed from each CLI's `--help`; Claude models also include the account's server-provided extra models from `~/.claude.json`. CodeBuddy gains its `minimal` level.
+- Session lineage: the session state now lists every session in a handoff chain (and refs rotated by `/new`) with its native session ID and a ready-to-paste resume command per engine (`claude --resume`, `codex resume`, `codebuddy --resume`). Web shows it as a collapsible panel; Android and iOS show it in the session info sheet, and their headers now show engine · model · depth.
+
+### Changed
+
+- Chat replies start much sooner: Claude chats keep one resident `claude` process per conversation (the CLI cold start of roughly four seconds used to be paid on every message), and Codex chats resume their native thread with streamed increments instead of replaying history and returning one block at the end.
+- The built-in Codex model lineup follows the official catalog of 2026-09-05: GPT-6-Astra and GPT-5.3-Codex-Spark added, GPT-5.4 removed.
+- The built-in CodeBuddy model lineup follows `codebuddy --help` of 2026-09-05 (hy3-x, glm-5.3, kimi-k3-2, deepseek-v4-flash and more; retired ids removed).
+
+### Fixed
+
+- The dispatch dialog on the Web no longer keeps the previously chosen engine while resetting the model to the configured default, which produced impossible combinations such as Codex with `opus`.
+
+## [1.2.1] - 2026-09-02
+
+### Added
+
+- iOS can now review routine drafts like Android: view, edit, save, save-and-write, retry, and stale-draft warnings.
+- Skill tidy-up shows live progress and diagnostics instead of a single disabled button.
+- Settings can enable or disable installed extensions, and the settings entry moved into the overflow menu with extension entries following their enabled state.
+
+### Changed
+
+- Quick notes moved to the Today page and state where they are written.
+- The draft review dialog on the Web can be resized freely and no longer loses edits when closed.
+
+### Fixed
+
+- The dispatch dialog shows recent directories again as an always-visible chip row, and the configured default directory has `~` expanded before it reaches clients.
+- Routine draft review on mobile browsers and Android keeps the editor above the on-screen keyboard.
+- Skill tidy-up no longer times out by default, explains zero-suggestion results, and stops flagging managed multi-engine deployments as duplicates.
+- The Skill approval gate compares writable roots only, so read-only roots refreshed by external tools no longer veto manual approvals.
+- Skill suggestions use plain language, keep primary actions in a sticky top bar, and center their dialogs.
+- Codex sessions are no longer reported busy between the final frame and cleanup, so queued messages are no longer silently dropped.
+- Removed a stale scheduled sync whose timeouts caused cascading false failures.
+
 ## [1.2.0] - 2026-08-31
 
 ### Added

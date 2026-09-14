@@ -1,6 +1,6 @@
 // ownward daemon 入口：启动事件源 + triage/heartbeat 定时器。
 // launchd 负责常驻与崩溃拉起（KeepAlive）。
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { openAction, sweepActions } from "./actions.ts";
 import { reapExited, updateTask } from "./dispatch.ts";
@@ -12,7 +12,7 @@ import { CrashGuard } from "./crash-guard.ts";
 import { dispatchDeployHelper } from "./deploy-helper.ts";
 import { startServer } from "./server.ts";
 import { runTriage } from "./triage.ts";
-import { DATA, ROOT, cfg, ensureDir, log, run, tailRead, updateState } from "./util.ts";
+import { DATA, ROOT, cfg, ensureDir, log, rotateLogFile, run, updateState } from "./util.ts";
 import { ensureCompatibleSchema } from "./storage/schema.ts";
 import { recoverClaims } from "./spool.ts";
 import { reconcileLegacySessions } from "./sessions/repository.ts";
@@ -99,13 +99,7 @@ function traceLife() {
 
 /** daemon.log 无轮转会无限增长（launchd 一直追加），启动时超 5MB 截到尾部 512KB */
 function rotateLog() {
-  const f = join(DATA, "logs", "daemon.log");
-  try {
-    if (existsSync(f) && statSync(f).size > 5 * 1024 * 1024) {
-      const tail = tailRead(f, 512 * 1024);
-      writeFileSync(f, `(rotated ${new Date().toISOString()})\n` + tail);
-    }
-  } catch { /* 轮转失败不阻塞启动 */ }
+  rotateLogFile(join(DATA, "logs", "daemon.log"));
 }
 
 /** 演进任务完成后：在 worktree 里跑验证门，出 diff 摘要，等人工审批 */
@@ -220,6 +214,22 @@ async function main() {
   // Runner 默认写链的审批投影 + 6h 兜底超时（与上面的 legacy sweep 对称：那条只覆盖 mode=off 的存量会话）。
   // 没有它，Runner 审批只活在会话视图里：人不在屏幕前不知道任务卡住，且永不超时收敛。
   if (sessionMode !== "off") void import("./kernel/sessions/approval-sweep.ts").then(m=>{setInterval(()=>void m.sweepRunnerApprovals().catch(e=>log(`approval sweep: ${e instanceof Error?e.name:"unknown"}`)),60_000);}).catch(e=>log(`approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
+  // 事件 journal 归档：只增不减的话（实测 ~1000 条/天、每月 +12MB）冷启动解析和内存都会一路涨。
+  // 启动时先做一次，之后每天一次；旧记录进 runner/archive/sessions/，一条不删，旧会话照常回读。
+  if (sessionMode !== "off") {
+    const archive = () => void import("./runner/journals.ts").then(m=>{
+      const r = m.archiveRunnerEvents(DATA);
+      if (r.archived) log(`event archive: 归档 ${r.archived} 条 / ${r.sessions.length} 个会话，热 journal 余 ${r.kept} 条`);
+    }).catch(e=>log(`event archive: ${e instanceof Error?e.message:"unknown"}`));
+    setTimeout(archive, 30_000); setInterval(archive, 86_400_000);
+    // bridge 台账剪枝：跟上面同一个毛病的另一半。events 有归档兜着，bridge 此前完全没人管，
+    // 而它比 events 更疼——advance() 在热路径上整份重写，文件多大每次推进就多贵。
+    const prune = () => void import("./kernel/sessions/bridge-store.ts").then(m=>{
+      const r = m.pruneBridgeCommands(DATA);
+      if (r.pruned) log(`bridge prune: 剪掉 ${r.pruned} 条已终结命令，余 ${r.kept} 条`);
+    }).catch(e=>log(`bridge prune: ${e instanceof Error?e.message:"unknown"}`));
+    setTimeout(prune, 45_000); setInterval(prune, 86_400_000);
+  }
 
   // 编码任务看护：bg 任务退出 → 通知 + 自动收割；演进任务额外跑验证门；routine 任务回写状态
   setInterval(async () => {
@@ -264,6 +274,10 @@ async function main() {
       }
     }
   }, (cfg.dispatch?.watchSec || 60) * 1000);
+  // 会话派生索引（侧栏读数 + 全文搜索）：启动后先补齐一遍（首次要投影全部会话，逐个让出事件循环），之后 5s 一扫——
+  // 没变化的会话只是 stat 比对，活跃会话按增量投影；这样 /api/dev/recent 和搜索永远只读库
+  setTimeout(() => { import("./session-index.ts").then((m) => m.sweepSessionIndex({ roots: cfg.architecture?.allowedRoots ?? [] })).catch((e) => log(`session index: ${e}`)); }, 15_000);
+  setInterval(() => { import("./session-index.ts").then((m) => m.sweepSessionIndex({ maxAgeMs: 4_000, roots: cfg.architecture?.allowedRoots ?? [] })).catch((e) => log(`session index: ${e}`)); }, 5_000);
   setInterval(() => { import("./flight-record.ts").then((m) => m.sweepFlights().catch((e) => log(`flight sweep: ${e}`))); }, 300_000); // 飞行记录写失败的 durable 重试
   setInterval(() => { import("./routines.ts").then((m) => m.sweepRoutines()).catch((e) => log(`routines sweep: ${e}`)); }, 60_000); // 职责草稿自动生成
   setInterval(() => { import("./memory.ts").then((m) => m.sweepMemoryChores().catch((e) => log(`memory chores: ${e}`))); }, 600_000); // 记忆杂务浮到首页

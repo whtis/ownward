@@ -1,11 +1,11 @@
-import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeSync } from "fs";
+import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeSync } from "fs";
 import { fsyncSync } from "../fs-durable.ts";
 import { basename, dirname, join } from "path";
 import { DurableJsonlJournal, stableJson, withRunnerFileLock, type JournalDiagnostic, type JournalRead, type JournalTailRepair } from "./durable-journal.ts";
 import { RUNNER_MAX_BLOB_BYTES } from "./protocol.ts";
 
 export const RUNNER_JOURNAL_SCHEMA_VERSION = 1 as const;
-export type RunnerCommandKind = "start-run" | "resume-run" | "send-input" | "interrupt" | "approval-response" | "add-dir" | "set-access" | "new-session";
+export type RunnerCommandKind = "start-run" | "resume-run" | "send-input" | "interrupt" | "approval-response" | "add-dir" | "set-access" | "set-options" | "new-session";
 export interface RunnerCommandRecord {
   schemaVersion: 1; commandId: string; kind: RunnerCommandKind; acceptedAt: string;
   runId: string; sessionId: string; providerId: string;
@@ -35,7 +35,7 @@ function strictObject(raw: unknown, allowed: Set<string>): Record<string, unknow
 }
 const commandKeys = new Set(["schemaVersion", "commandId", "kind", "acceptedAt", "runId", "sessionId", "providerId", "inputRef", "inputSha256", "inputBytes", "approvalRequestId"]);
 const eventKeys = new Set(["schemaVersion", "eventId", "sequence", "type", "at", "commandId", "runId", "sessionId", "providerId", "nativeRef", "approvalRequestId", "reason", "exitCode", "payloadRef", "payloadSha256", "payloadBytes"]);
-const commandKinds = new Set<RunnerCommandKind>(["start-run", "resume-run", "send-input", "interrupt", "approval-response", "add-dir", "set-access", "new-session"]);
+const commandKinds = new Set<RunnerCommandKind>(["start-run", "resume-run", "send-input", "interrupt", "approval-response", "add-dir", "set-access", "set-options", "new-session"]);
 const eventTypes = new Set<RunnerEventType>(["dispatching", "started", "delta", "message-completed", "usage", "provider-notice", "session-updated", "approval-requested", "completed", "failed", "interrupted", "unknown-outcome"]);
 const reasonCodes = new Set<RunnerReasonCode>(["provider_exit", "provider_protocol_error", "provider_result_error", "provider_unavailable", "provider_busy", "provider_input_invalid", "approval_stale", "run_not_active", "provider_no_ack", "provider_no_progress", "unsupported_command", "approval_denied", "user_interrupt", "runner_lost_ownership", "test_fixture"]);
 
@@ -109,6 +109,7 @@ export class RunnerCommandJournal {
   }
   read(): JournalRead<RunnerCommandRecord> { return this.journal.read(); }
   readStrict(): RunnerCommandRecord[] { return this.journal.readStrict(); }
+  cacheToken(): string { return this.journal.cacheToken(); }
   repairTruncatedTail(): JournalTailRepair { return this.journal.repairTruncatedTail(); }
   accept(command: Omit<RunnerCommandRecord, "schemaVersion" | "acceptedAt" | "inputRef" | "inputSha256" | "inputBytes"> & { input?: string }, now = new Date().toISOString()) {
     const { input, ...base } = command;
@@ -144,19 +145,35 @@ export class RunnerEventJournal {
         if (!state.started && next.type !== "dispatching" && next.type !== "started" && next.type !== "provider-notice" && !terminalBeforeStarted(next.type)) throw new Error("started 前拒绝该 event");
       }, (records, next) => updateEventState(records, next));
   }
-  read(): JournalRead<RunnerEventRecord> {
-    const result = this.journal.read(); if (result.diagnostics.length) return result;
+  private crossValidate(result: JournalRead<RunnerEventRecord>): JournalRead<RunnerEventRecord> {
+    if (result.diagnostics.length) return result;
     let commands: RunnerCommandRecord[];
     try { commands = this.commands.readStrict(); }
     catch (e) { return { records: result.records, diagnostics: [crossDiagnostic(0, "command-journal", e)] }; }
-    const diagnostics = validateEventHistory(result.records, commands);
+    // 指纹必须在两次 read 之后取，代表的正是刚拿到的这份内容
+    const key = join(this.dataRoot, "runner", "events.jsonl"), events = this.journal.cacheToken(), commandsToken = this.commands.cacheToken();
+    const memo = crossMemos.get(key);
+    const resumable = !!memo && !memo.diagnostics.length && memo.processed <= result.records.length
+      && grewInPlace(memo.events, events) && grewInPlace(memo.commands, commandsToken);
+    const states = resumable ? memo!.states : new Map<string, EventState>(), diagnostics: JournalDiagnostic[] = [];
+    foldEventHistory(result.records, new Map(commands.map((c) => [c.commandId, c])), states, diagnostics, resumable ? memo!.processed : 0);
+    if (events && commandsToken) crossMemos.set(key, { events, commands: commandsToken, processed: result.records.length, states, diagnostics });
+    else crossMemos.delete(key);
     return { records: result.records, diagnostics };
   }
+  read(): JournalRead<RunnerEventRecord> { return this.crossValidate(this.journal.read()); }
+  /** 热路径（daemon 50ms 轮询 + 大量 API handler）：走 readShared 拿共享冻结记录。
+   *  原来这里经 read() 走底层 structuredClone，14k 条记录实测单次 13.8ms、随 journal 线性增长，
+   *  是 daemon 主线程周期性卡顿的主因；共享路径同一份数据只要 0.02ms。
+   *  调用方全是 filter/find/投影等只读用法；记录进缓存时已深冻结，写入会当场 TypeError。
+   *  要可变副本的用 read()。 */
   readStrict(): RunnerEventRecord[] {
-    const result = this.read();
+    const result = this.crossValidate(this.journal.readShared());
     if (result.diagnostics.length) throw new Error(`events.jsonl 有 ${result.diagnostics.length} 条跨 journal 或 lifecycle 损坏记录`);
     return result.records;
   }
+  /** 只给归档压缩用：整体重写热 journal。调用方必须保证 records 仍满足全部不变量。 */
+  rewriteRetained(records: readonly RunnerEventRecord[]): void { this.journal.rewrite(records); }
   repairTruncatedTail(): JournalTailRepair { return this.journal.repairTruncatedTail(); }
   append(event: Omit<RunnerEventRecord, "schemaVersion" | "sequence" | "payloadRef" | "payloadSha256" | "payloadBytes"> & { sequence?: number; payload?: string }) {
     const { payload, ...base } = event;
@@ -200,6 +217,21 @@ export interface RunnerBlobAudit { referenced: string[]; orphans: string[]; temp
 export function auditRunnerBlobs(dataRoot: string): RunnerBlobAudit {
   const commandRepo = new RunnerCommandJournal(dataRoot), commands = commandRepo.readStrict(), events = new RunnerEventJournal(dataRoot).readStrict();
   const referenced = new Set([...commands.flatMap((r) => r.inputRef ? [r.inputRef] : []), ...events.flatMap((r) => r.payloadRef ? [r.payloadRef] : [])]);
+  // 归档过的事件仍然引用着自己的 payload——archiveRunnerEvents 把记录搬进
+  // runner/archive/sessions/ 时明确不动 blob，会话历史照样要靠它们渲染。审计只认热 journal 的话，
+  // 归档一发生（保留期 30 天，所以装机头一个月看不出来）那批 blob 就会集体被判成 orphan；
+  // 谁再把 quarantineRunnerOrphans 接上去，搬走的就是还在用的历史。
+  // 用正则直接扫原文而不是逐行 JSON.parse：坏行被跳过会**少算**引用，而少算的后果是误删。
+  // 同理，某份归档读不出来就整个审计作废（readStrict 遇损坏也是这么抛的）——「证明不了是孤儿」
+  // 必须表现为报错，不能表现为「它是孤儿」。
+  const archiveDir = join(dataRoot, "runner", "archive", "sessions");
+  if (existsSync(archiveDir)) for (const name of readdirSync(archiveDir)) {
+    if (!name.endsWith(".jsonl")) continue;
+    let raw: string;
+    try { raw = readFileSync(join(archiveDir, name), "utf8"); }
+    catch (error) { throw new Error(`归档 ${name} 读取失败，无法判定 blob 引用：${error instanceof Error ? error.message : String(error)}`); }
+    for (const [, ref] of raw.matchAll(/"payloadRef"\s*:\s*"(payloads\/[a-f0-9]{64}\.blob)"/g)) referenced.add(ref);
+  }
   const collectAttachments = (value: unknown): void => { if (Array.isArray(value)) return value.forEach(collectAttachments); if (!plain(value)) return; if (plain(value.blob) && typeof value.blob.ref === "string" && /^attachments\/[a-f0-9]{64}\.blob$/.test(value.blob.ref)) referenced.add(value.blob.ref); Object.values(value).forEach(collectAttachments); };
   for (const command of commands) { try { const input = commandRepo.readInput(command); if (input) collectAttachments(JSON.parse(input)); } catch { /* strict command journal remains authoritative; non-JSON inputs simply have no attachment refs */ } }
   const runner = join(dataRoot, "runner"), files: string[] = [];
@@ -241,9 +273,11 @@ export function quarantineRunnerOrphans(dataRoot: string, refs: readonly string[
 function crossDiagnostic(line: number, identity: string, error: unknown): JournalDiagnostic {
   return { line, code: "invalid-shape", reason: error instanceof Error ? error.message : String(error), fingerprint: hash(identity).slice(0, 16), unterminated: false };
 }
-function validateEventHistory(events: readonly RunnerEventRecord[], commands: readonly RunnerCommandRecord[]): JournalDiagnostic[] {
-  const byCommand = new Map(commands.map((c) => [c.commandId, c])), states = new Map<string, EventState>(), diagnostics: JournalDiagnostic[] = [];
-  events.forEach((event, index) => {
+/** 从 `from` 开始把事件折进 `states`，诊断追加进 `diagnostics`。events 前缀不变时可续算——
+ *  这是热路径增量校验的基础（见 RunnerEventJournal.crossValidate）。 */
+function foldEventHistory(events: readonly RunnerEventRecord[], byCommand: Map<string, RunnerCommandRecord>, states: Map<string, EventState>, diagnostics: JournalDiagnostic[], from: number): void {
+  for (let index = from; index < events.length; index++) {
+    const event = events[index];
     try {
       const command = byCommand.get(event.commandId); if (!command) throw new Error("event 对应 command 不存在");
       for (const key of ["runId", "sessionId", "providerId"] as const) if (command[key] !== event[key]) throw new Error(`event ${key} 与 command 冲突`);
@@ -255,6 +289,80 @@ function validateEventHistory(events: readonly RunnerEventRecord[], commands: re
       if (!state.started && event.type !== "dispatching" && event.type !== "started" && event.type !== "provider-notice" && !terminalBeforeStarted(event.type)) throw new Error("started 前存在非法 event");
       states.set(key, { count: state.count + 1, started: state.started || event.type === "started", terminal: state.terminal || terminalEvent(event.type) });
     } catch (e) { diagnostics.push(crossDiagnostic(index + 1, event.eventId, e)); }
-  });
+  }
+}
+function validateEventHistory(events: readonly RunnerEventRecord[], commands: readonly RunnerCommandRecord[]): JournalDiagnostic[] {
+  const diagnostics: JournalDiagnostic[] = [];
+  foldEventHistory(events, new Map(commands.map((c) => [c.commandId, c])), new Map<string, EventState>(), diagnostics, 0);
   return diagnostics;
+}
+/** 增量交叉校验的备忘：只在「两个 journal 都同 inode 且只增长、且上次没有任何诊断」时复用。
+ *  上次无诊断意味着已处理前缀里每条 event 都成功查到了 command；command 记录不可变、只追加，
+ *  所以新增 command 不可能让已通过的前缀反过来失败。一旦出现诊断就退回全量，fail closed。 */
+type CrossMemo = { events: string; commands: string; processed: number; states: Map<string, EventState>; diagnostics: JournalDiagnostic[] };
+const crossMemos = new Map<string, CrossMemo>();
+function grewInPlace(before: string, after: string): boolean {
+  if (!before || !after) return false;
+  const a = before.split(":"), b = after.split(":");
+  return a[0] === b[0] && a[1] === b[1] && BigInt(b[2]) >= BigInt(a[2]);
+}
+
+/** 事件归档：热 journal 只留最近 RETENTION_DAYS 天，更早的**整条命令**移进
+ *  `runner/archive/sessions/<sessionId>.jsonl`。一条都不删——旧会话打开时按需回读。
+ *
+ *  为什么必须整条命令一起搬：validateEventHistory 要求每个 (commandId, runId) 的 sequence
+ *  从 1 连续，只搬走一半会让留下的部分立刻判为损坏。
+ *  为什么只搬已终结的命令：还在跑的命令随时会追加新事件，搬走就等于把活跃会话搞坏。
+ *  commands.jsonl 和 payload blob 都不动——归档事件的 payload 仍要能渲染。 */
+export const RUNNER_EVENT_RETENTION_DAYS = 30;
+export type RunnerArchiveResult = { archived: number; kept: number; sessions: string[]; skipped: number };
+
+export function archiveRunnerEvents(dataRoot: string, opts: { retentionDays?: number; now?: Date } = {}): RunnerArchiveResult {
+  const retention = opts.retentionDays ?? RUNNER_EVENT_RETENTION_DAYS, now = opts.now ?? new Date();
+  const cutoff = now.getTime() - retention * 86_400_000;
+  const journal = new RunnerEventJournal(dataRoot), events = journal.readStrict();
+  const byCommand = new Map<string, RunnerEventRecord[]>();
+  for (const event of events) { const list = byCommand.get(event.commandId); list ? list.push(event) : byCommand.set(event.commandId, [event]); }
+
+  const archivable = new Set<string>(); let skipped = 0;
+  for (const [commandId, list] of byCommand) {
+    const terminal = list.some((e) => terminalEvent(e.type));
+    const newest = Math.max(...list.map((e) => Date.parse(e.at) || 0));
+    if (!terminal) { skipped++; continue; }                       // 还在跑，不动
+    if (!newest || newest >= cutoff) continue;                    // 太新，留在热 journal
+    archivable.add(commandId);
+  }
+  if (!archivable.size) return { archived: 0, kept: events.length, sessions: [], skipped };
+
+  const moving = events.filter((e) => archivable.has(e.commandId)), keeping = events.filter((e) => !archivable.has(e.commandId));
+  const dir = join(dataRoot, "runner", "archive", "sessions");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const bySession = new Map<string, RunnerEventRecord[]>();
+  for (const event of moving) { const list = bySession.get(event.sessionId); list ? list.push(event) : bySession.set(event.sessionId, [event]); }
+
+  // 先把归档写durable，再重写热 journal：中途崩溃最坏是归档里多一份重复（回读按 eventId 去重），
+  // 绝不会两边都没有。顺序反过来才会丢数据。
+  for (const [sessionId, list] of bySession) {
+    const file = join(dir, `${sessionId.replaceAll("/", "_")}.jsonl`);
+    const fd = openSync(file, "a", 0o600);
+    try { writeSync(fd, list.map((e) => JSON.stringify(e) + "\n").join("")); fsyncSync(fd); } finally { closeSync(fd); }
+    chmodSync(file, 0o600);
+  }
+  journal.rewriteRetained(keeping);
+  return { archived: moving.length, kept: keeping.length, sessions: [...bySession.keys()], skipped };
+}
+
+const archivedSessionEventsPath = (dataRoot: string, sessionId: string) => join(dataRoot, "runner", "archive", "sessions", `${sessionId.replaceAll("/", "_")}.jsonl`);
+/** 归档文件的廉价指纹（size:mtime）：一天最多变一次，投影缓存靠它决定要不要重建，不必每次回读整份归档。 */
+export function archivedSessionEventsSignature(dataRoot: string, sessionId: string): string { try { const st = statSync(archivedSessionEventsPath(dataRoot, sessionId)); return `${st.size}:${st.mtimeMs}`; } catch { return "none"; } }
+/** 回读某个会话的归档事件（按 eventId 去重，按 at 排序）。没有归档就返回空数组。 */
+export function readArchivedSessionEvents(dataRoot: string, sessionId: string): RunnerEventRecord[] {
+  const file = archivedSessionEventsPath(dataRoot, sessionId);
+  if (!existsSync(file)) return [];
+  const seen = new Set<string>(), out: RunnerEventRecord[] = [];
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line) continue;
+    try { const record = parseEvent(JSON.parse(line)); if (!seen.has(record.eventId)) { seen.add(record.eventId); out.push(record); } } catch { /* 坏行跳过：归档是只读展示用，不作判定依据 */ }
+  }
+  return out.sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0));
 }

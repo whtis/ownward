@@ -72,6 +72,19 @@ export function inspectCodexSessionFile(path: string, home: string): CodexMeta {
   };
 }
 
+/** 按 rolloutId 精确定位 rollout 文件，不受 listCodexSessions「最近 N 个」窗口限制——会话索引给老任务找正文用。
+ *  同一 thread resume 一次多一个同 id 文件，取最新的。找不到返回 null（rollout 已清理）。 */
+export function findCodexRolloutPath(rolloutId: string, home = "codex", homes: ReadonlyArray<readonly [string, string]> = HOMES): string | null {
+  const root = homes.find(([h]) => h === home)?.[1];
+  if (!root || !rolloutId || !existsSync(root)) return null;
+  let best: { path: string; mtime: number } | null = null;
+  for (const f of readdirSync(root, { recursive: true }) as string[]) {
+    if (!f.endsWith(".jsonl") || !f.includes(rolloutId)) continue;
+    try { const full = join(root, f), st = statSync(full); if (!best || st.mtimeMs > best.mtime) best = { path: full, mtime: st.mtimeMs }; } catch { /* race */ }
+  }
+  return best?.path ?? null;
+}
+
 let listCache: { at: number; items: CodexMeta[] } | null = null;
 
 export function listCodexSessions(limit = 30, homes: ReadonlyArray<readonly [string, string]> = HOMES): CodexMeta[] {

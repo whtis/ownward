@@ -12,7 +12,10 @@ TABS.today = {
             <div class="eyebrow">TODAY</div>
             <h1>今天，先处理重要的事</h1>
           </div>
-          <button class="button secondary sm" id="td-refresh">刷新</button>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button class="button secondary sm" id="td-quick-note" title="记一条到今天的 Ownward 流水（与 triage/通知同一份日志；不进日报）">随手记</button>
+            <button class="button secondary sm" id="td-refresh">刷新</button>
+          </div>
         </div>
         <div class="today-brief" id="td-brief"></div>
         <div class="today-grid">
@@ -40,6 +43,13 @@ TABS.today = {
       </div>
       `;
     $("#td-refresh").addEventListener("click", () => loadToday());
+    // 随手记：写今天的 Ownward 流水（vault 的 ownward/<日期>.md），跟当前在看什么无关。
+    // 原先摆在笔记编辑器的「保存」旁边，看着像「把这篇笔记追加到今日」——它从来不碰当前文件
+    $("#td-quick-note").addEventListener("click", async () => {
+      const text = prompt("随手记一条，进今天的 Ownward 流水（不进日报）：");
+      if (!text?.trim()) return;
+      toast((await post("/api/vault/append-today", { text })).msg || "已记下");
+    });
     bindDraftModal();
     loadToday();
   },
@@ -86,7 +96,7 @@ function renderBrief(open) {
   const hello = hour < 5 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
   const date = now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "short" });
   const overdue = Today.routines.filter((r) => r.overdue).length;
-  const dueToday = Today.routines.filter((r) => r.isToday && ["pending", "draft"].includes(r.status)).length;
+  const dueToday = Today.routines.filter((r) => (r.isToday || r.status === "failed") && ["pending", "draft", "failed"].includes(r.status)).length;
   const stuck = Today.attention.filter((x) => x.kind === "stuck").length;
   const hm = `${String(hour).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   const t = (s) => (s || "").length > 15 ? s.slice(11, 16) : (s || "");
@@ -149,10 +159,11 @@ function renderToday() {
   const cards = Today.routines.filter((r) => r.isToday || r.overdue || r.nextLabel);
   $("#td-routines").innerHTML = Today.loading ? stateBox("正在读取周期职责…", "loading") : Today.errors.routines ? stateBox("周期职责加载失败", "error") : cards.length ? cards.map((r) => {
     const stLabel = r.overdue ? `逾期·${r.date.slice(5)}` :
-      { pending: "待生成", draft: "草稿待审", writing: "写入中", written: "已写入 ✓", skipped: "已跳过", upcoming: `下次 ${r.nextLabel}` }[r.status] || r.status;
-    const tone = r.overdue ? "bad" : r.status === "draft" ? "warn" : r.status === "written" ? "ok" : "";
-    const act = (r.isToday || r.overdue) ? (
+      { pending: "待生成", draft: "草稿待审", writing: "写入中", written: "已写入 ✓", skipped: "已跳过", failed: "生成失败", upcoming: `下次 ${r.nextLabel}` }[r.status] || r.status;
+    const tone = r.overdue || r.status === "failed" ? "bad" : r.status === "draft" ? "warn" : r.status === "written" ? "ok" : "";
+    const act = (r.isToday || r.overdue || r.status === "failed") ? (
       r.status === "pending" ? `<button class="button sm secondary" onclick="genRoutine('${jsq(r.id)}')">生成草稿</button>` :
+      r.status === "failed" ? `<button class="button sm secondary" onclick="genRoutine('${jsq(r.id)}')">重试生成</button>` :
       r.status === "draft" ? `<button class="button sm primary" onclick="openDraft('${jsq(r.id)}','${jsq(r.date)}','${jsq(r.name)}')">审草稿</button>` :
       r.status === "writing" && r.taskId ? `<button class="button sm secondary" onclick="jumpTask('${jsq(r.taskId)}')">查看写入任务</button>` : ""
     ) : "";
@@ -160,6 +171,7 @@ function renderToday() {
       <div class="top"><span class="title">${esc(r.name)}</span>
         ${r.stale ? `<span class="tag" data-tone="warn" title="草稿生成后工作记录又更新了，审阅时留意">素材已更新</span>` : ""}
         <span class="right">${esc(r.time)} 截止 · ${esc(stLabel)}</span></div>
+      ${r.error ? `<div class="body">${esc(r.error)}</div>` : ""}
       <div class="foot">${act}${safeUrl(r.docUrl) ? `<a class="button sm ghost" style="text-decoration:none" target="_blank" rel="noopener" href="${esc(safeUrl(r.docUrl))}">打开文档</a>` : ""}</div>
     </div>`;
   }).join("") : stateBox("没有配置 routine（examples/routines.json 有样例）");
@@ -194,33 +206,57 @@ function jumpTask(id) { switchTab("tasks"); Tasks.select(id); }
 function jumpNote(path) { switchTab("notes"); Notes.open(path); }
 
 /* ---- routine 草稿 modal ---- */
+// 草稿是人审的半成品，关掉弹窗不该等于丢稿：以前「关闭」、点遮罩、Esc 三条路都只是把
+// data-open 拨成 false，textarea 里改了一半的内容一个字都不存（误触遮罩就白写）。
+// 现在停手 1.2s 自动存一次，任何一条关闭路径关之前都先把没存的刷出去。
+let draftTimer = null, draftSavedText = "";
+function draftStamp(text, bad) { const el = $("#d-autosave"); if (!el) return; el.textContent = text; el.style.color = bad ? "var(--danger)" : "var(--text-tertiary)"; }
+async function saveDraftNow(manual) {
+  if (!Today.draftCtx) return;
+  const content = $("#d-text")?.value; if (content === undefined) return;
+  if (!manual && content === draftSavedText) return;               // 没改就不写，别拿无谓的写覆盖文件
+  clearTimeout(draftTimer); draftTimer = null;
+  const { id, date } = Today.draftCtx;
+  try {
+    const res = await post("/api/routines/draft", { id, date, content });
+    if (res?.ok) { draftSavedText = content; draftStamp(`已自动保存 ${new Date().toTimeString().slice(0, 5)}`); return true; }
+    draftStamp(res?.msg || "自动保存失败", true); return false;      // 失败要看得见，不许假装存上了
+  } catch { draftStamp("自动保存失败（网络）", true); return false; }
+}
+/** 关弹窗前先把没存的刷出去；刷不动也照常关，但状态位会留着「保存失败」 */
+async function closeDraft(ov) { await saveDraftNow(false); clearTimeout(draftTimer); draftTimer = null; Today.draftCtx = null; ov.dataset.open = "false"; }
 function bindDraftModal() {
   const ov = $("#draft-overlay");
-  $("#d-cancel").addEventListener("click", () => (ov.dataset.open = "false"));
-  ov.addEventListener("click", (e) => { if (e.target === ov) ov.dataset.open = "false"; });
+  $("#d-cancel").addEventListener("click", () => closeDraft(ov));
+  ov.addEventListener("click", (e) => { if (e.target === ov) closeDraft(ov); });
+  $("#d-text").addEventListener("input", () => { draftStamp("未保存…"); clearTimeout(draftTimer); draftTimer = setTimeout(() => saveDraftNow(false), 1_200); });
+  $("#d-text").addEventListener("blur", () => saveDraftNow(false));
+  // Esc 走的是 app.js 里「一把关掉所有 overlay」的全局处理，抢在它前面把稿子刷出去
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && ov.dataset.open === "true") saveDraftNow(false); }, true);
+  window.addEventListener("beforeunload", () => { if (ov.dataset.open === "true") saveDraftNow(false); });
   $("#d-save").addEventListener("click", async () => {
-    const { id, date } = Today.draftCtx;
-    const res = await post("/api/routines/draft", { id, date, content: $("#d-text").value });
-    toast(res.ok ? "草稿已保存" : res.msg);
+    const ok = await saveDraftNow(true);
+    toast(ok ? "草稿已保存" : "保存失败");
   });
   $("#d-write").addEventListener("click", async () => {
     const { id, date } = Today.draftCtx;
-    await post("/api/routines/draft", { id, date, content: $("#d-text").value });  // 先存再写
+    const saved = await post("/api/routines/draft", { id, date, content: $("#d-text").value });
+    if (!saved?.ok) { toast(saved?.msg || "草稿保存失败，尚未派发写入"); return; }
     const res = await post("/api/routines/write", { id, date });
     toast(res.msg || (res.ok ? "已派写入任务" : "失败"));
-    ov.dataset.open = "false";
+    clearTimeout(draftTimer); draftTimer = null; Today.draftCtx = null; ov.dataset.open = "false";
     loadToday();
   });
   $("#d-skip").addEventListener("click", async () => {
     const { id, date } = Today.draftCtx;
     const res = await post("/api/routines/skip", { id, date });
     toast(res.msg || "已跳过");
-    ov.dataset.open = "false";
+    clearTimeout(draftTimer); draftTimer = null; Today.draftCtx = null; ov.dataset.open = "false";
     loadToday();
   });
 }
 async function genRoutine(id) {
-  toast("生成中（要跑一次 AI，约 30s）…");
+  toast("正在整理材料并生成草稿，月度复盘可能需要几分钟…");
   const res = await post("/api/routines/generate", { id });
   toast(res.ok ? "草稿已生成" : (res.msg || "生成失败"));
   loadToday();
@@ -229,17 +265,44 @@ function openRoutineDraft(id, date) {
   const r = Today.routines.find((x) => x.id === id);
   openDraft(id, date, r?.name || id);
 }
+function routineSourceSummary(view) {
+  const days = Array.isArray(view.materialDays) ? view.materialDays : [];
+  const lines = days.length ? [`取材日期：${days[0]} 至 ${days[days.length - 1]}`] : [];
+  if (Array.isArray(view.materialPeople) && view.materialPeople.length) lines.push(`覆盖人员：${view.materialPeople.join("、")}`);
+  for (const source of Array.isArray(view.sources) ? view.sources : []) {
+    lines.push(`来源：${source.url || "未知"}\n版本：${String(source.hash || "未知").slice(0, 12)} · 获取时间：${source.fetchedAt || "未知"}`);
+  }
+  for (const warning of Array.isArray(view.warnings) ? view.warnings : []) lines.push(`⚠ ${warning}`);
+  return lines.join("\n\n");
+}
 async function openDraft(id, date, name) {
   const res = await getJSON(`/api/routines/draft?id=${encodeURIComponent(id)}&date=${encodeURIComponent(date)}`).catch(() => null);
   if (!res?.draft) { toast("没有草稿"); return; }
   Today.draftCtx = { id, date };
   $("#d-title").textContent = `${name} · ${date}${res.stale ? "（⚠ 素材已更新，可重新生成）" : ""}`;
+  let provenance = $("#d-sources");
+  if (!provenance) {
+    provenance = document.createElement("details");
+    provenance.id = "d-sources";
+    const heading = document.createElement("summary"); heading.textContent = "取材依据";
+    const body = document.createElement("pre"); body.style.whiteSpace = "pre-wrap"; body.style.overflowWrap = "anywhere";
+    provenance.append(heading, body);
+    $("#d-text").before(provenance);
+  }
+  const sourceSummary = routineSourceSummary(res);
+  provenance.hidden = !sourceSummary;
+  provenance.querySelector("pre").textContent = sourceSummary;
+  provenance.open = !!res.warnings?.length;
   $("#d-regen").style.display = res.stale ? "" : "none";
   $("#d-text").value = res.draft;
+  draftSavedText = res.draft; clearTimeout(draftTimer); draftTimer = null; draftStamp("");
   $("#draft-overlay").dataset.open = "true";
 }
 async function regenDraft() {
   const { id, date } = Today.draftCtx;
+  // 重新生成会把服务端的草稿整篇换掉：这里必须先掐掉待触发的自动保存，
+  // 否则它带着旧文本晚一步落地，把刚生成的新稿覆盖回去
+  clearTimeout(draftTimer); draftTimer = null; Today.draftCtx = null;
   $("#draft-overlay").dataset.open = "false";
   await genRoutine(id);
   const r = Today.routines.find((x) => x.id === id);

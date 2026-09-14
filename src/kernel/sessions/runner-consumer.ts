@@ -12,13 +12,14 @@ import { SessionRepository, type SessionRecord, type SessionProviderId } from ".
 import type { KernelGrantedAccess, SessionCapability, SessionInput } from "./contracts.ts";
 import { SessionRunnerBridgeStore, type BridgeCommand } from "./bridge-store.ts";
 import { readInitialHistory } from "./initial-history.ts";
+import { assertProviderOptions } from "../../session-options.ts";
 
 export const PROVIDER_CAPABILITIES: Readonly<Record<SessionProviderId, ReadonlySet<SessionCapability>>> = {
-  claude: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "new-session"]),
-  codex: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "new-session"]),
+  claude: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
+  codex: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
   // CodeBuddy 走 Claude Code 协议克隆：能力面近 claude，但 CLI 无 --permission-prompt-tool（审批桥）→ 不声明 approval；
   // transcript 是私有格式，无 history 能力（adapter readHistory 会拒）
-  codebuddy: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "new-session"]),
+  codebuddy: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
 };
 
 export class KernelSessionPolicyError extends Error {
@@ -50,7 +51,7 @@ export class RunnerSessionConsumer {
     if (!PROVIDER_CAPABILITIES[providerId].has(capability)) throw new KernelSessionPolicyError("PROVIDER_CAPABILITY_UNSUPPORTED", `${providerId} 不支持 ${capability}`);
   }
   async readHistory(input: { providerId: SessionProviderId; nativeRef: string; providerHome?: string; cwd?: string }): Promise<DevMsg[]> { const client = this.openClient(); try { const response = await client.readHistory(input); const messages = response.body.messages; if (!Array.isArray(messages) || messages.some((m: any) => !m || !["user", "assistant", "tool", "system"].includes(m.role) || typeof m.text !== "string")) throw new KernelSessionPolicyError("RUNNER_HISTORY_INVALID", "Runner 历史响应非法"); const stamp = new Date().toISOString(); return messages.filter((m:any)=>!(m.role==="system"&&["history","diagnostic"].includes(String(m.name||"")))).map((m: any) => ({ role: m.role, text: m.text, ...(typeof m.name === "string" ? { name: m.name } : {}), ts: typeof m.ts === "string" && Number.isFinite(Date.parse(m.ts)) ? new Date(m.ts).toISOString() : stamp })); } finally { client.close(); } }
-  async submit(taskId: string, session: SessionRecord, kind: "start-run" | "resume-run" | "send-input" | "add-dir" | "set-access" | "new-session", input: unknown, identity?: RunnerCommandReceipt): Promise<RunnerCommandReceipt> {
+  async submit(taskId: string, session: SessionRecord, kind: "start-run" | "resume-run" | "send-input" | "add-dir" | "set-access" | "set-options" | "new-session", input: unknown, identity?: RunnerCommandReceipt): Promise<RunnerCommandReceipt> {
     const commandId = identity?.commandId ?? this.uuid(), runId = identity?.runId ?? this.uuid(), receipt = { commandId, runId }; let client: RunnerClient;
     try { client = this.openClient(); } catch (error: any) { throw new KernelMutationError(error?.code || "RUNNER_UNAVAILABLE", "Runner 不可用", receipt, false); }
     try {
@@ -120,7 +121,7 @@ class RunnerEventProjector {
     sessionRepo.bind({ taskId, providerId: session.providerId, nativeRef, ...(session.providerHome ? { providerHome: session.providerHome } : {}), cwd: session.cwd, control: session.control }); bridge.markSessionEvent(session.id, event.at, event.eventId);
     return;
   }
-  if (event.type === "completed" && command && (kind === "add-dir" || kind === "set-access")) { const acceptance = new SessionRunnerBridgeStore(this.dataRoot).list(session.id).find((c) => c.commandId === command.commandId && c.runId === command.runId && c.kind === kind && c.providerId === session.providerId); if (!acceptance) throw new KernelSessionPolicyError("CONTROL_ACCEPTED_MISSING", "Control grant 缺少 Kernel acceptance"); const raw = this.commandJournal.readInput(command), body = raw ? JSON.parse(raw) : {}; if (kind === "add-dir") { if (typeof body.dir !== "string" || !acceptance.authorizedRoots) throw new KernelSessionPolicyError("CONTROL_GRANT_INVALID", "add-dir acceptance 非法"); const actual = validateDirectoryGrant(body.dir, acceptance.authorizedRoots); sessionRepo.updateGrants(session.id, { addDirectory: actual }); } if (kind === "set-access") { const granted = acceptance.authorizedAccess, expected = granted === "workspace" ? (session.providerId !== "codex" ? "standard" : "workspace-write") : session.providerId !== "codex" ? "bypass" : "full-access"; if (!granted || body.access !== expected) throw new KernelSessionPolicyError("CONTROL_GRANT_INVALID", "set-access acceptance 漂移"); sessionRepo.updateGrants(session.id, { access: granted }); } }
+  if (event.type === "completed" && command && (kind === "add-dir" || kind === "set-access" || kind === "set-options")) { const acceptance = new SessionRunnerBridgeStore(this.dataRoot).list(session.id).find((c) => c.commandId === command.commandId && c.runId === command.runId && c.kind === kind && c.providerId === session.providerId); if (!acceptance) throw new KernelSessionPolicyError("CONTROL_ACCEPTED_MISSING", "Control grant 缺少 Kernel acceptance"); const raw = this.commandJournal.readInput(command), body = raw ? JSON.parse(raw) : {}; if (kind === "add-dir") { if (typeof body.dir !== "string" || !acceptance.authorizedRoots) throw new KernelSessionPolicyError("CONTROL_GRANT_INVALID", "add-dir acceptance 非法"); const actual = validateDirectoryGrant(body.dir, acceptance.authorizedRoots); sessionRepo.updateGrants(session.id, { addDirectory: actual }); } if (kind === "set-access") { const granted = acceptance.authorizedAccess, expected = granted === "workspace" ? (session.providerId !== "codex" ? "standard" : "workspace-write") : session.providerId !== "codex" ? "bypass" : "full-access"; if (!granted || body.access !== expected) throw new KernelSessionPolicyError("CONTROL_GRANT_INVALID", "set-access acceptance 漂移"); sessionRepo.updateGrants(session.id, { access: granted }); } if (kind === "set-options") { const patch = { ...(typeof body.model === "string" ? { model: body.model } : {}), ...(typeof body.effort === "string" ? { effort: body.effort } : {}) }; if (!Object.keys(patch).length) throw new KernelSessionPolicyError("CONTROL_GRANT_INVALID", "set-options acceptance 非法"); try { assertProviderOptions(session.providerId, patch.model ?? session.model, patch.effort ?? session.effort); } catch (error) { throw new KernelSessionPolicyError("CONTROL_GRANT_INVALID", `set-options 非法：${error instanceof Error ? error.message : String(error)}`); } sessionRepo.updateOptions(session.id, patch); } }
   if (!this.accepted.has(event.commandId)) return;
   const common = { schemaVersion: 1 as const, eventId: `runner:${event.eventId}`, at: event.at, commandId: event.commandId, runId: event.runId, taskId, sessionId: event.sessionId, providerId: event.providerId };
   let projected: RunEvent | null = event.type === "dispatching" ? { ...common, type: "run-dispatching" }
@@ -162,8 +163,8 @@ function pendingView(requestId: string | undefined, body: any, at: string): Reco
 
 /** 兼容 Web AgentState 的纯投影；正文只能由 journal payload loader 显式提供。 */
 export class RunnerAgentStateProjector {
-  private readonly messages: DevMsg[] = []; private partial = ""; private turn = "idle"; private pending: unknown[] = []; private tokens: Record<string, unknown> = {}; private lastActivityAt = 0;
-  private plan: unknown[] = []; private commands: string[] | undefined; private model: string | undefined; private ctxTokens = 0; private cumInput = 0; private cumOutput = 0;
+  private readonly messages: DevMsg[] = []; private readonly explained = new Set<string>(); private partial = ""; private turn = "idle"; private pending: unknown[] = []; private tokens: Record<string, unknown> = {}; private lastActivityAt = 0;
+  private plan: unknown[] = []; private commands: string[] | undefined; private model: string | undefined; private ctxTokens = 0; private ctxWindow = 0; private cumInput = 0; private cumOutput = 0;
   constructor(private readonly session: SessionRecord, private readonly payload: (event: RunnerEventRecord) => unknown, private readonly command: (commandId: string) => Pick<RunnerCommandRecord, "kind" | "approvalRequestId"> | undefined = () => ({ kind: "start-run" }), initial: DevMsg[] = []) { this.messages.push(...structuredClone(initial)); }
   apply(event: RunnerEventRecord): void {
     if (event.sessionId !== this.session.id || event.providerId !== this.session.providerId) throw new KernelSessionPolicyError("SESSION_PROVIDER_DRIFT", "事件身份漂移");
@@ -173,7 +174,7 @@ export class RunnerAgentStateProjector {
     if (event.type === "started" && isTurn) this.turn = "running";
     else if (event.type === "delta") this.partial += typeof body === "string" ? body : String(body?.text ?? "");
     else if (event.type === "message-completed") this.applyMessage(body, event.at);
-    else if (event.type === "provider-notice") this.applyNotice(body, event.at);
+    else if (event.type === "provider-notice") this.applyNotice(body, event.at, event.commandId);
     else if (event.type === "session-updated" && body && typeof body === "object") {
       if (Array.isArray(body.commands)) this.commands = body.commands.filter((c: unknown): c is string => typeof c === "string").slice(0, 300);
       if (typeof body.model === "string" && body.model) this.model = body.model;
@@ -182,12 +183,26 @@ export class RunnerAgentStateProjector {
     else if (event.type === "usage" && body && typeof body === "object") {
       // ctx 占用只认 request 级 usage（assistant 帧单次；turn 级是整轮聚合）。
       if (body.scope === "request" && Number.isFinite(body.contextTokens)) this.ctxTokens = body.contextTokens;
+      // 窗口大小只有 turn 级（result 帧的 modelUsage）才带：没它前端只能按模型名猜，1M 窗口的模型会被按 200k 算出 300%
+      if (body.scope === "turn" && Number.isFinite(body.contextWindow) && body.contextWindow > 0) this.ctxWindow = body.contextWindow;
       // turn 级累计出 legacy 别名（input/output/total）：web 的 token pill 和安卓的信息面板
       // 都读旧键——runner 只给 inputTokens/outputTokens 时它们恒显 0
       if (body.scope === "turn") { this.cumInput += Number(body.inputTokens) || 0; this.cumOutput += Number(body.outputTokens) || 0; }
       this.tokens = { ...this.tokens, ...body, input: this.cumInput, output: this.cumOutput, total: this.cumInput + this.cumOutput };
     }
-    else if (["completed", "failed", "interrupted", "unknown-outcome"].includes(event.type) && isTurn) { this.turn = "idle"; this.pending = []; this.partial = ""; }
+    else if (["completed", "failed", "interrupted", "unknown-outcome"].includes(event.type) && isTurn) {
+      this.turn = "idle"; this.pending = []; this.partial = "";
+      // 失败必须看得见（规则 9）。以前这里只把 turn 拨回 idle：一条 failed 的 run 在界面上等于什么都
+      // 没发生——用户那条消息（来自 command journal 的投影）孤零零挂着，没有回复也没有解释。
+      // 已经有 provider-notice 讲过原因的不重复说；interrupted 是用户自己按的，不用解释。
+      if ((event.type === "failed" || event.type === "unknown-outcome") && !this.explained.has(event.commandId)) {
+        const reason = typeof event.reason === "string" ? event.reason : "";
+        const text = reason === "provider_busy" ? "⚠️ 这条没送到 agent：上一轮还没释放会话（消息已放回队列重发）"
+          : event.type === "unknown-outcome" ? `⚠️ 这一轮结局未知${reason ? `：${reason}` : ""}——按原 commandId 查证后再决定重发`
+          : `⚠️ 这一轮没跑起来${reason ? `：${reason}` : ""}`;
+        this.messages.push({ role: "system", name: "error", text, ts: event.at });
+      }
+    }
     else if (["completed", "failed"].includes(event.type) && command?.kind === "approval-response") this.pending = this.pending.filter((p: any) => p.requestId !== command.approvalRequestId);
   }
   /** message-completed 完整展开成 legacy 形状的多条消息。原实现只取 body.text，
@@ -259,7 +274,7 @@ export class RunnerAgentStateProjector {
   }
   /** provider-notice 透出为 system 消息——限流/登录过期/压缩中/压缩失败/stderr。
    *  用户必须看见 Provider 限流等实际失败，投影层不许吞掉。 */
-  private applyNotice(body: any, at: string): void {
+  private applyNotice(body: any, at: string, commandId?: string): void {
     if (!body || typeof body !== "object" || typeof body.category !== "string") return;
     const detail = String(body.message ?? body.error ?? body.result ?? body.tail ?? "").replace(/\s+/g, " ").slice(0, 500);
     // 空详情的 api_error 是旧 adapter 把未知 status 帧误标出来的（历史 journal 里还躺着一批）——
@@ -282,9 +297,11 @@ export class RunnerAgentStateProjector {
     // 查不到就兜底原样透出：分类表永远追不上 provider 新增的错误，而「有错误却什么都不显示」
     // 正是这个函数存在的理由。2026-08-24 实撞：lock_conflict 不在表里，用户只看到「失败 1」。
     const text = map[body.category] ?? (detail ? `⚠️ ${body.category}：${detail}` : "");
-    if (text) this.messages.push({ role: "system", ...(["compacting", "compact_ok"].includes(body.category) ? {} : { name: "error" }), text, ts: at });
+    if (!text) return;
+    if (commandId && !["compacting", "compact_ok"].includes(body.category)) this.explained.add(commandId);
+    this.messages.push({ role: "system", ...(["compacting", "compact_ok"].includes(body.category) ? {} : { name: "error" }), text, ts: at });
   }
-  state() { return { messages: structuredClone(this.messages), turn: this.turn, alive: this.turn === "running", partial: this.partial, pending: structuredClone(this.pending), resume: null, backend: this.session.providerId, providerId: this.session.providerId, control: this.session.control, queued: [], plan: structuredClone(this.plan), tokens: structuredClone(this.tokens), lastActivityAt: this.lastActivityAt, ...(this.commands ? { commands: [...this.commands] } : {}), ...(this.model ? { model: this.model } : {}), ...(this.ctxTokens ? { ctxTokens: this.ctxTokens } : {}) }; }
+  state() { return { messages: structuredClone(this.messages), turn: this.turn, alive: this.turn === "running", partial: this.partial, pending: structuredClone(this.pending), resume: null, backend: this.session.providerId, providerId: this.session.providerId, control: this.session.control, queued: [], plan: structuredClone(this.plan), tokens: structuredClone(this.tokens), lastActivityAt: this.lastActivityAt, ...(this.commands ? { commands: [...this.commands] } : {}), ...(this.model ? { model: this.model } : {}), ...(this.ctxTokens ? { ctxTokens: this.ctxTokens } : {}), ...(this.ctxWindow ? { ctxWindow: this.ctxWindow } : {}) }; }
 }
 
 export { expandCodexHome } from "../../sessions/provider-home.ts";

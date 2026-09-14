@@ -3,6 +3,7 @@ package ai.ownward.app.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,7 +22,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,6 +45,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import ai.ownward.app.data.Action
 import ai.ownward.app.data.AttentionItem
 import ai.ownward.app.data.OwnwardClient
@@ -385,51 +388,58 @@ private fun RoutineRow(
         }
     }
 
-    if (reviewing) AlertDialog(
+    // 草稿是整篇长文，不用居中的 AlertDialog：它不随键盘缩，正文越长被键盘盖住的越多。
+    // 改成全屏 Dialog 并自己接 safeDrawing（含 IME）内边距：键盘弹起时整块编辑区跟着缩到键盘上方，
+    // 正文在有界高度里内部滚动，光标始终可见。
+    if (reviewing) Dialog(
         onDismissRequest = { if (!submitting) reviewing = false },
-        title = { Text(r.name) },
-        text = {
-            Column {
-                if (loading) CircularProgressIndicator()
-                else if (!loadedSuccessfully) {
-                    Text(loadError ?: "草稿未加载", color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = ::openDraft) { Text("重试") }
-                } else {
-                    if (draftStale) Text("素材已更新，这份草稿可能过期，请重新核对。", color = ownwardColors.Warn)
-                    OutlinedTextField(
-                        value = content,
-                        onValueChange = { content = it },
-                        readOnly = !routineCanEdit(draftStatus),
-                        enabled = !submitting,
-                        label = { Text(if (routineCanEdit(draftStatus)) "草稿正文" else "正文（只读）") },
-                        minLines = 8,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text(r.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    if (loading) CircularProgressIndicator(Modifier.align(Alignment.Center))
+                    else if (!loadedSuccessfully) Column {
+                        Text(loadError ?: "草稿未加载", color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = ::openDraft) { Text("重试") }
+                    } else Column(Modifier.fillMaxSize()) {
+                        if (draftStale) Text("素材已更新，这份草稿可能过期，请重新核对。", color = ownwardColors.Warn)
+                        OutlinedTextField(
+                            value = content,
+                            onValueChange = { content = it },
+                            readOnly = !routineCanEdit(draftStatus),
+                            enabled = !submitting,
+                            label = { Text(if (routineCanEdit(draftStatus)) "草稿正文" else "正文（只读）") },
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                        )
+                    }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 3) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(enabled = !submitting, onClick = { reviewing = false }) { Text("关闭") }
+                    if (!loading && routineCanSubmit(draftStatus, loadedSuccessfully)) {
+                        TextButton(enabled = !submitting, onClick = {
+                            submit({
+                                client.routineSaveDraft(r.id, r.date, content)
+                                draftStale = false
+                            })
+                        }) { Text("保存") }
+                        TextButton(enabled = !submitting, onClick = {
+                            submit({ saveThenWrite(
+                                save = {
+                                    client.routineSaveDraft(r.id, r.date, content)
+                                    draftStale = false
+                                },
+                                write = { client.routineWrite(r.id, r.date) },
+                            ) }, close = true)
+                        }) { Text("保存并写入") }
+                    }
                 }
             }
-        },
-        confirmButton = {
-            if (!loading && routineCanSubmit(draftStatus, loadedSuccessfully)) Row {
-                TextButton(enabled = !submitting, onClick = {
-                    submit({
-                        client.routineSaveDraft(r.id, r.date, content)
-                        draftStale = false
-                    })
-                }) { Text("保存") }
-                TextButton(enabled = !submitting, onClick = {
-                    submit({ saveThenWrite(
-                        save = {
-                            client.routineSaveDraft(r.id, r.date, content)
-                            draftStale = false
-                        },
-                        write = { client.routineWrite(r.id, r.date) },
-                    ) }, close = true)
-                }) { Text("保存并写入") }
-            }
-        },
-        dismissButton = { TextButton(enabled = !submitting, onClick = { reviewing = false }) { Text("关闭") } },
-    )
+        }
+    }
 }
 
 @Composable

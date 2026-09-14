@@ -16,6 +16,9 @@ final class TaskSessionStore {
     var submitted: Set<String> = []
     var sending = false
     let partial = TypewriterBuffer()
+    /// 各家订阅额度：独立于会话状态，60s 才问一次（服务端也缓存 60s），拿不到就保留上一份
+    var usage: ProvidersUsage?
+    private var usageAt: Date?
 
     init(client: OwnwardClient, taskId: String) { self.client = client; self.taskId = taskId }
 
@@ -35,6 +38,10 @@ final class TaskSessionStore {
             error = nil
         } catch {
             self.error = error.userMessage
+        }
+        if usageAt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true {
+            usageAt = Date()
+            if let next = try? await client.usage() { usage = next }
         }
     }
 
@@ -242,17 +249,38 @@ struct TaskDetailView: View {
 
     @ViewBuilder
     private var topStrips: some View {
-        if let s = state, !s.plan.isEmpty || s.stale || store.error != nil {
-            VStack(alignment: .leading, spacing: 0) {
-                PlanStrip(plan: s.plan)
-                if s.stale { StaleBanner(errorCode: s.errorCode) }
-                ErrorBanner(message: store.error)
+        VStack(alignment: .leading, spacing: 4) {
+            // 引擎 · 模型 · 深度 + 额度 常驻顶部：接力或就地换模型后一眼能看出现在是谁在干活、还剩多少额度，
+            // 不用点进详情。窄屏放不下时横向滑，两枚胶囊都不截断
+            if let s = state {
+                let usage = store.usage?.usage(for: agentProvider(s))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Text(sessionIdentityLabel(s)).font(.owLabelS).foregroundStyle(OW.textDim).lineLimit(1)
+                            .padding(.horizontal, 12).padding(.vertical, 4)
+                            .glassEffect(.regular, in: Capsule())
+                        if let label = usageLabel(usage) {
+                            Text(label).font(.owLabelS).foregroundStyle(usageColor(usageSeverity(usage))).lineLimit(1)
+                                .padding(.horizontal, 12).padding(.vertical, 4)
+                                .glassEffect(.regular, in: Capsule())
+                                .accessibilityLabel("额度 " + label)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
             }
-            .padding(.vertical, 4)
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: OWRadius.l, style: .continuous))
-            .padding(.horizontal, 8)
-        } else if let err = store.error {
-            ErrorBanner(message: err)
+            if let s = state, !s.plan.isEmpty || s.stale || store.error != nil {
+                VStack(alignment: .leading, spacing: 0) {
+                    PlanStrip(plan: s.plan)
+                    if s.stale { StaleBanner(errorCode: s.errorCode) }
+                    ErrorBanner(message: store.error)
+                }
+                .padding(.vertical, 4)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: OWRadius.l, style: .continuous))
+                .padding(.horizontal, 8)
+            } else if let err = store.error {
+                ErrorBanner(message: err)
+            }
         }
     }
 
@@ -388,6 +416,26 @@ private struct InfoSheet: View {
                 .font(.owLabel)
                 .padding(.top, 8)
             }
+            // 会话谱系：接力链上每个引擎的原生会话 ID + 恢复命令（服务端拼好，这里只展示/复制）；没有 ref 的如实说
+            if !s.lineage.isEmpty {
+                Text("会话谱系与恢复命令").font(.owLabel).foregroundStyle(OW.textDim).padding(.top, 16)
+                ForEach(s.lineage) { entry in
+                    ForEach(Array(lineageRows(entry).enumerated()), id: \.offset) { _, row in
+                        Text("\(entry.providerId) · \(row.label) · 模型 \(entry.model?.isEmpty == false ? entry.model! : "默认") · 深度 \(entry.effort?.isEmpty == false ? entry.effort! : "默认")")
+                            .font(.owLabelS).foregroundStyle(OW.textDim).padding(.top, 8).padding(.bottom, 4)
+                        if let cmd = row.cmd, !cmd.isEmpty {
+                            HStack(spacing: 8) {
+                                Text(cmd).font(.owMonoS).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                                Button("复制") { UIPasteboard.general.string = cmd; Haptics.selection() }.font(.owLabel)
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(OW.surface2, in: RoundedRectangle(cornerRadius: OWRadius.s))
+                        } else {
+                            Text("尚无原生会话 ID").font(.owLabelS).foregroundStyle(OW.textDim)
+                        }
+                    }
+                }
+            }
             // 释放后在别的终端续聊的命令（服务端按 nativeRef 拼好），复制到剪贴板方便发给 Mac
             if let cmd = s.resume?.cmd, !cmd.isEmpty, s.control == "observing" {
                 Text("在其他终端继续：").font(.owLabelS).foregroundStyle(OW.textDim)
@@ -454,6 +502,54 @@ private struct InfoSheet: View {
 func agentProvider(_ state: AgentState) -> String {
     if let providerId = state.providerId, !providerId.isEmpty { return providerId }
     return state.backend.isEmpty ? "claude" : state.backend
+}
+
+/// 标题栏副标题：引擎 · 模型 · 深度（空值写「默认」，别把三段里的某一段悄悄省掉）
+func sessionIdentityLabel(_ state: AgentState) -> String {
+    "\(agentProvider(state)) · \(state.model?.isEmpty == false ? state.model! : "默认模型") · \(state.effort?.isEmpty == false ? state.effort! : "默认深度")"
+}
+
+/// 额度胶囊：按会话引擎取对应家的窗口，写法对齐 web 头部 / statusline 的「5h 46%(3h10m)」——
+/// 括号里是距重置时间。拿不到返回 nil（不画），空着比错数字好
+func usageLabel(_ usage: ProviderUsage?, now: Date = Date()) -> String? {
+    guard let windows = usage?.windows, !windows.isEmpty else { return nil }
+    return "额度 " + windows.map { w in
+        let eta = usageEta(w.resetsAt, now: now)
+        return "\(w.label) \(Int(w.percent.rounded()))%" + (eta.isEmpty ? "" : "(\(eta))")
+    }.joined(separator: " · ")
+}
+
+/// 距重置：2d2h / 3h10m / 45m；已过期或解析不了给空串
+func usageEta(_ iso: String?, now: Date = Date()) -> String {
+    guard let iso, let at = parseISODate(iso) else { return "" }
+    let mins = Int((at.timeIntervalSince(now) / 60).rounded())
+    guard mins > 0 else { return "" }
+    let d = mins / 1440, h = (mins % 1440) / 60, m = mins % 60
+    if d > 0 { return "\(d)d" + (h > 0 ? "\(h)h" : "") }
+    if h > 0 { return "\(h)h" + (m > 0 ? "\(m)m" : "") }
+    return "\(m)m"
+}
+
+/// 最满的那个窗口过 70%/90% 变色（web/tasks.js 同阈值）：0 正常 / 1 警告 / 2 危险
+func usageSeverity(_ usage: ProviderUsage?) -> Int {
+    let worst = usage?.windows.map(\.percent).max() ?? 0
+    return worst >= 90 ? 2 : worst >= 70 ? 1 : 0
+}
+
+func usageColor(_ severity: Int) -> Color { severity >= 2 ? OW.danger : severity == 1 ? OW.warn : OW.textDim }
+
+/// 服务端出口已统一成标准 ISO（有无毫秒都可能）；formatter 不做全局单例，避开 Sendable 检查
+func parseISODate(_ s: String) -> Date? {
+    let withFraction = ISO8601DateFormatter(); withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let d = withFraction.date(from: s) { return d }
+    let plain = ISO8601DateFormatter(); plain.formatOptions = [.withInternetDateTime]
+    return plain.date(from: s)
+}
+
+/// 谱系一条 Session 展开成若干行：被 /new 换掉的旧 ref 在前，当前 ref 在后
+func lineageRows(_ entry: SessionLineageEntry) -> [(label: String, cmd: String?)] {
+    entry.previousRefs.map { ("已被 /new 换掉", $0.resume?.cmd) }
+        + [(entry.current ? "当前" : "已接力" + (entry.reason.map { "：\($0)" } ?? ""), entry.resume?.cmd)]
 }
 
 func sessionConfigIsNoop(currentProvider: String, currentModel: String, currentEffort: String,

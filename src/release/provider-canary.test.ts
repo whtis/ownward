@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { RunnerServer, type RunnerProvider } from "../runner/server.ts";
 import { RunnerClient } from "../runner/client.ts";
-import { canaryProvider, terminateCanaryProcess } from "./provider-canary.ts";
+import { canaryProvider, minimalCodexConfig, terminateCanaryProcess } from "./provider-canary.ts";
 
 const roots:string[]=[];
 afterEach(()=>roots.splice(0).forEach(r=>rmSync(r,{recursive:true,force:true})));
@@ -25,7 +25,7 @@ test("provider canary proves start terminal nativeRef and resume terminal",async
   finally{client.close();server.stop();}
 });
 
-async function scenario(mode:"success"|"binary"|"auth"|"resume-auth"|"nonce"|"resume-nonce"|"timeout"){
+async function scenario(mode:"success"|"binary"|"auth"|"resume-auth"|"nonce"|"resume-nonce"|"resume-note"|"timeout"){
   const data=mkdtempSync(join(tmpdir(),"canary-matrix-"));roots.push(data);
   const provider:RunnerProvider={id:"claude",version:"1",capabilities:new Set(["resume"]),async*execute(c:any,input?:string){
     const parsed=JSON.parse(input||"{}"),resume=parsed.text.includes("OWNWARD_RESUME_"),at=new Date().toISOString(),base={at,commandId:c.commandId,runId:c.runId,sessionId:c.sessionId,providerId:c.providerId};
@@ -34,7 +34,7 @@ async function scenario(mode:"success"|"binary"|"auth"|"resume-auth"|"nonce"|"re
     if(mode==="binary"||mode==="auth"||mode==="resume-auth"&&resume){const message=mode==="binary"?"spawn claude ENOENT":"authentication token expired; login required";yield{...base,eventId:`${c.commandId}-notice`,type:"provider-notice",payload:JSON.stringify({category:mode==="binary"?"unavailable":"auth_expired",message})};yield{...base,eventId:`${c.commandId}-failed`,type:"failed",reason:"provider_exit"};return;}
     yield{...base,eventId:`${c.commandId}-session`,type:"session-updated",nativeRef:"claude-native-ref",payload:"{}"};
     const expected=/OWNWARD_(?:CANARY|RESUME)_[0-9a-f-]+/.exec(parsed.text)?.[0];
-    yield{...base,eventId:`${c.commandId}-message`,type:"message-completed",payload:JSON.stringify({role:"assistant",text:mode==="nonce"||mode==="resume-nonce"&&resume?"wrong-nonce":expected})};
+    yield{...base,eventId:`${c.commandId}-message`,type:"message-completed",payload:JSON.stringify({role:"assistant",text:mode==="nonce"||mode==="resume-nonce"&&resume?"wrong-nonce":mode==="resume-note"&&resume?`${expected}\n\nNote: the claude.ai Gmail MCP server needs authorization.`:expected})};
     yield{...base,eventId:`${c.commandId}-done`,type:"completed"};
   }};
   const server=new RunnerServer(data,()=>provider);server.registerProvider(provider);server.start();const client=new RunnerClient(data);
@@ -48,6 +48,7 @@ test("provider canary fault matrix is diagnostic",async()=>{
   const resume=await scenario("resume-auth");expect(resume).toMatchObject({ok:false,errorCode:"PROVIDER_AUTH_EXPIRED"});expect(resume.resumeCommandId).toBeString();
   expect(await scenario("nonce")).toMatchObject({ok:false,errorCode:"PROVIDER_CANARY_OUTPUT_MISMATCH"});
   expect(await scenario("resume-nonce")).toMatchObject({ok:false,errorCode:"PROVIDER_RESUME_OUTPUT_MISMATCH"});
+  expect(await scenario("resume-note")).toMatchObject({ok:true});
   expect(await scenario("timeout")).toMatchObject({ok:false,errorCode:"PROVIDER_CANARY_TIMEOUT"});
 });
 
@@ -64,3 +65,13 @@ test("isolated canary redirects every provider home and copies only minimal auth
 });
 
 test("canary waits on the command identifier used by Runner activeRuns",()=>{const canary=readFileSync(join(import.meta.dir,"provider-canary.ts"),"utf8"),server=readFileSync(join(import.meta.dir,"../runner/server.ts"),"utf8");expect(canary).toContain("waitCommandInactive(client,startCommandId");expect(server).toContain("this.active.set(accepted.record.commandId");expect(server).toContain("activeRuns: [...this.active.keys()]")});
+
+test("isolated codex home mirrors only the user's top-level model, never hooks or sections",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"canary-codex-config-"));roots.push(dir);
+  const file=join(dir,"config.toml");
+  writeFileSync(file,'approval_policy = "never"\nnotify = ["/x/hook", "turn-ended"]\nmodel = "gpt-5.6-sol"   # 用户实际在跑的\nmodel_reasoning_effort = "high"\n[sandbox_workspace_write]\nmodel = "gpt-5.5"\n');
+  expect(minimalCodexConfig(file)).toBe('model = "gpt-5.6-sol"\n');
+  writeFileSync(file,'[desktop]\nmodel = "gpt-5.5"\n');   // 只在 section 里出现的不算顶层
+  expect(minimalCodexConfig(file)).toBeNull();
+  expect(minimalCodexConfig(join(dir,"missing.toml"))).toBeNull();
+});

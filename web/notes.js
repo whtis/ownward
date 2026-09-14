@@ -29,7 +29,6 @@ TABS.notes = {
             <span class="path" id="nt-path">选择左侧文件</span>
             <span style="flex:1"></span>
             <span id="nt-dirty" style="font-size:11px;color:var(--warning);display:none">未保存</span>
-            <button class="button secondary sm" id="nt-append">追加到今日</button>
             <button class="button primary sm" id="nt-save" disabled>保存 ⌘S</button>
           </div>
           <textarea id="nt-text" placeholder="# 选一个文件，或新建" spellcheck="false" disabled></textarea>
@@ -43,11 +42,6 @@ TABS.notes = {
       const res = await post("/api/vault/new", { name });
       toast(res.msg);
       if (res.ok) { await loadNotes(); openNoteFile(res.path); }
-    });
-    $("#nt-append").addEventListener("click", async () => {
-      const text = prompt("追加一条到今日 Ownward 日志：");
-      if (!text?.trim()) return;
-      toast((await post("/api/vault/append-today", { text })).msg || "已追加");
     });
     $("#nt-save").addEventListener("click", saveNote);
     $("#nt-text").addEventListener("input", () => setDirty(true));

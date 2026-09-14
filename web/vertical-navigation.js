@@ -75,6 +75,13 @@
   }
 
   const api = Object.freeze({ normalizeNavigation, renderNavigation, loadNavigation });
+  // 扩展的开关在 config 里，改完要重启 daemon 才生效。入口只在首屏拉一次的话，关掉的扩展
+  // 会在导航上一直挂到用户手动刷新为止（点进去还是 404）——所以回到前台时补拉一次，
+  // 再由 app.js 在 SSE 重连（daemon 重启必然重连）时拉一次。
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) void loadNavigation(); });
+  }
+  if (typeof window !== "undefined") window.VerticalNav = api;
   void loadNavigation();
   return api;
 })();

@@ -129,6 +129,18 @@ export function tailRead(path: string, maxBytes = 128 * 1024): string {
   }
 }
 
+/**
+ * launchd 只管把 stdout/stderr 一路追加到同一个文件，自己不轮转——日志会无限长到撑爆磁盘。
+ * 超 maxBytes 就地截到尾部 keepBytes（同一个 inode 重写：launchd 手里的 fd 是 append 模式，
+ * 写位置永远算到当前末尾，不会因为截断而写到空洞里，也不需要它重开文件）。
+ */
+export function rotateLogFile(file: string, maxBytes = 5 * 1024 * 1024, keepBytes = 512 * 1024): void {
+  try {
+    if (!existsSync(file) || statSync(file).size <= maxBytes) return;
+    writeFileSync(file, `(rotated ${new Date().toISOString()})\n` + tailRead(file, keepBytes));
+  } catch { /* 轮转失败不阻塞调用方 */ }
+}
+
 /** 记录事件源健康时间戳（dashboard 展示用） */
 export function markHealth(source: string) {
   const state = loadState();

@@ -7,7 +7,7 @@ export type { CodexEffort } from "../../session-options.ts";
 
 export const CODEX_PROVIDER_ID = "codex" as const;
 export const CODEX_PROVIDER_CAPABILITIES = new Set([
-  "stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "new-session", "model", "effort",
+  "stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort",
 ] as const);
 
 export type CodexAccess = "workspace-write" | "full-access";
@@ -60,6 +60,17 @@ export function parseCodexSendInput(input: string): CodexSendInput {
 }
 export function parseCodexAddDir(input: string): string { const v = JSON.parse(input); if (!plain(v)) throw new Error("add-dir input 非法"); exact(v, ["dir"], "add-dir input"); return absolute(v.dir, "dir"); }
 export function parseCodexAccess(input: string): CodexAccess { const v = JSON.parse(input); if (!plain(v)) throw new Error("set-access input 非法"); exact(v, ["access"], "set-access input"); if (v.access !== "workspace-write" && v.access !== "full-access") throw new Error("access 非法"); return v.access; }
+export type CodexSetOptionsInput = { model?: string; effort?: CodexEffort };
+export function parseCodexSetOptions(input: string): CodexSetOptionsInput {
+  const v = JSON.parse(input); if (!plain(v)) throw new Error("set-options input 非法"); exact(v, ["model", "effort"], "set-options input");
+  const out: CodexSetOptionsInput = { ...(v.model === undefined ? {} : { model: model(v.model) }), ...(v.effort === undefined ? {} : { effort: effort(v.effort) }) };
+  if (!Object.keys(out).length) throw new Error("set-options 至少要给 model 或 effort");
+  return out;
+}
+/** 键序是 Session 身份的一部分（sameOptions 按 JSON.stringify 比对），合并后必须按 parseCodexOptions 的顺序重建；顺带校验 model/effort 组合 */
+export function withCodexOptions(options: CodexOptions, patch: CodexSetOptionsInput): CodexOptions {
+  return parseCodexOptions({ ...options, ...patch });
+}
 export function parseCodexNewSession(input: string): void { const v = JSON.parse(input); if (!plain(v) || Object.keys(v).length) throw new Error("new-session input 必须为空对象"); }
 
 export function buildCodexArgs(command: readonly string[], options: CodexOptions, prompt: string, imagePaths: readonly string[], nativeRef?: string): string[] {

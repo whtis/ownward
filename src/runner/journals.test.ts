@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { auditRunnerBlobs, quarantineRunnerOrphans, RunnerCommandJournal, RunnerEventJournal } from "./journals.ts";
+import { archiveRunnerEvents, auditRunnerBlobs, quarantineRunnerOrphans, readArchivedSessionEvents, RunnerCommandJournal, RunnerEventJournal } from "./journals.ts";
 import { planRunnerRecovery } from "./recovery.ts";
 import { reconcileRunnerStartup } from "./startup-reconcile.ts";
 
@@ -32,7 +32,7 @@ describe("Runner journals", () => {
   });
   test("Claude 控制命令严格区分有输入与无输入 kind", () => {
     const repo = new RunnerCommandJournal(root());
-    for (const kind of ["resume-run", "send-input", "approval-response", "add-dir", "set-access", "new-session"] as const) {
+    for (const kind of ["resume-run", "send-input", "approval-response", "add-dir", "set-access", "set-options", "new-session"] as const) {
       const record = repo.accept({ commandId: `cmd-${kind}`, kind, runId: `run-${kind}`, sessionId: "session-claude", providerId: "claude", input: "{}", ...(kind === "approval-response" ? { approvalRequestId: "approval-1" } : {}) }).record;
       expect(repo.readInput(record)).toBe("{}");
     }
@@ -176,5 +176,123 @@ describe("Runner journals", () => {
   test("owner 可修复的 runner 目录权限主动收敛到 0700", () => {
     const r = root(), runner = join(r, "runner"); mkdirSync(runner, { mode: 0o777 }); chmodSync(runner, 0o777); new RunnerCommandJournal(r).accept(command()); chmodSync(runner, 0o500);
     expect(new RunnerCommandJournal(r).accept(command("cmd-2")).appended).toBe(true); expect(statSync(runner).mode & 0o777).toBe(0o700);
+  });
+});
+
+// daemon 每 50ms 轮询一次事件 journal，还有大量 API handler 也在读。readStrict 曾经经由
+// read() 走底层 structuredClone：14k 条记录实测单次 13.8ms 且随 journal 线性增长，是主线程
+// 周期性卡死（发布观察窗被它判死过）的主因。热路径必须共享冻结记录，不许再深拷贝。
+test("事件 journal 的 readStrict 走共享冻结记录，不深拷贝（read 仍给可变副本）", () => {
+  const r = root(), commands = new RunnerCommandJournal(r), events = new RunnerEventJournal(r);
+  const c = command("cmd-hot"); commands.accept(c);
+  events.append({ eventId: "e-hot", type: "started", at: "2026-01-01T00:00:00.000Z", commandId: c.commandId, runId: c.runId, sessionId: c.sessionId, providerId: c.providerId });
+
+  const a = events.readStrict(), b = events.readStrict();
+  expect(a[0]).toBe(b[0]);                    // 同一个对象 ⇒ 没有深拷贝
+  expect(Object.isFrozen(a[0])).toBe(true);   // 共享的记录必须冻结，误写当场炸
+  expect(a).not.toBe(b);                      // 数组本身仍是各自的浅拷贝，调用方可以 sort/push
+
+  const copy = events.read();                 // read() 保持可变副本契约
+  expect(copy.records[0]).not.toBe(a[0]);
+  expect(Object.isFrozen(copy.records[0])).toBe(false);
+  expect(copy.records[0]).toEqual(a[0]);
+});
+
+// 增量交叉校验只在「同 inode + 只增长 + 上次零诊断」时复用前缀结论。复用错了就是把损坏的
+// journal 判成健康的，所以下面两条守的是「不许漏报」，不是性能。
+test("增量交叉校验仍然抓得到新追加的坏事件", () => {
+  const r = root(), commands = new RunnerCommandJournal(r), events = new RunnerEventJournal(r);
+  const c = command("cmd-inc"); commands.accept(c);
+  events.append({ eventId: "e-1", type: "started", at: "2026-01-01T00:00:00.000Z", commandId: c.commandId, runId: c.runId, sessionId: c.sessionId, providerId: c.providerId });
+  expect(events.readStrict()).toHaveLength(1);           // 先建立 memo
+
+  // 绕过 append 校验直接写盘：模拟损坏/外部写入。command 不存在，必须被新一轮 fold 抓到。
+  const file = join(r, "runner", "events.jsonl");
+  appendFileSync(file, JSON.stringify({ schemaVersion: 1, eventId: "e-2", sequence: 1, type: "started", at: "2026-01-01T00:00:02.000Z", commandId: "cmd-ghost", runId: "run-ghost", sessionId: "s-ghost", providerId: "fake" }) + "\n");
+  expect(() => new RunnerEventJournal(r).readStrict()).toThrow(/损坏/);
+});
+
+test("journal 被整体换掉后不复用旧的校验结论", () => {
+  const r = root(), commands = new RunnerCommandJournal(r), events = new RunnerEventJournal(r);
+  const c = command("cmd-swap"); commands.accept(c);
+  events.append({ eventId: "s-1", type: "started", at: "2026-01-01T00:00:00.000Z", commandId: c.commandId, runId: c.runId, sessionId: c.sessionId, providerId: c.providerId });
+  expect(events.readStrict()).toHaveLength(1);           // memo：零诊断
+
+  // tmp+rename 换 inode，新内容从第一条起就是坏的（sequence 不从 1 开始）
+  const file = join(r, "runner", "events.jsonl"), tmp = `${file}.swap`;
+  writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, eventId: "s-9", sequence: 7, type: "started", at: "2026-01-01T00:00:09.000Z", commandId: c.commandId, runId: c.runId, sessionId: c.sessionId, providerId: c.providerId }) + "\n");
+  renameSync(tmp, file);
+  expect(() => new RunnerEventJournal(r).readStrict()).toThrow(/损坏/);
+});
+
+describe("事件归档压缩", () => {
+  const old = "2026-01-01T00:00:00.000Z", recent = "2026-06-01T00:00:00.000Z", now = new Date("2026-06-10T00:00:00.000Z");
+  const seed = (r: string) => {
+    const commands = new RunnerCommandJournal(r), events = new RunnerEventJournal(r);
+    const mk = (id: string, session: string, at: string, terminal: boolean) => {
+      const c = { ...command(id), sessionId: session };
+      commands.accept(c);
+      events.append({ eventId: `${id}-1`, type: "started", at, commandId: id, runId: c.runId, sessionId: session, providerId: "fake" });
+      if (terminal) events.append({ eventId: `${id}-2`, type: "completed", at, commandId: id, runId: c.runId, sessionId: session, providerId: "fake" });
+    };
+    mk("old-a", "sess-1", old, true);      // 旧且已终结 → 该归档
+    mk("old-b", "sess-1", old, true);      // 同会话第二条
+    mk("live", "sess-2", old, false);      // 旧但还在跑 → 绝不能动
+    mk("fresh", "sess-3", recent, true);   // 新 → 留下
+    return r;
+  };
+
+  test("只搬旧的已终结命令，活跃命令和近期命令原地不动", () => {
+    const r = seed(root());
+    const result = archiveRunnerEvents(r, { retentionDays: 30, now });
+    expect(result.archived).toBe(4);                       // old-a / old-b 各 2 条
+    expect(result.skipped).toBe(1);                        // live 未终结
+    expect(result.sessions).toEqual(["sess-1"]);
+    const left = new RunnerEventJournal(r).readStrict().map((e) => e.commandId);
+    expect(new Set(left)).toEqual(new Set(["live", "fresh"]));
+  });
+
+  test("归档后热 journal 仍然通过全量严格校验（没搬走半条命令）", () => {
+    const r = seed(root());
+    archiveRunnerEvents(r, { retentionDays: 30, now });
+    expect(() => new RunnerEventJournal(r).readStrict()).not.toThrow();   // sequence 仍从 1 连续
+  });
+
+  test("归档的事件一条不丢，可按会话回读且去重", () => {
+    const r = seed(root());
+    archiveRunnerEvents(r, { retentionDays: 30, now });
+    const back = readArchivedSessionEvents(r, "sess-1");
+    expect(back.map((e) => e.eventId).sort()).toEqual(["old-a-1", "old-a-2", "old-b-1", "old-b-2"]);
+    archiveRunnerEvents(r, { retentionDays: 30, now });                   // 再跑一次不该重复
+    expect(readArchivedSessionEvents(r, "sess-1")).toHaveLength(4);
+    expect(readArchivedSessionEvents(r, "sess-never")).toEqual([]);
+  });
+
+  test("归档事件的 payload 不算孤儿：审计必须把 archive 里的引用算进来", () => {
+    // 归档明确不搬 blob（会话历史还要靠它渲染），可审计只认热 journal——归档一发生
+    // 那批 blob 就集体变 orphan，谁把 quarantineRunnerOrphans 接上就搬走了还在用的历史。
+    // 保留期 30 天，所以这个洞在装机头一个月是看不出来的。
+    const r = root(), commands = new RunnerCommandJournal(r), events = new RunnerEventJournal(r);
+    const c = { ...command("old-p"), sessionId: "sess-p" };
+    commands.accept(c);
+    events.append({ eventId: "old-p-1", type: "started", at: old, commandId: "old-p", runId: c.runId, sessionId: "sess-p", providerId: "fake", payload: JSON.stringify({ role: "assistant", text: "归档后仍要能渲染" }) });
+    events.append({ eventId: "old-p-2", type: "completed", at: old, commandId: "old-p", runId: c.runId, sessionId: "sess-p", providerId: "fake" });
+    const ref = new RunnerEventJournal(r).readStrict().find((e) => e.payloadRef)!.payloadRef!;
+    expect(auditRunnerBlobs(r).orphans).not.toContain(ref);
+
+    expect(archiveRunnerEvents(r, { retentionDays: 30, now }).archived).toBe(2);
+    expect(new RunnerEventJournal(r).readStrict()).toHaveLength(0);        // 热 journal 已清空
+    expect(readArchivedSessionEvents(r, "sess-p")).toHaveLength(2);        // 记录搬进了归档
+    const after = auditRunnerBlobs(r);
+    expect(after.referenced).toContain(ref);                               // ← 回归点
+    expect(after.orphans).not.toContain(ref);
+  });
+
+  test("没有可归档的命令时不碰文件", () => {
+    const r = seed(root());
+    const before = statSync(join(r, "runner", "events.jsonl"));
+    const result = archiveRunnerEvents(r, { retentionDays: 3650, now });
+    expect(result.archived).toBe(0);
+    expect(statSync(join(r, "runner", "events.jsonl")).ino).toBe(before.ino);   // 没重写
   });
 });

@@ -80,21 +80,22 @@ private val ENGINES = listOf("claude" to "Claude", "codex" to "Codex", "codebudd
 /** 服务端 chat.providers 没配该引擎时的兜底型号表（与 web/app.js 同一份） */
 private val FALLBACK_MODELS = mapOf(
     "claude" to listOf("fable", "opus", "sonnet", "haiku"),
-    "codex" to listOf("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"),
-    "codebuddy" to listOf("hy3", "glm-5.2", "kimi-k3-1", "minimax-m3", "deepseek-v4-pro", "deepseek-v3-2-volc"),
+    "codex" to listOf("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"),
+    "codebuddy" to listOf("hy3", "hy3-x", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo", "minimax-m3-pay", "minimax-m2.7", "kimi-k3-2", "kimi-k2.7", "kimi-k2.6", "deepseek-v4-pro", "deepseek-v4-flash"),
 )
 
 private val WORK_PROVIDER_EFFORTS = mapOf(
     "claude" to listOf("low", "medium", "high", "xhigh", "max"),
-    "codebuddy" to listOf("low", "medium", "high", "xhigh", "max"),
+    "codebuddy" to listOf("minimal", "low", "medium", "high", "xhigh", "max"),   // codebuddy --help 比 claude 多一档 minimal
 )
 
 internal val WORK_CODEX_MODEL_EFFORTS = linkedMapOf(
+    "gpt-6-astra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
     "gpt-5.6-sol" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
     "gpt-5.6-terra" to listOf("low", "medium", "high", "xhigh", "max", "ultra"),
     "gpt-5.6-luna" to listOf("low", "medium", "high", "xhigh", "max"),
     "gpt-5.5" to listOf("low", "medium", "high", "xhigh"),
-    "gpt-5.4" to listOf("low", "medium", "high", "xhigh"),
+    "gpt-5.3-codex-spark" to listOf("low", "medium", "high", "xhigh"),
 )
 
 internal fun workProviderDefaultModel(provider: String): String =

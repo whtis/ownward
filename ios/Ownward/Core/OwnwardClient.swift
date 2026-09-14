@@ -157,12 +157,27 @@ final class OwnwardClient: Sendable {
     func routineSkip(id: String, date: String) async throws -> OkMsg {
         try await post("/api/routines/skip", ["id": .string(id), "date": .string(date)])
     }
+    /// /api/routines/draft 的 query 拼接（android routineDraft 同款，可单测）
+    static func routineDraftPath(id: String, date: String) -> String {
+        "/api/routines/draft?id=" + enc(id) + "&date=" + enc(date)
+    }
+    /// 200 + ok:false（草稿不存在/已删）也算失败，msg 直接给人看
+    func routineDraft(id: String, date: String) async throws -> RoutineDraft {
+        let d: RoutineDraft = try await get(Self.routineDraftPath(id: id, date: date))
+        if !d.ok { throw ApiError(code: 200, message: d.msg.isEmpty ? "读取草稿失败" : d.msg) }
+        return d
+    }
+    func routineSaveDraft(id: String, date: String, content: String) async throws -> OkMsg {
+        try await post("/api/routines/draft", ["id": .string(id), "date": .string(date), "content": .string(content)])
+    }
 
     // MARK: - 任务 / agent 会话
 
     func tasks() async throws -> [WorkTask] { try await get("/api/tasks") }
     func recentSessions() async throws -> [RecentSession] { try await get("/api/dev/recent") }
     func devMessages(id: String) async throws -> AgentState { try await get("/api/dev/messages?id=" + Self.enc(id)) }
+    /// 各家订阅额度（服务端 60s 缓存；拿不到的那家为 null）
+    func usage() async throws -> ProvidersUsage { try await get("/api/usage") }
     func devSend(id: String, text: String, images: [OutImage] = []) async throws -> OkMsg {
         var body: [String: JSONValue] = ["id": .string(id), "text": .string(text)]
         if !images.isEmpty { body["images"] = Self.imagesJSON(images) }

@@ -1,3 +1,4 @@
+import { effortsForProvider } from "../../session-options.ts";
 import { realpathSync, statSync } from "fs";
 import { AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, contentImageUrls, normalizeClaudeContentImages } from "../../runner/agent-images.ts";
 import { readRunnerAttachment } from "../../runner/attachments.ts";
@@ -5,22 +6,26 @@ import type { RunnerCommandRecord, RunnerReasonCode } from "../../runner/journal
 import type { ProviderEventInput, RunnerProvider } from "../../runner/server.ts";
 import { readClaudeTranscriptAsync } from "../transcript-history-async.ts";
 import { emitCoreLog } from "../../kernel/observability/contracts.ts";
+import { contextWindowOf } from "./context-window.ts";
 import {
   buildClaudeProviderArgs, claudeUserFrame, parseClaudeAccess, parseClaudeAddDir, parseClaudeApprovalInput,
   parseClaudeNewSession, parseClaudeSendInput, parseClaudeStartInput, type ClaudeSessionOptions,
-  CLAUDE_PROVIDER_CAPABILITIES, CLAUDE_PROVIDER_ID,
+  CLAUDE_PROVIDER_CAPABILITIES, CLAUDE_PROVIDER_ID, parseClaudeSetOptions, withClaudeOptions, type ClaudeEffort,
 } from "./protocol.ts";
 
 type EventInput = ProviderEventInput;
 type ControlWait = { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; onAck?: () => void };
 type PendingApproval = { requestId: string; runId: string; input: Record<string, unknown>; reserved: boolean };
-type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; toolNames?: Map<string, string> };
+type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; model?: string /* 本轮最近一个主线程 assistant 帧的模型 id：result.modelUsage 按它取窗口 */; toolNames?: Map<string, string> };
 type ClaudeSession = {
   sessionId: string; cwd: string; options: ClaudeSessionOptions; nativeRef?: string; proc?: Bun.Subprocess; generation: number;
   turn?: Turn; operation?: string; controlOperation?: string; pending: Map<string, PendingApproval>; controls: Map<string, ControlWait>; mutex: AsyncMutex;
-  stderrTail: string; invalidLines: number; consecutiveInvalidLines: number; droppedFrames: number;
+  stderrTail: string; invalidLines: number; consecutiveInvalidLines: number; droppedFrames: number; droppedByReason: Map<string, number>;
 };
 export type ClaudeProviderOptions = { controlAckTimeoutMs?: number; maxInvalidLines?: number; maxStdoutBufferBytes?: number; stderrRingBytes?: number; dataRoot?: string; providerId?: string };
+
+/** 丢帧日志的采样阶梯：每个 reason 在这些累计数上各落一行，之后每 10 万帧再落一行 */
+const DROP_LOG_MILESTONES = [1, 10, 100, 1_000, 10_000, 100_000];
 
 class ProviderError extends Error { constructor(readonly code: string, message: string) { super(message); } }
 const providerError = (code: string, message: string) => new ProviderError(code, message);
@@ -102,6 +107,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
         case "approval-response": yield* this.approval(command, input); return;
         case "add-dir": yield* this.addDir(command, input); return;
         case "set-access": yield* this.setAccess(command, input); return;
+        case "set-options": yield* this.setOptions(command, input); return;
         case "new-session": yield* this.newSession(command, input); return;
         default: throw providerError("PROVIDER_CAPABILITY_UNSUPPORTED", `Claude Provider 不支持 ${(command as RunnerCommandRecord).kind}`);
       }
@@ -118,7 +124,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     return { eventId, type, at: at(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId, ...extra, ...(durability ? { durability } : {}) } as EventInput;
   }
   private makeSession(sessionId: string, cwd: string, options: ClaudeSessionOptions, nativeRef?: string): ClaudeSession {
-    return { sessionId, cwd: this.validateCwd(cwd), options, nativeRef, generation: 0, pending: new Map(), controls: new Map(), mutex: new AsyncMutex(), stderrTail: "", invalidLines: 0, consecutiveInvalidLines: 0, droppedFrames: 0 };
+    return { sessionId, cwd: this.validateCwd(cwd), options, nativeRef, generation: 0, pending: new Map(), controls: new Map(), mutex: new AsyncMutex(), stderrTail: "", invalidLines: 0, consecutiveInvalidLines: 0, droppedFrames: 0, droppedByReason: new Map() };
   }
   private validateCwd(cwd: string): string {
     try { const canonical = realpathSync(cwd); if (!statSync(canonical).isDirectory()) throw new Error("not directory"); return canonical; }
@@ -203,6 +209,20 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   }
   private async *addDir(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> { const dir = parseClaudeAddDir(input); yield* this.reconfigure(command, "add-dir", async (session) => { session.options.extraDirs = [...new Set([...session.options.extraDirs, dir])]; }); }
   private async *setAccess(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> { const access = parseClaudeAccess(input); yield* this.reconfigure(command, "set-access", async (session) => { session.options = { ...session.options, access }; }); }
+  /** 同 Provider 就地改模型/思考深度：停掉常驻 CLI，下一轮按 --resume + 新 --model/--effort 重新拉起（与 set-access 同一条路）。
+   *  Runner 重启后没有这个 Session 的内存态时直接 completed——不是假成功：Runner 侧本来就没有旧进程/旧参数可改，
+   *  下一轮 resume-run 会显式携带 Kernel 持久化的 options（Kernel 收到 completed 才落盘）。 */
+  /** 协议层放行两家 CLI 档位的并集（codebuddy 多一档 minimal）；哪家不认哪档在这里按 providerId 拒——真 claude 收到 --effort minimal 会直接报错 */
+  private assertEffortForProvider(effort: string | undefined): void {
+    if (effort && !effortsForProvider(this.id === "codebuddy" ? "codebuddy" : "claude").includes(effort as ClaudeEffort)) throw providerError("PROVIDER_INPUT_INVALID", `${this.id} 不支持思考深度 ${effort}`);
+  }
+  private async *setOptions(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> {
+    const patch = parseClaudeSetOptions(input), session = this.sessions.get(command.sessionId);
+    if (!session) { withClaudeOptions({ access: "standard", extraDirs: [] }, patch); yield this.event(command, "started"); yield this.event(command, "completed"); return; }
+    const next = withClaudeOptions(session.options, patch);   // 先算好：非法组合在 started 之前就拒绝
+    this.assertEffortForProvider(next.effort);
+    yield* this.reconfigure(command, "set-options", async (target) => { target.options = next; });
+  }
   private async *newSession(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> {
     parseClaudeNewSession(input); const session = this.requireSession(command);
     await this.reserveIdle(session, "new-session"); try { yield this.event(command, "started"); await this.stopProcess(session, false); session.nativeRef = undefined; session.pending.clear(); yield this.event(command, "session-updated", { payload: JSON.stringify({ nativeRef: null }) }); yield this.event(command, "completed"); } finally { await session.mutex.run(() => { if (session.operation === "new-session") session.operation = undefined; }); }
@@ -244,6 +264,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     const generation = ++session.generation, cleanEnv = { ...this.env, DISABLE_OMC: "1" }; for (const key of Object.keys(cleanEnv)) if (key.startsWith("CLAUDE_CODE_") || key.startsWith("CODEBUDDY_")) delete cleanEnv[key];  // 两家 CLI 的嵌套会话变量都剥，防被当成父会话的子会话
     // 非 bypass 必须等 probe：错发 --permission-prompt-tool 给不认识它的克隆 CLI（codebuddy）会直接 unknown option 崩
     const capability=await this.cliCapability(cleanEnv,!!session.options.effort||session.options.access!=="bypass"),supportsEffort=capability.state==="ready"&&capability.effort;
+    this.assertEffortForProvider(session.options.effort);
     if(session.options.effort&&!supportsEffort){this.metrics.effortUnsupported++;throw providerError("PROVIDER_CAPABILITY_UNSUPPORTED",capability.state==="failed"?`${this.id} CLI 无法确认 --effort 支持，已拒绝启动`:`${this.id} CLI 不支持 --effort，已拒绝启动`);}
     const supportsPermissionPromptTool=capability.state!=="ready"||capability.permissionPromptTool;
     let proc: Bun.Subprocess; try { proc = Bun.spawn(buildClaudeProviderArgs(this.claudeCommand, session.options, session.nativeRef,supportsEffort,supportsPermissionPromptTool), { cwd: session.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe", env: cleanEnv }); } catch { throw providerError("PROVIDER_UNAVAILABLE", "无法启动 Claude CLI"); }
@@ -303,10 +324,18 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       turn.queue.push(this.event(command, "approval-requested", { approvalRequestId: requestId, payload: JSON.stringify(normalized) })); return;
     }
     if (raw.type === "stream_event" && plain(raw.event) && plain(raw.event.delta) && raw.event.delta.type === "text_delta" && typeof raw.event.delta.text === "string") { turn.delta += raw.event.delta.text; return; }
+    // --include-partial-messages 下 CLI 会把整条 SSE 流转发过来：message_start / content_block_start /
+    // thinking_delta / input_json_delta / content_block_stop / message_delta / message_stop。我们只消费
+    // text_delta（其余内容随后都在完整的 assistant 帧里重放一遍），所以这些帧是**预期内的忽略**，
+    // 不是协议漂移。旧实现让它们落到最后那条 unsupported-frame：一天 7 万行 runner.log（560MB/天，
+    // 且 runner.log 无轮转），真正有价值的「没见过的帧」信号就淹死在里面了。分类到自己的 reason，
+    // 计数照记（规则 9：丢弃必须可观测），日志按里程碑采样。
+    if (raw.type === "stream_event") return this.dropFrame(session, `stream_event:${plain(raw.event) && typeof raw.event.type === "string" ? raw.event.type.slice(0, 40) : "unknown"}`);
     if (raw.type === "assistant" && plain(raw.message)) {
       if (raw.message.model === "<synthetic>") { const text = extractText(raw.message.content).trim(); if (text === "No response requested.") return; const category = /rate|limit|429/i.test(text) ? "rate_limited" : /auth|login|token|credential/i.test(text) ? "auth_expired" : "api_error"; return this.notice(turn, category, { message: text.slice(0, 2_000) }); }
       this.flushDelta(turn);
       const content = raw.message.content, message = { role: "assistant", text: extractText(content), thinking: Array.isArray(content) ? content.filter((item) => plain(item) && item.type === "thinking" && typeof item.thinking === "string").map((item) => item.thinking) : [], tools: Array.isArray(content) ? content.filter((item) => plain(item) && item.type === "tool_use").map((item) => ({ id: item.id, name: item.name, input: item.input })) : [], model: typeof raw.message.model === "string" ? raw.message.model : undefined };
+      if (message.model) turn.model = message.model;   // sidechain 帧在上面已丢，这里只剩主线程模型
       for (const tool of message.tools) if (typeof tool.id === "string" && typeof tool.name === "string") (turn.toolNames ??= new Map()).set(tool.id, tool.name);  // 给后续 tool_result 配名
       turn.queue.push(this.event(command, "message-completed", { payload: JSON.stringify(message) })); turn.queue.push(this.event(command, "usage", { payload: JSON.stringify({ scope: "request", ...normalizeUsage(raw.message.usage) }) }, "best-effort")); return;
     }
@@ -334,7 +363,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       // stdin 读走，随进程一起蒸发；run 却记成 completed，前端连个提示都没有
       // （2026-08-31 实撞：会话上一轮留了个活着的后台任务，此后每条消息都被静默吞掉，且永久复发）
       if (plain(raw.origin) && raw.origin.kind === "task-notification") return this.dropFrame(session, "task-notification-result");
-      this.flushDelta(turn); turn.queue.push(this.event(command, "usage", { payload: JSON.stringify({ scope: "turn", ...normalizeUsage(raw.usage) }) }, "best-effort"));
+      this.flushDelta(turn); const contextWindow = contextWindowOf(raw.modelUsage, [turn.model, turn.initMeta?.model]); turn.queue.push(this.event(command, "usage", { payload: JSON.stringify({ scope: "turn", ...normalizeUsage(raw.usage), ...(contextWindow ? { contextWindow } : {}) }) }, "best-effort"));
       const type = raw.is_error ? (turn.interruptRequested ? "interrupted" : "failed") : "completed"; if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined });
       turn.terminal = true; turn.queue.push(this.event(command, type, type === "interrupted" ? { reason: "user_interrupt" } : type === "failed" ? { reason: "provider_result_error" } : {})); turn.queue.end(); return;
     }
@@ -343,7 +372,15 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   private flushDelta(turn: Turn): void { if (!turn.delta) return; const text = turn.delta; turn.delta = ""; this.metrics.aggregatedDeltas++; turn.queue.push(this.event(turn.command, "delta", { payload: JSON.stringify({ role: "assistant", text }) }, "best-effort")); }
   private emitSessionUpdate(session: ClaudeSession, turn: Turn): void { if (!turn.started || turn.sessionUpdateEmitted || !session.nativeRef || !turn.initMeta) return; turn.sessionUpdateEmitted = true; turn.queue.push(this.event(turn.command, "session-updated", { nativeRef: session.nativeRef, payload: JSON.stringify({ nativeRef: session.nativeRef, ...turn.initMeta }) })); }
   private notice(turn: Turn, category: "rate_limited" | "auth_expired" | "api_error" | "compacting" | "compact_failed" | "compact_ok" | "stderr" | "background_task", detail: Record<string, unknown>): void { this.metrics.notices++; turn.queue.push(this.event(turn.command, "provider-notice", { payload: JSON.stringify({ category, ...detail }) }, "best-effort")); }
-  private dropFrame(session: ClaudeSession, reason: string): void { session.droppedFrames++; this.metrics.droppedFrames++; emitCoreLog({ event: "claude-frame-dropped", moduleType: "provider", moduleId: this.id, operation: "decode-frame", runId: session.turn?.command.runId, sessionId: session.sessionId, eventId: session.turn?.command.commandId, errorClass: "PROVIDER_FRAME_DROPPED", msg: `reason=${reason} total=${session.droppedFrames}` }); }
+  // 丢帧必须可观测（SELF.md 规则 9），但「每帧一行」把可观测性做成了噪音：预期内的 partial 帧
+  // 一天写 7 万行，真正值钱的「没见过的帧」信号反而淹死在里面。改成按 reason 分桶计数 +
+  // 里程碑采样：类型和量级都还在，体积降三个数量级。计数器本身仍是每帧都涨的，不受采样影响。
+  private dropFrame(session: ClaudeSession, reason: string): void {
+    session.droppedFrames++; this.metrics.droppedFrames++;
+    const seen = (session.droppedByReason.get(reason) ?? 0) + 1; session.droppedByReason.set(reason, seen);
+    if (!DROP_LOG_MILESTONES.includes(seen) && seen % 100_000 !== 0) return;
+    emitCoreLog({ event: "claude-frame-dropped", moduleType: "provider", moduleId: this.id, operation: "decode-frame", runId: session.turn?.command.runId, sessionId: session.sessionId, eventId: session.turn?.command.commandId, errorClass: "PROVIDER_FRAME_DROPPED", msg: `reason=${reason} seen=${seen} total=${session.droppedFrames}` });
+  }
   private onExit(session: ClaudeSession, proc: Bun.Subprocess, generation: number, code: number): void {
     if (session.proc !== proc || session.generation !== generation) return; session.proc = undefined; const turn = session.turn; if (!turn || turn.terminal) return;
     if (session.stderrTail) this.notice(turn, "stderr", { tail: session.stderrTail }); turn.terminal = true; turn.queue.push(this.event(turn.command, turn.interruptRequested ? "interrupted" : "failed", turn.interruptRequested ? { reason: "user_interrupt", exitCode: code } : { reason: "provider_exit", exitCode: code })); turn.queue.end();

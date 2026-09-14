@@ -168,3 +168,44 @@ describe("validate-only patches", () => {
     expect(((await malformed?.json()) as any).error.code).toBe("INVALID_REQUEST");
   });
 });
+
+// 外部 Vertical 只装在本机 config.json 里，config.default.json 没有它们：schema 按 defaults 建，
+// 于是设置页既看不见也关不掉一个已装扩展（只能手改 config + install.sh）。
+// 放开的只有 enabled 这一格——trusted / 能力 / 令牌是安全边界，永远内部只读。
+describe("已装扩展的启停开关", () => {
+  const files = (root: string, local: Record<string, unknown>) => {
+    const defaultFile = join(root, "config.default.json"), overrideFile = join(root, "config.json");
+    writeFileSync(defaultFile, JSON.stringify({ owner: { name: "" }, verticals: { externalPaths: [], dev: { enabled: true } } }));
+    writeFileSync(overrideFile, JSON.stringify(local));
+    return { defaultFile, overrideFile };
+  };
+
+  test("本机装了的扩展会补出 enabled 这一格，且可编辑、标高风险", () => {
+    const root = mkdtempSync(join(tmpdir(), "ownward-vertical-switch-"));
+    const { schema } = loadSettings(files(root, { verticals: { externalPaths: ["/opt/x"], acme: { enabled: true, trusted: true, coreToken: "s3cret" } } }));
+    const acme = schema.nodes.verticals?.children?.acme?.children;
+    expect(acme?.enabled).toMatchObject({ type: "boolean", tier: "advanced", metadata: { editable: true, risk: "high" } });
+    expect(acme?.trusted).toBeUndefined();          // 只补 enabled，别的字段一格都不给
+    expect(acme?.coreToken).toBeUndefined();
+  });
+
+  test("能关掉一个已装扩展", () => {
+    const root = mkdtempSync(join(tmpdir(), "ownward-vertical-switch-"));
+    const f = files(root, { verticals: { acme: { enabled: true, trusted: true } } });
+    const result = validateSettingsPatches({ sourceDigest: loadSettings(f).snapshot.sourceDigest, patches: [{ op: "set", path: "/verticals/acme/enabled", value: false }] }, f);
+    expect(result.issues).toEqual([]);
+    expect(result.valid).toBeTrue();
+    expect(result.redactedDiff).toEqual([{ path: "/verticals/acme/enabled", before: true, after: false, risk: "high" }]);
+    expect(result.risk.level).toBe("high");                       // 启停扩展 = 改变跑什么，按高风险要求确认
+  });
+
+  test("安全边界仍然关着：trusted / 能力 / 令牌 / externalPaths 一律拒", () => {
+    const root = mkdtempSync(join(tmpdir(), "ownward-vertical-switch-"));
+    const f = files(root, { verticals: { externalPaths: ["/opt/x"], acme: { enabled: true, trusted: false, grantedCapabilities: [], coreToken: "s3cret" } } });
+    const digest = loadSettings(f).snapshot.sourceDigest;
+    for (const [path, value] of [["/verticals/acme/trusted", true], ["/verticals/acme/grantedCapabilities", ["llm"]], ["/verticals/acme/coreToken", "x"], ["/verticals/externalPaths", ["/evil"]]] as const) {
+      const result = validateSettingsPatches({ sourceDigest: digest, patches: [{ op: "set", path, value }] }, f);
+      expect(result.issues.map((issue) => issue.code)).toEqual([path === "/verticals/externalPaths" ? "READ_ONLY" : "UNKNOWN_SETTING"]);
+    }
+  });
+});

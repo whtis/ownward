@@ -68,9 +68,27 @@ function provenance(defaults: Record<string, any>, local: Record<string, any>): 
   return result;
 }
 
+/** 外部 Vertical 只存在于本机 config.json（externalPaths 指到本地检出），config.default.json 里
+ *  没有它们——schema 是按 defaults 建的，于是设置页看不见、也改不了它们的启停。这里按本机装了
+ *  哪些补上 `verticals/<id>/enabled` 这一格；其余字段（trusted/能力/令牌）一律不补，仍然内部只读。 */
+function withInstalledVerticals(schema: SettingsSchema, local: Record<string, any>): SettingsSchema {
+  const installed = local?.verticals;
+  if (!installed || typeof installed !== "object" || Array.isArray(installed)) return schema;
+  const root = schema.nodes.verticals; if (!root || root.type !== "object") return schema;
+  const children = { ...(root.children ?? {}) };
+  for (const [id, value] of Object.entries(installed)) {
+    if (id === "externalPaths" || !value || typeof value !== "object" || Array.isArray(value)) continue;
+    if (children[id]?.children?.enabled) continue;
+    children[id] = { type: "object", tier: "internal", default: {}, ...(children[id] ?? {}), children: { ...(children[id]?.children ?? {}), enabled: {
+      type: "boolean", tier: "advanced", default: false,
+      metadata: { editable: true, sensitive: false, restart: "paired-release", risk: "high" },
+    } } };
+  }
+  return { ...schema, nodes: { ...schema.nodes, verticals: { ...root, children } } };
+}
 export function loadSettings(files: SettingsFiles): { schema: SettingsSchema; snapshot: SettingsSnapshot } {
   const defaults = parseSettingsFile(files.defaultFile), local = parseSettingsFile(files.overrideFile, true);
-  const schema = buildSettingsSchema(defaults);
+  const schema = withInstalledVerticals(buildSettingsSchema(defaults), local);
   const canonical = canonicalConnectorOverlay(local);
   return { schema, snapshot: {
     schemaVersion: schema.version,

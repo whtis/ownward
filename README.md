@@ -2,112 +2,70 @@
 
 > Your work, carried forward.
 
-[English](#ownward) · [简体中文](#ownward-zh-cn)
+![Ownward：本地 AI 工作台，把任务、Agent 和项目记忆放在同一个闭环里](docs/assets/ownward-hero.svg)
 
-## AI sessions end. Development work should not have to start over.
+Ownward 是一个运行在 **macOS** 上的本地 AI 工作台：你可以从 Web、手机或 Terminal 派发任务，让 Claude Code、Codex 或 CodeBuddy 执行；任务过程、代码变化和结论会被整理回同一个项目的 Markdown 记忆里。
 
-Ownward is a local AI workbench for developers. Dispatch work from your phone,
-let Claude Code, Codex, or CodeBuddy take turns, and bring the execution facts
-from every agent back into one project memory.
+它解决的不是“再做一个聊天框”，而是 AI 编程最容易断掉的那一段：**人离开电脑后，任务仍能继续；Agent 换了，上下文不必重讲；下一次开发能找到上一次留下的事实。**
 
-Ownward is early alpha software. The command-line entry point is `own`.
+> **当前状态**：早期 alpha。服务端只支持 macOS；手机端是远程控制面，代码、凭据和 Agent CLI 始终留在你的 Mac 上。
 
-Once AI is part of your development workflow, the hard problem is usually not
-that a model cannot write code. The hard problem is continuity: you leave your
-desk and lose the thread; Claude hits a limit and switching to Codex means
-explaining everything again; several CLIs change the same project with no single
-record of what happened; and writing a status update means searching through
-chat logs and Git history all over again.
+## 先看懂：它是什么，不是什么
 
-Ownward runs on your Mac and keeps tasks, project directories, and work records
-together. Android and iPhone act as remote workbenches. Your code, credentials,
-and agent CLIs stay on the Mac.
+| Ownward 是 | Ownward 不是 |
+| --- | --- |
+| 一个本地常驻后台服务（daemon）+ 独立执行进程（Runner） | IDE 或编辑器替代品 |
+| Claude Code / Codex / CodeBuddy 的统一任务控制面 | Agent 的安全沙箱 |
+| 可从手机查看、追问、审批和接力的工作台 | 云端代码执行服务 |
+| 把 Run、diff、commit、结论写回项目的记录层 | Claude、Codex 或 CodeBuddy 的代理/加速器 |
 
-## Five ways Ownward helps with development
+手机只负责“派任务、看进度、做判断”。真正执行命令的 Agent 仍然在你的 Mac 上，并继承当前用户权限；后台 `worktree` 能隔离 Git 工作目录，但**不是权限边界**。
 
-### 1. Code from Android or iPhone without adding another provider
+## 90 秒看懂工作流
 
-Connect your phone to Ownward on the Mac to dispatch a development task, choose
-the project directory, add extra directories, select a model, and set access
-permissions. You can watch streaming replies, tool calls, and images; ask a
-follow-up question; interrupt a task; switch engines; and inspect repository
-status, diffs, tests, commits, and pull requests.
+![Ownward 架构总览：客户端、daemon、Runner/Provider 与本地 Markdown vault](docs/assets/architecture-overview.svg)
 
-The Android client is available from [GitHub Releases](https://github.com/whtis/ownward/releases).
-The iPhone client requires **iOS 26+** and can be installed on a device with
-Xcode. TestFlight distribution is provided by the maintainer. See
-[ios/README.md](ios/README.md) for build instructions.
+可以把一次开发理解成六步：
 
-Neither mobile client copies your code to the phone for execution. Remote access
-uses a token. Put Ownward behind Tailscale or a trusted TLS proxy instead of
-exposing the local port directly to the public internet.
+1. **输入**：从手机、Web 或 Terminal 写下任务，或让 GitHub / 飞书 / Gmail 等事件源进入通知流。
+2. **分流**：规则把“值得你处理的事”变成行动卡；普通噪声只留在日志里。
+3. **执行**：Runner 把任务交给 Claude Code、Codex 或 CodeBuddy。需要时可把同一任务接力给另一个引擎。
+4. **记录**：每轮执行都有 Run；任务结束后生成 Flight Record，包含目标、工具调用摘要、diff、测试和结论。
+5. **确认**：可复用的长期知识先进入 `_candidates/`，由人确认后才成为项目当前真相；Routine 草稿写入外部文档也有同一道人审门。
+6. **继续**：下一次派任务或生成周报时，直接复用项目记忆，而不是翻旧聊天。
 
-Ownward can use Claude Code, Codex, and Tencent CodeBuddy. Configuring only
-CodeBuddy still gives you the complete task workflow without access to an
-overseas provider. Ownward is not a proxy and does not change the network
-requirements of Claude or Codex.
+![Ownward 工作闭环：采集、分流、执行、记录、人工整理，再把上下文带入下一次任务](docs/assets/workflow-loop.svg)
 
-### 2. Continue task sessions and ordinary chats across engines
+### 两种“继续”不要混淆
 
-When you switch the engine for a task session, Ownward creates a traceable
-successor session. The new engine receives a bounded slice of recent history and
-inherits the original working directory, extra directories, and access level.
-The handoff prompt tells it to inspect the actual Git and file state instead of
-replaying old tool calls. The previous chain stays available for review, and an
-operation with an unknown result must be confirmed by a person before another
-engine takes over.
+- **任务会话**：有真实工作目录、权限和任务状态；可以追问、审批、中断，也可以在 Claude Code / Codex / CodeBuddy 之间接力。
+- **普通 Chat**：只重放聊天历史，不携带任务工作区；适合讨论和咨询，不适合让 Agent 直接改代码。
 
-```text
-Claude Code --rate limit--> Codex --different capability--> CodeBuddy
-      `----------- the old session and execution record stay available --------'
-```
+### 把术语翻译成人话
 
-Ordinary Chat switches differently. Change the provider in an existing
-conversation and Ownward replays the chat history as context. It does not create
-a task successor chain and does not carry task workspace state. That is useful
-for discussion and advice. Use a task session when the conversation needs to
-operate on real code.
+| 术语 | 白话 |
+| --- | --- |
+| Task | 你交给 Agent 的一件事 |
+| Session | 和某个 Agent 持续对话的上下文 |
+| Run | Session 里的一轮执行 |
+| Action | 今日页上需要你确认、回复或决定的卡片 |
+| Flight Record | 任务完成后的可审计记录：目标、diff、测试、结论 |
+| Routine | 按时间生成、等你审核的固定交付草稿 |
+| Provider | Claude Code、Codex、CodeBuddy 这类执行引擎 |
+| worktree | 隔离的 Git 工作目录，不是安全沙箱 |
 
-### 3. Put all three agents' execution facts back in one project
+## 3 分钟跑起来
 
-Tasks dispatched to Claude Code, Codex, or CodeBuddy create the same Run and
-Flight Record structure. The goal, execution trail, code changes, commit, and
-conclusion return to the project in one format, no matter which agent handled
-the turn.
+### 1. 准备环境
 
-### 4. Harvest sessions into durable project memory
-
-Substantive sessions started in external Claude Code or Codex CLI are discovered
-and harvested automatically. CodeBuddy's private transcript cannot currently be
-read from outside, so only CodeBuddy tasks started by Ownward are harvested.
-
-Harvested material is written to a local Markdown vault: recent material goes to
-the inbox, project evolution goes to the log, and task facts go to flights. When
-the model suggests long-term knowledge, it first writes to `_candidates/`; a
-person confirms it before it becomes official project memory. The next task can
-reuse those records instead of hoping an agent remembers the last conversation.
-
-### 5. Draft recurring updates from the work that already happened
-
-Routines fit recurring responsibilities such as stand-ups, weekly reports, and
-project syncs. At the scheduled time, Ownward gathers recent harvested records,
-task results, and project memory into a draft for review.
-
-A person must approve the draft before it is written to a Feishu document.
-Ownward gathers and drafts the material, but it does not skip the final
-publishing decision. Routines are off by default. Start with
-[examples/routines.json](examples/routines.json) when configuring
-`data/routines.json`; see the [configuration guide](docs/configuration.md) for
-Feishu setup and the rest of the configuration surface.
-
-## Quick start
-
-The server currently runs on macOS and needs:
-
+- macOS
 - [Bun](https://bun.sh)
-- Git
-- A logged-in [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex)
-- Optional: [Tencent CodeBuddy](https://copilot.tencent.com)
+- Git（Xcode Command Line Tools 自带）
+- 至少登录一个 Agent CLI： [Claude Code](https://claude.com/claude-code)、[Codex CLI](https://github.com/openai/codex)，或可选的腾讯 [CodeBuddy](https://copilot.tencent.com)
+
+安装脚本找不到 Claude / Codex 时仍会启动 daemon，但分流、心跳等需要 AI 的功能会不可用；之后补装 CLI 并重新运行 `bash install.sh` 即可。
+
+### 2. 安装并打开工作台
 
 ```bash
 git clone https://github.com/whtis/ownward.git
@@ -116,349 +74,162 @@ cd ownward
 open http://127.0.0.1:4517
 ```
 
-The installer creates local configuration and starts the daemon and an isolated
-Runner through launchd. The workbench listens on `127.0.0.1:4517` by default.
+首次安装会询问两项本机配置：称呼（可留空）和 vault 目录（默认 `~/Documents/ownward-vault`）。脚本会生成不会进 Git 的 `config.json`，安装 `own` CLI，并以 launchd 事务启动 daemon 与独立 Runner。
 
-After the first launch, open **Settings → AI Engines** to select the background
-decision engine, enable or disable Claude Code, Codex, and CodeBuddy, and choose
-the default project directory, provider, model, and permission for new tasks.
-For a Codex-only installation, select Codex there. CodeBuddy is off by default
-and can be enabled from the same page.
+安装事务会做构建、健康检查和 Provider canary，首次运行可能需要几分钟；这是在切换常驻服务前确认新版本可回滚，不是卡死。
 
-## How work gets carried forward
+打开「设置 → AI 引擎」：
+
+1. 确认已登录的 Provider 已启用；只用 CodeBuddy 也可以跑完整任务链路，但 CodeBuddy 自己仍需要登录和网络。
+2. 在「派发默认值」里选一个项目目录、Provider、模型和权限。
+3. 点右上角「派新任务」，输入一个小任务，例如“给登录页补一个失败用例”，勾选「后台运行」后派发。
+
+成功时你会在「任务」页看到实时输出，在「今日」页看到需要你处理的行动卡；任务结束后可查看 diff、测试和 Flight Record。
+
+### 3. 不想点页面？直接用 CLI
+
+```bash
+# 前台打开 Terminal，适合需要随时接管的工作
+bin/own work ~/workspace/example "修复登录页闪退"
+
+# 后台在隔离 worktree 执行，适合让 Agent 自己跑测试
+bin/own work ~/workspace/example "补全单元测试" --bg
+bin/own work ~/workspace/example "重构 utils 目录" --bg --codex
+
+bin/own status       # daemon 与队列状态
+bin/own tasks        # 任务列表
+bin/own logs         # daemon 日志
+bin/own done <id>    # 收割一个已结束的 terminal 任务
+```
+
+![Ownward 今日工作台（脱敏 mock 数据）：行动卡、运行关注、会议与 Routine 集中在一页](docs/assets/workbench-today-mock.jpg)
+
+<sub>上图由隔离的测试 daemon（4519）和 mock actions/routines 生成，仅用于展示布局，不包含生产数据。</sub>
+
+## 核心用法
+
+### 派发、旁观、接管
+
+任务页会把“正在运行的任务”和“最近的 Agent 会话”放在一起：你可以追问、展开工具调用、审批高风险操作、追加可写目录、查看仓库状态、diff、测试和 commit。任务结束后不必重新打开原 CLI，直接在工作台收尾。
+
+### 跨引擎接力
+
+Claude 限流、需要另一种能力，或只是想让 Codex 再做一次 review 时，可以把任务接给另一个 Provider。Ownward 会保留旧会话和执行记录，只给新引擎注入有界的近期历史，并要求它先检查当前 Git / 文件状态，避免重放已经发生过的工具调用。
+
+接力之后旧会话并没有丢：会话页的「会话谱系与恢复命令」列出链上每个引擎的原生会话 ID 和一条可直接粘贴到终端的恢复命令（`claude --resume …` / `codex resume …` / `codebuddy --resume …`），被 `/new` 换掉的旧会话也在里面。
+
+同一引擎内只换模型或思考深度**不走接力**：会话配置弹窗或输入框里的 `/model opus`、`/effort high` 会就地改参数，下一轮仍续接同一个原生会话（Claude Code 的 `--resume`、Codex 的 `exec resume` 都接受新参数），原生上下文一字不丢。
 
 ```text
-Start a task from phone, Web, or Terminal
-                    |
-         Claude / Codex / CodeBuddy
-            hand off when needed
-                    |
-          Run / Flight Record / diff
-                    |
-          Harvest into project material
-                    |
-       A person promotes candidate knowledge
-              into the current truth
-                    |
-        The next task and Routine reuse it
+Claude Code ──限流/换能力──→ Codex ──继续同一工作区──→ CodeBuddy
+      └────────────── 旧会话、Run 与 Flight Record 仍可回看 ──────────────┘
 ```
 
-This loop is not about saving more chat. It gives the next development session
-the facts left by the last one. The vault is ordinary Markdown that you can
-search, edit, commit to Git, or manage with Obsidian. The default location is
-`~/Documents/ownward-vault/`.
+### 自动收割与项目记忆
 
-## The same Kernel can host other workbenches
+Claude Code、Codex CLI 的外部实质会话会被自动发现并收割；CodeBuddy 的私有 transcript 不能从外部回读，因此只收录由 Ownward 发起的 CodeBuddy 任务。
 
-The development workbench is Ownward's built-in `dev` Vertical. Its Kernel,
-independent Runner, provider adapters, fact storage, and permission layer do not
-depend on the specific domain of writing code.
+默认 vault 是普通 Markdown，可用 Git、Obsidian 或任意编辑器打开：
 
-The Vertical contract defines controlled capabilities such as sessions, tasks,
-actions, storage, scheduler, LLM, and sources. A built-in Vertical can request
-capabilities through that contract. The external Host currently exposes storage,
-actions, scheduler, LLM, and sources; sessions and tasks remain blocked by the
-Host availability gate. An external Vertical can also mount its own API routes,
-pages, and navigation, and can run in a separate Host process for crash
-isolation and development-time hot reload.
-
-The included Desk extension is aimed at recruiting workflows. It uses the same
-engine chain, Actions, scheduler, storage, and sources while keeping the full
-domain implementation outside this repository. The public [read-only Vertical
-example](examples/verticals/sample-readonly) uses scoped storage to show a
-sanitized candidate list and verify Host, routing, page, and authorization
-boundaries.
-
-The same approach works for other personal workbenches. An external Vertical
-must be trusted local code explicitly enabled by the user. A separate process
-isolates crashes and lifecycle, but it is not a security sandbox. See the
-[development guide](docs/development.md) for the extension contract and
-development rules.
-
-## Capabilities and boundaries
-
-| Capability | Claude Code | Codex | CodeBuddy |
-|---|---:|---:|---:|
-| Dispatch, continue, and supervise inside Ownward | ✓ | ✓ | ✓ |
-| Cross-engine task-session handoff | ✓ | ✓ | ✓ |
-| Continue ordinary Chat across engines | ✓ | ✓ | Configurable |
-| Put Ownward tasks into the unified record | ✓ | ✓ | ✓ |
-| Harvest sessions from external CLIs | ✓ | ✓ | — |
-| Work without an overseas provider | — | — | ✓ |
-
-Ownward is not an IDE or an agent security sandbox. It keeps work continuous;
-it does not replace Claude Code, Codex, CodeBuddy, or Git. It also cannot yet
-import the complete history from ChatGPT or the Claude web app.
-
-## Dispatch a task
-
-Use the workbench or the CLI:
-
-```bash
-# Start Claude Code in Terminal so you can take over at any time
-bin/own work ~/workspace/example "Fix the login-page crash"
-
-# Run in an isolated worktree in the background
-bin/own work ~/workspace/example "Add missing unit tests" --bg
-bin/own work ~/workspace/example "Refactor the utils directory" --bg --codex
-
-bin/own tasks
-bin/own done <id>
+```text
+~/Documents/ownward-vault/
+├── ownward/             # Ownward 自己的每日流水
+├── inbox/               # 会话收割的近期素材
+├── projects/<slug>/     # 项目 README、演进日志与当前真相
+├── flights/             # 每次任务的可审计执行记录
+├── memory/              # people / preferences / commitments / goals
+│   └── _candidates/     # 模型提出、等待人确认的长期知识
+└── daily/               # 自动日报
 ```
 
-Background tasks run in an isolated worktree by default. A worktree reduces the
-risk of changing the main checkout by accident, but it is not a permission
-sandbox.
+### Routine：让固定职责先有草稿
 
-## Workbench tabs
+晨会、周报、项目同步等固定交付可以配置为 Routine。到时间前，Ownward 从近期工作素材生成草稿；你审阅后，才会派任务写入飞书文档。默认关闭，可从 [examples/routines.json](examples/routines.json) 复制样例到 `data/routines.json`。
 
-- **Today**: Actions, agent wrap-up, Routines, and calendar items that need attention
-- **Tasks**: Dispatch, observe, ask follow-up questions, approve, take over, or hand off a task
-- **Chat**: Ordinary Chat, with provider switching inside an existing conversation
-- **Feed**: Triage results from external events
-- **Notes**: Browse and edit the Markdown vault
-- **System**: Event sources, schedules, logs, and runtime status
-- **Settings**: Configure providers, event sources, notifications, automation,
-  remote listening, and task-dispatch defaults with a reviewable diff
+## 数据在哪里，谁能看到
 
-GitHub, Feishu, Gmail, and stock event sources are off by default. Without any
-external account, you can still use task dispatch, session harvesting, project
-records, Actions, Heartbeat, notes, and macOS notifications.
+| 数据 | 默认位置 / 去向 | 需要知道的事 |
+| --- | --- | --- |
+| 配置、任务、日志、行动卡 | Mac 本地 `data/` | `config.json`、`data/`、凭据和 vault 不要提交到 Git |
+| 项目记忆 | 你选择的 Markdown vault | 可以自己搜索、编辑、提交和备份 |
+| Agent 输入与工具调用 | 发送给所选 Provider | 受 Claude / OpenAI / 腾讯各自服务条款约束 |
+| 手机访问 | 默认只监听 `127.0.0.1:4517` | 远程访问必须加 TLS / Tailscale 和 Ownward token |
 
-## Configuration and security
+安全边界请先记住这四点：
 
-Use the workbench's **Settings** tab for everyday configuration. It covers owner
-identity, timezone, vault, providers, event sources, Heartbeat, digest,
-notifications, Dashboard listening, and the default directory, provider, model,
-and permission for new tasks. Ownward shows a deterministic diff before approval,
-then writes the override and restarts the Runner and daemon through the paired
-release transaction.
+- 默认只允许本机访问；`dashboard.listen=all` 会绑定 `0.0.0.0`，不是“天然只限局域网”。
+- Agent 继承当前用户能访问的文件和命令权限；`safe` 审批模式更适合日常，`bypass` 只在你明确承担风险时开启。
+- 后台 worktree 只隔离 Git checkout，不能防止 Agent 访问它被授权的其他目录。
+- Ownward 保留三道人审门：高风险操作审批、Routine 文档写入、长期记忆候选晋升。
 
-Underneath, Ownward still uses two configuration layers. The checked-in
-`config.default.json` contains defaults, while the local `config.json` contains
-only overrides and is never committed. Prompt editing and new Routines still use:
+完整安全说明见 [SECURITY.md](SECURITY.md)。需要手机远程接入时，先看 [远程访问指南](docs/remote-access.md)。
 
-- `prompts/owner.md`: which people and events matter, plus writing preferences;
-- `prompts/heartbeat.md`: the proactive check list;
-- `data/routines.json`: recurring responsibilities.
+## 支持矩阵
 
-If you edit `config.json` directly, run `bash install.sh` so the Runner and daemon
-switch to the same frozen configuration snapshot. Applying a change from Settings
-runs that transaction automatically. See the full [configuration guide](docs/configuration.md).
+| 能力 | Claude Code | Codex | CodeBuddy |
+| --- | :---: | :---: | :---: |
+| Ownward 内派发、续聊、旁观和收尾 | ✓ | ✓ | ✓ |
+| 任务会话跨引擎接力 | ✓ | ✓ | ✓ |
+| 普通 Chat 跨引擎继续 | ✓ | ✓ | 按配置开放 |
+| 统一 Run / Flight Record | ✓ | ✓ | ✓ |
+| 自动收割外部 CLI 会话 | ✓ | ✓ | — |
 
-Local storage and a local control plane do not mean the model runs locally.
-Content sent to a provider is covered by that provider's terms, and an agent may
-run commands or change files with the current user's permissions. Never commit
-`config.json`, `prompts/owner.md`, `data/`, the vault, credentials, or raw
-transcripts to Git.
+客户端与可选事件源：
 
-The Dashboard validates Host and Origin headers. See [SECURITY.md](SECURITY.md)
-for the security boundary and reporting process.
+- **Web 工作台**：随 daemon 提供，默认 `http://127.0.0.1:4517`。
+- **Android**：从 [GitHub Releases](https://github.com/whtis/ownward/releases) 获取；代码不会复制到手机执行。
+- **iPhone**：要求 iOS 26+，可用 Xcode 装到真机；TestFlight 渠道由发布者提供，构建说明见 [ios/README.md](ios/README.md)。
+- **飞书 / GitHub / Gmail / 股票**：默认关闭，配置入口与凭据说明见 [AGENTS.md](AGENTS.md)。
 
-## Architecture and development
+## CLI 速查与最小排错
 
-Ownward is a Bun / TypeScript daemon with an embedded static Web workbench and no
-runtime npm dependencies. Provider tasks run in an independent Runner. During a
-daemon update or restart, the Runner drains safely instead of marking active
-tasks as successful.
+| 现象 | 先做什么 |
+| --- | --- |
+| 浏览器打不开 4517 | `bin/own status`，再看 `bin/own logs`；确认端口未被其他进程占用 |
+| `own` 找不到 | 把 `~/.local/bin` 加入 `PATH`，或直接使用 `bin/own` |
+| Provider 显示未启用 | 在「设置 → AI 引擎」启用并确认 CLI 已登录，然后重跑 `bash install.sh` |
+| 后台任务不动 | 看 Runner 状态和 `bin/own logs`；不要手动重放未知结果的任务 |
+| 手机连不上 | 不要直接把 4517 暴露公网；按 [远程访问指南](docs/remote-access.md) 配 TLS / Tailscale / token |
 
-Read the [architecture guide](docs/architecture-v1.md) and the
-[development guide](docs/development.md) before changing the project. Start
-development with:
+## 可选集成
+
+Ownward 的核心任务链路不依赖外部账号。需要时再开启：
+
+- 飞书：消息、日历、Routine 文档写入与 DM 通知；
+- GitHub：通知、PR 工作台和 review 请求；
+- Gmail：邮件分流与行动卡；
+- 股票：按 watchlist 和检查时刻做定点行情检查；
+- Strategy：在这些基础上增加论点卡、仓位规则和止损监控，默认关闭。
+
+每个事件源都需要在设置页开启并准备对应 CLI / 凭据；终端配置写 `connectors.<name>.enabled`（旧版本也兼容 `sources.*`），详细说明见 [AGENTS.md](AGENTS.md)。
+
+## 开发 Ownward
+
+Ownward 是 Bun / TypeScript daemon + 无构建步骤的静态 Web，运行时零 npm 依赖。Provider 任务由独立 Runner 执行，daemon 重启时会先安全 drain。
 
 ```bash
 bun install --frozen-lockfile
 ./verify.sh
 ```
 
-The verification gate builds the project, runs the TypeScript type checker and
-unit tests, smoke-tests an isolated daemon, probes the API, and parses the Web
-JavaScript. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution process.
+验证门包含构建、TypeScript 类型检查、单元测试、daemon 冒烟、API 探活和 Web JavaScript 解析。修改自身代码前请先读 [SELF.md](SELF.md)，贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，完整架构见 [docs/architecture-v1.md](docs/architecture-v1.md)。
 
-Ownward is licensed under the [Apache License 2.0](LICENSE).
+### Vertical 扩展（高级）
 
-## Remote access from a phone
+Ownward 的研发工作台是内置 `dev` Vertical。Kernel、Runner、Provider、Action、调度和 storage 是可复用底座；外部 Vertical 可以声明自己的路由、页面和领域数据，并通过独立 Host 获得崩溃隔离与开发时热重载。它必须是用户明确启用的 trusted 本地代码，独立进程不是恶意代码沙箱。
 
-Open **Settings → Advanced → Dashboard**, change **Listening scope** to
-**LAN access**, review the high-risk diff, and apply it. If you only have terminal
-access, set the same option manually:
+想做扩展，从 [只读 Desk 示例](examples/verticals/desk-readonly) 和 [扩展契约](docs/contributing/extension-contract.md) 开始。
 
-```json
-{
-  "dashboard": { "listen": "all" }
-}
-```
+## 文档地图
 
-```bash
-bash install.sh
-```
+- **第一次使用**：本 README → [3 分钟上手](#3-分钟跑起来) → [SECURITY.md](SECURITY.md)
+- **配置与接入**： [AGENTS.md](AGENTS.md)
+- **远程手机访问**： [docs/remote-access.md](docs/remote-access.md)
+- **贡献代码**： [CONTRIBUTING.md](CONTRIBUTING.md) → [docs/architecture-v1.md](docs/architecture-v1.md)
+- **开发 Vertical**： [SELF.md](SELF.md) → [docs/contributing/extension-contract.md](docs/contributing/extension-contract.md)
+- **安全边界**： [SECURITY.md](SECURITY.md)
+- **版本与路线**： [CHANGELOG.md](CHANGELOG.md) · [ROADMAP.md](ROADMAP.md)
 
-Ownward will listen on `0.0.0.0:4517` and require a remote access token. Use a
-firewall or router to block direct public access to port 4517, and expose only
-the HTTPS entry point below. The first phone visit asks for the token stored in
-`data/secrets/api-token.txt`.
+## License
 
-### Nginx
-
-Configure a valid TLS certificate for your domain, then add a server block like
-this:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name ownward.example.com;
-
-    # The first login uses a query parameter. Do not write the full request to access logs.
-    access_log off;
-
-    ssl_certificate     /path/to/fullchain.pem;
-    ssl_certificate_key /path/to/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:4517;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
-    }
-}
-```
-
-Reload Nginx, then open `https://ownward.example.com` on the phone.
-`X-Forwarded-For` makes Ownward apply token authentication to the remote
-request. `X-Forwarded-Proto: https` makes the login cookie use `Secure`.
-
-### Cloudflare Tunnel
-
-Cloudflare Tunnel does not require an inbound router port. Install `cloudflared`
-and prepare a domain connected to Cloudflare:
-
-```bash
-cloudflared tunnel login
-cloudflared tunnel create ownward
-cloudflared tunnel route dns ownward ownward.example.com
-```
-
-Put the Tunnel UUID and credentials path returned by those commands in
-`~/.cloudflared/config.yml`:
-
-```yaml
-tunnel: <TUNNEL-UUID>
-credentials-file: /Users/you/.cloudflared/<TUNNEL-UUID>.json
-ingress:
-  - hostname: ownward.example.com
-    service: http://127.0.0.1:4517
-  - service: http_status:404
-```
-
-Start and verify the tunnel:
-
-```bash
-cloudflared tunnel run ownward
-```
-
-After confirming that the phone can connect, follow the [Cloudflare
-documentation](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)
-to register the Tunnel as a persistent macOS service.
-
-The first login briefly uses a token in a query parameter, then exchanges it for
-an HttpOnly cookie. Do not log query strings, copy this login URL, or capture it
-in a screenshot. Exclude query parameters from Cloudflare logs, monitoring, and
-analytics too. If the token may have leaked, delete
-`data/secrets/api-token.txt` and run `bash install.sh` again so every client must
-log in again.
-
-If you mainly use a browser, you can also enable Cloudflare Access. Before
-connecting the native Android or iOS clients, confirm that their authentication
-flow is compatible with the Access policy. Keep Ownward's own access token even
-when Access is enabled. See the [Nginx reverse-proxy documentation](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)
-for the proxy directives.
-
-<a id="ownward-zh-cn"></a>
-
-## Ownward（简体中文）
-
-Ownward 是给研发者使用的本地 AI 工作台：从手机派发任务，让 Claude Code、Codex
-或 CodeBuddy 接力工作，再把每个 Agent 的执行事实收回同一个项目记忆。
-
-项目目前仍处于 early alpha，命令行入口是 `own`。Ownward 常驻在你的 Mac 上，统一
-管理任务、项目目录和工作记录；Android / iPhone 作为远程工作台，代码、凭据和 Agent
-CLI 仍留在 Mac 上。
-
-### 主要能力
-
-1. **手机派发和旁观研发任务**：选择项目目录、附加目录、模型和权限，查看流式回复、
-   工具调用、图片、diff、测试、commit 和 PR，也可以继续追问、中断或接管。
-2. **跨引擎接力**：任务会话切换引擎时建立可追溯的后继会话，带上有界的近期历史、
-   工作目录和权限；新引擎必须先检查真实 Git / 文件状态，不能重放旧工具调用。
-3. **统一执行记录**：Claude Code、Codex 和 CodeBuddy 的任务都写入同一套 Run 和
-   Flight Record，目标、过程、代码变化、commit 和结论不会散落在不同工具里。
-4. **会话收割和项目记忆**：外部 Claude Code、Codex CLI 的实质会话会自动收割到
-   Markdown vault；长期知识先进入 `_candidates/`，经人确认后才成为正式记忆。
-5. **Routine 起草**：从近期记录、任务结果和项目记忆生成晨会、周报或项目同步草稿；
-   写入飞书文档前必须由人确认。
-
-### 快速开始
-
-服务端目前支持 macOS，需要 Bun、Git，以及已登录的
-[Claude Code](https://claude.com/claude-code) 或 [Codex CLI](https://github.com/openai/codex)。
-CodeBuddy 可选。
-
-```bash
-git clone https://github.com/whtis/ownward.git
-cd ownward
-./install.sh
-open http://127.0.0.1:4517
-```
-
-安装脚本会生成本机配置，并通过 launchd 启动 daemon 和独立 Runner。默认只监听
-`127.0.0.1:4517`。首次打开后进入「设置 → AI 引擎」，可以切换后台决策引擎、启停
-Claude Code / Codex / CodeBuddy，并配置派发任务时默认使用的目录、引擎、模型和权限。
-
-### Vertical 扩展
-
-研发工作台是内置的 `dev` Vertical。Kernel、Runner、Provider 适配器、事实层和权限层
-不依赖“写代码”这一具体领域。外部 Vertical 可以通过能力契约挂载自己的 API、页面和
-导航，并在独立 Host 进程中运行。公开的
-[只读 Vertical 示例](examples/verticals/sample-readonly) 用 scoped storage 展示脱敏
-候选人列表，验证 Host、路由、页面和授权边界。
-
-外部 Vertical 必须是用户明确启用的 trusted 本地代码。独立进程用于隔离崩溃和生命周期，
-不是安全沙箱。扩展契约和开发规则见[开发指南](docs/development.md)。
-
-### 配置与安全
-
-日常配置优先在工作台「设置」完成。Owner、时区、Vault、Provider、事件源、心跳、日报、
-通知、Dashboard 监听范围和任务派发默认值都可以在页面修改；应用前会展示 diff 并要求确认。
-底层仍由 `config.default.json` 和本机 `config.json` 两层组成。提示词和新增 Routine 继续通过
-`prompts/owner.md`、`prompts/heartbeat.md` 与 `data/routines.json` 管理。直接手改配置后需要
-运行 `bash install.sh`，设置页应用则会自动执行同一套事务。
-
-Ownward 不是 IDE，也不是 Agent 安全沙箱。Agent 可能以当前用户权限执行命令和修改文件，
-发给 Provider 的内容受对应服务条款约束。不要提交配置、凭据、vault、原始 transcript 或
-运行时数据。远程访问请放在 Tailscale 或可信 TLS 代理之后，并保留 Ownward 自己的令牌鉴权。
-完整配置见[配置指南](docs/configuration.md)，安全边界见 [SECURITY.md](SECURITY.md)。
-
-### 开发与验证
-
-```bash
-bun install --frozen-lockfile
-./verify.sh
-```
-
-验证门包含构建、TypeScript 类型检查、单元测试、daemon 冒烟、API 探活和 Web JavaScript
-解析。贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，架构说明见
-[docs/architecture-v1.md](docs/architecture-v1.md)。
-
-### 手机从外网连接
-
-在「设置 → 高级 → Dashboard」把监听范围改为“局域网可访问”并应用，再用 Nginx 或
-Cloudflare Tunnel 提供 HTTPS 入口。没有页面时也可以手动把 `dashboard.listen` 设为
-`"all"` 后运行 `bash install.sh`。不要直接把 4517 端口暴露到公网；首次登录使用
-`data/secrets/api-token.txt` 中的令牌，换取 HttpOnly cookie 后即可使用。
-
----
-
-**Ownward - your work, carried forward.**
+[Apache License 2.0](LICENSE)

@@ -3,38 +3,69 @@ import { join } from "path";
 import { SessionRepository, SessionRepositoryError, type SessionRecord } from "../../sessions/repository.ts";
 import { readRunJournalStrict, reduceRuns } from "../../runs/repository.ts";
 import { parseSessionMigrationMode, type KernelGrantedAccess, type KernelSessionDto, type KernelSessionGrants, type KernelSessionState, type SessionInput, type SessionMutationResult, type SessionService } from "./contracts.ts";
-import { expandCodexHome,inputForRunner, KernelSessionPolicyError, projectRunnerEvent, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant } from "./runner-consumer.ts";
-import { RunnerCommandJournal, RunnerEventJournal, type RunnerCommandRecord, type RunnerEventRecord } from "../../runner/journals.ts";
+import { expandCodexHome,inputForRunner, KernelSessionPolicyError, projectRunnerEvent, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant, type RunnerCommandReceipt } from "./runner-consumer.ts";
+import { archivedSessionEventsSignature, readArchivedSessionEvents, RunnerCommandJournal, RunnerEventJournal, type RunnerCommandRecord, type RunnerEventRecord } from "../../runner/journals.ts";
 import { SessionRunnerBridgeStore, type BridgeCommand } from "./bridge-store.ts";
 import { mergeQueued, parseQueued, SessionInputQueueStore, type QueuedView } from "./input-queue.ts";
 import { cfg,log } from "../../util.ts";
-import { clearInitialHistory, readInitialHistory, readInitialHistorySnapshot, writeInitialHistory } from "./initial-history.ts";
+import { clearInitialHistory, initialHistorySignature, readInitialHistory, readInitialHistorySnapshot, writeInitialHistory } from "./initial-history.ts";
 import { buildCodexResumeCommand } from "../../sessions/provider-home.ts";
 import { commandSessionImages } from "./session-images.ts";
-import { CLAUDE_EFFORTS, DEFAULT_CODEX_MODEL, isCodexEffort, isCodexModelEffortPair } from "../../session-options.ts";
+import { assertProviderOptions, DEFAULT_CODEX_MODEL } from "../../session-options.ts";
 
 export type SessionMigrationMode = "off" | "runner";
 export interface SessionServiceOptions { mode?: SessionMigrationMode; roots?: string[]; taskIds?: string[]; }
 const ACTIVE_SESSION_CONSUMERS = new Map<string, Promise<void>>();
+// consume 循环是 daemon 向 Runner 拉事件的**唯一**节奏源：turn 跑着的整段时间它都在转。
+// 定死 50ms 时，一轮里真正在流字的只占少数——等 API 首字、跑长 Bash、等用户审批这些空窗期
+// 同样按 20 次/秒空拉。改成有事件就贴着 50ms 走、空转则指数退到 500ms：流式手感不变
+// （一有事件立刻回到最小间隔），空窗期的空拉降一个数量级。退避只影响空窗之后**第一帧**的
+// 可见延迟，上限 500ms。
+//
+// 别高估这一项的收益（2026-09-09 实测，避免后人重复推错因果）：单次空拉本身很便宜——
+// 客户端往返 0.056ms、Runner 侧 query-command 的 readStrict+filter 0.22ms、
+// 有事件时 bridge.advance 0.94ms（788 条命令的 400KB 文件全量重写）。60 次/秒满打满算
+// 也就 4% 单核。当时观测到的 daemon 40% / runner 12% 三条加起来解释不了，真正的大头没找到，
+// 别拿这段注释当「CPU 问题已解决」的凭据。这里省的是空窗期的无谓唤醒，不是那 40%。
+const SYNC_POLL_MIN_MS = 50, SYNC_POLL_MAX_MS = 500;
 /** 每会话同一时刻只跑一个 flush：漏掉的触发会被下一次轮询/下一轮收尾再叫起来 */
 const ACTIVE_QUEUE_DRAINS = new Map<string, Promise<void>>();
-export const SESSION_STATE_CACHE_LIMIT=32;
+/** 会话状态缓存条数。以前 32——生产 100+ 个会话，侧栏一次 states(all) 就把它整个抖掉，"热"调用和冷调用一样慢。 */
+export const SESSION_STATE_CACHE_LIMIT=256;
+/** 常驻投影器条数（每个持有该会话全部消息，大会话几 MB）；输入 blob 缓存上限（命令文本，很小）。 */
+const PROJECTION_CACHE_LIMIT=64,INPUT_CACHE_LIMIT=5000;
 function runnerJournalSignature(dataRoot:string):string{return["events.jsonl","commands.jsonl"].map(name=>{try{const st=statSync(join(dataRoot,"runner",name));return`${st.size}:${st.mtimeMs}`;}catch{return"0:0";}}).join("|");}
-export function readStableRunnerSnapshot(dataRoot:string,afterRead:()=>void=()=>{}):{journal:RunnerEventJournal;events:RunnerEventRecord[];commands:Map<string,RunnerCommandRecord>;signature:string}{let last:any;for(let attempt=0;attempt<3;attempt++){const before=runnerJournalSignature(dataRoot),journal=new RunnerEventJournal(dataRoot),events=journal.readStrict(),commands=new Map(new RunnerCommandJournal(dataRoot).readStrict().map(command=>[command.commandId,command]));afterRead();const after=runnerJournalSignature(dataRoot);last={journal,events,commands,signature:`${after}|seq:${events.at(-1)?.sequence??0}|events:${events.length}|commands:${commands.size}`};if(before===after)return last;}return{...last,signature:`unstable:${crypto.randomUUID()}:${last.signature}`};}
-class StateLru<K,V> extends Map<K,V>{override get(key:K){const value=super.get(key);if(value!==undefined){super.delete(key);super.set(key,value);}return value;}override set(key:K,value:V){super.delete(key);super.set(key,value);while(this.size>SESSION_STATE_CACHE_LIMIT)super.delete(this.keys().next().value!);return this;}}
+export type RunnerSnapshot={journal:RunnerEventJournal;events:RunnerEventRecord[];commands:Map<string,RunnerCommandRecord>;signature:string;bySession:Map<string,RunnerEventRecord[]>};
+function bucketBySession(events:readonly RunnerEventRecord[]):Map<string,RunnerEventRecord[]>{const map=new Map<string,RunnerEventRecord[]>();for(const event of events){const list=map.get(event.sessionId);if(list)list.push(event);else map.set(event.sessionId,[event]);}return map;}
+/** 一次读稳整个 runner journal（读前后指纹一致才算稳），顺手按会话分桶——批量投影/索引扫描每个会话时不必各自重扫全部事件。 */
+export function readStableRunnerSnapshot(dataRoot:string,afterRead:()=>void=()=>{}):RunnerSnapshot{let last:RunnerSnapshot|undefined;for(let attempt=0;attempt<3;attempt++){const before=runnerJournalSignature(dataRoot),journal=new RunnerEventJournal(dataRoot),events=journal.readStrict(),commands=new Map(new RunnerCommandJournal(dataRoot).readStrict().map(command=>[command.commandId,command]));afterRead();const after=runnerJournalSignature(dataRoot);last={journal,events,commands,signature:`${after}|seq:${events.at(-1)?.sequence??0}|events:${events.length}|commands:${commands.size}`,bySession:bucketBySession(events)};if(before===after)return last;}return{...last!,signature:`unstable:${crypto.randomUUID()}:${last!.signature}`};}
+class StateLru<K,V> extends Map<K,V>{constructor(private readonly limit:number=SESSION_STATE_CACHE_LIMIT){super();}override get(key:K){const value=super.get(key);if(value!==undefined){super.delete(key);super.set(key,value);}return value;}override set(key:K,value:V){super.delete(key);super.set(key,value);while(this.size>this.limit)super.delete(this.keys().next().value!);return this;}}
+type LiveProjection={projector:RunnerAgentStateProjector;holder:{commands:ReadonlyMap<string,RunnerCommandRecord>};applied:number;lastEventId:string;historyKey:string;archiveKey:string;resetCommandId?:string};
 export function shellQuote(value: string): string { return `'${value.replaceAll("'", `'\"'\"'`)}'`; }
+/** 某个原生会话在终端里接着聊的命令：三家 CLI 各自的 resume 语法，cwd 与 CODEX_HOME 一并带上（唯一拼装处，runnerState 与谱系共用） */
+export function resumeFor(s: Pick<SessionRecord, "providerId" | "cwd" | "providerHome">, nativeRef: string): { id: string; tool: string; cmd: string } {
+  const cmd = s.providerId === "claude" ? `cd ${shellQuote(s.cwd)} && claude --resume ${shellQuote(nativeRef)}`
+    : s.providerId === "codebuddy" ? `cd ${shellQuote(s.cwd)} && codebuddy --resume ${shellQuote(nativeRef)}`
+    : buildCodexResumeCommand(s.cwd, nativeRef, s.providerHome || "codex");
+  return { id: nativeRef, tool: s.providerId, cmd };
+}
 
 export class KernelSessionService implements SessionService {
   private readonly repo: SessionRepository; private readonly runner: RunnerSessionConsumer; private readonly bridge: SessionRunnerBridgeStore; private readonly queue: SessionInputQueueStore;
   private readonly stateCache = new StateLru<string, { signature: string; state: KernelSessionState }>();
+  private readonly projections = new StateLru<string, LiveProjection>(PROJECTION_CACHE_LIMIT);
+  private readonly archiveMemo = new StateLru<string, { archiveKey: string; events: RunnerEventRecord[] }>(PROJECTION_CACHE_LIMIT);
+  private readonly inputCache = new Map<string, string | undefined>();
+  private rebuilds = 0;
   private readonly historyMarkers = new Map<string, import("./types.ts").DevMsg>();
   readonly mode: SessionMigrationMode; readonly roots: string[]; readonly taskIds: string[];
   constructor(readonly dataRoot: string, options: SessionServiceOptions = {}, runner?: RunnerSessionConsumer) {
     this.repo = new SessionRepository(dataRoot); this.runner = runner ?? new RunnerSessionConsumer(dataRoot); this.bridge = new SessionRunnerBridgeStore(dataRoot); this.queue = new SessionInputQueueStore(dataRoot);
     this.mode = parseSessionMigrationMode(options.mode); this.roots = options.roots ?? []; this.taskIds = options.taskIds ?? [];
   }
-  dispose():void { this.stateCache.clear(); this.historyMarkers.clear(); }
+  dispose():void { this.stateCache.clear(); this.projections.clear(); this.archiveMemo.clear(); this.inputCache.clear(); this.historyMarkers.clear(); }
   cacheSizeForTest():number{return this.stateCache.size;}
+  projectionStatsForTest():{rebuilds:number;live:number}{return{rebuilds:this.rebuilds,live:this.projections.size};}
   private session(id: string): SessionRecord {
     const s = this.repo.getByTaskId(id) ?? this.repo.getById(id); if (!s) throw new KernelSessionPolicyError("SESSION_NOT_FOUND", `Session 不存在: ${id}`);
     if (this.mode === "runner" && this.taskIds.length && ![s.id, ...s.taskIds].some((taskId) => this.taskIds.includes(taskId))) throw new KernelSessionPolicyError("SESSION_CANARY_NOT_GRANTED", "Session 未进入 Runner 灰度范围");
@@ -49,7 +80,7 @@ export class KernelSessionService implements SessionService {
   private async rejectLiveLegacyOwner(taskId: string): Promise<void> { try { const legacy = await (await this.legacy()).getAgentState(taskId); if (legacy.alive || legacy.turn === "running") throw new KernelSessionPolicyError("SESSION_LEGACY_OWNED", "legacy Provider 仍持有会话；请先安全 handoff 或新建 Runner 会话"); } catch (error) { if (error instanceof KernelSessionPolicyError) throw error; } }
   private validateAccessGrant(access: KernelGrantedAccess): void { if ((access === "full-access" || access === "bypass") && cfg.architecture?.allowFullAccess !== true) throw new KernelSessionPolicyError("SESSION_ACCESS_NOT_GRANTED", "Kernel 配置未授予 full access"); }
   private providerHome(providerId:"claude"|"codex"|"codebuddy",value:string|undefined,roots:string[]):string|undefined { if(value===undefined)return undefined;if(providerId!=="codex")throw new KernelSessionPolicyError("SESSION_PROVIDER_HOME_INVALID","仅 Codex 支持 providerHome");return validateDirectoryGrant(expandCodexHome(value),roots); }
-  private providerOptions(providerId:"claude"|"codex"|"codebuddy",model?:string,effort?:string):void{if(model!==undefined&&!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model))throw new KernelSessionPolicyError("PROVIDER_INPUT_INVALID","model 非法");if(providerId==="codex"){if(effort!==undefined&&!isCodexEffort(effort))throw new KernelSessionPolicyError("PROVIDER_INPUT_INVALID","codex effort 非法");if(!isCodexModelEffortPair(model,effort))throw new KernelSessionPolicyError("PROVIDER_INPUT_INVALID","codex model/effort 组合非法");return;}if(effort!==undefined&&!CLAUDE_EFFORTS.includes(effort as typeof CLAUDE_EFFORTS[number]))throw new KernelSessionPolicyError("PROVIDER_INPUT_INVALID",`${providerId} effort 非法`);}
+  private providerOptions(providerId:"claude"|"codex"|"codebuddy",model?:string,effort?:string):void{try{assertProviderOptions(providerId,model,effort);}catch(error){throw new KernelSessionPolicyError("PROVIDER_INPUT_INVALID",error instanceof Error?error.message:"options 非法");}}
   private effectiveOptions(providerId:"claude"|"codex"|"codebuddy",model?:string,effort?:string,previous?:SessionRecord):{model?:string;effort?:string}{const same=previous?.providerId===providerId,effectiveModel=model??(same?previous.model:undefined)??(providerId==="codex"?(cfg.llm?.codexModel||DEFAULT_CODEX_MODEL):undefined),effectiveEffort=effort??(same?previous.effort:undefined);this.providerOptions(providerId,effectiveModel,effectiveEffort);return{...(effectiveModel?{model:effectiveModel}:{}),...(effectiveEffort?{effort:effectiveEffort}:{})};}
   private async ensureInitialHistory(s: SessionRecord,force=false): Promise<void> {
     const prior=readInitialHistorySnapshot(this.dataRoot,s.id);if(!s.nativeRef||(prior?.status==="ok"&&prior.nativeRef===s.nativeRef)||s.source==="native")return;if(!force&&prior?.nextRetryAt&&prior.nativeRef===s.nativeRef&&Date.now()<Date.parse(prior.nextRetryAt)){this.historyMarkers.set(s.id,{role:"system",text:"历史会话暂时无法读取；稍后自动重试。",ts:new Date().toISOString()});return;}
@@ -102,7 +133,7 @@ export class KernelSessionService implements SessionService {
   private consume(command: BridgeCommand): Promise<void> {
     const key = `${this.dataRoot}\0${command.commandId}`, existing = ACTIVE_SESSION_CONSUMERS.get(key); if (existing) return existing;
     // 命令收敛（本轮跑完/失败/被中断）就是队列该发下一段的时刻——flush 挂在这儿，不另起定时器
-    const work = (async () => { this.bridge.markError(command.commandId); try { while (!command.terminal) { if (await this.sync(command)) break; await Bun.sleep(50); } } catch (error: any) { this.bridge.markError(command.commandId, String(error?.code || error?.name || "RUNNER_BRIDGE_ERROR")); throw error; } })().finally(() => { ACTIVE_SESSION_CONSUMERS.delete(key); if (!this.queue.empty()) void this.drainQueue(command.sessionId); });
+    const work = (async () => { this.bridge.markError(command.commandId); try { let idle = SYNC_POLL_MIN_MS; while (!command.terminal) { const cursor = command.cursor; if (await this.sync(command)) break; idle = command.cursor > cursor ? SYNC_POLL_MIN_MS : Math.min(idle * 2, SYNC_POLL_MAX_MS); await Bun.sleep(idle); } } catch (error: any) { this.bridge.markError(command.commandId, String(error?.code || error?.name || "RUNNER_BRIDGE_ERROR")); throw error; } })().finally(() => { ACTIVE_SESSION_CONSUMERS.delete(key); if (!this.queue.empty()) void this.drainQueue(command.sessionId); });
     ACTIVE_SESSION_CONSUMERS.set(key, work); return work;
   }
   // 兜底 flush：命令早就终态、consume 那一发已经错过时（daemon 重启、轮询先到），
@@ -123,19 +154,107 @@ export class KernelSessionService implements SessionService {
     }
     this.bridge.advance(command.commandId, cursor, true); const audit = join(this.dataRoot, "session-drain-audit.jsonl"); appendFileSync(audit, JSON.stringify({ at: new Date().toISOString(), sessionId: command.sessionId, commandId: command.commandId, runId: command.runId, confirmation: input.confirm, outcome }) + "\n", { mode: 0o600 }); return { commandId: command.commandId, runId: command.runId, outcome };
   }
-  private runnerState(s: SessionRecord, snapshot?: { journal: RunnerEventJournal; commands: Map<string, RunnerCommandRecord>; events: RunnerEventRecord[]; signature: string }): KernelSessionState { const signature=(snapshot?.signature??["events.jsonl","commands.jsonl"].map((name)=>{try{const st=statSync(join(this.dataRoot,"runner",name));return`${st.size}:${st.mtimeMs}`;}catch{return"0:0";}}).join("|"))+`|${s.updatedAt}|${(()=>{const h=readInitialHistorySnapshot(this.dataRoot,s.id);return h?h.status+":"+h.copiedAt:"missing";})()}`,cached=this.stateCache.get(s.id);if(cached?.signature===signature)return this.withQueue(s,structuredClone(cached.state));const journal=snapshot?.journal??new RunnerEventJournal(this.dataRoot),commands=snapshot?.commands??new Map(new RunnerCommandJournal(this.dataRoot).readStrict().map(c=>[c.commandId,c])),allEvents=snapshot?.events??journal.readStrict(),resetIndex=s.historyResetCommandId?allEvents.findIndex((event)=>event.commandId===s.historyResetCommandId&&event.type==="completed"):-1,events=s.historyResetCommandId?(resetIndex>=0?allEvents.slice(resetIndex+1):[]):allEvents,projector=new RunnerAgentStateProjector(s,(event)=>{const raw=journal.readPayload(event);return raw?JSON.parse(raw):null;},(id)=>commands.get(id),(()=>{const history=readInitialHistory(this.dataRoot,s.id);return history.length?history:(this.historyMarkers.has(s.id)?[this.historyMarkers.get(s.id)!]:[]);})());for(const event of events)if(event.sessionId===s.id)projector.apply(event);const state={...projector.state(),...(s.model?{model:s.model}:{}),...(s.effort?{effort:s.effort}:{}),...(s.archive?{alive:false,turn:"idle",partial:"",pending:[],operability:"read-only" as const,archiveState:s.archive.state}:{operability:"active" as const})} as KernelSessionState;
-    const commandJournal=new RunnerCommandJournal(this.dataRoot),orderedCommands=[...commands.values()],resetCommandIndex=s.historyResetCommandId?orderedCommands.findIndex((command)=>command.commandId===s.historyResetCommandId):-1,snapshotHistory=readInitialHistorySnapshot(this.dataRoot,s.id),copiedAt=Date.parse(snapshotHistory?.copiedAt||"")||0,createdAt=Date.parse(s.createdAt)||0,overlap=new Map<string,number>(); if(s.source==="adopted")for(const message of snapshotHistory?.messages??[])if(message.role==="user"&&(Date.parse(message.ts||"")||0)>=createdAt)overlap.set(message.text,(overlap.get(message.text)??0)+1);const inputs: import("./types.ts").DevMsg[]=[];for(const [index,command] of orderedCommands.entries()){if(index<=resetCommandIndex||command.sessionId!==s.id||!["start-run","resume-run","send-input"].includes(command.kind))continue;const raw=commandJournal.readInput(command);if(raw===undefined)continue;let text="";try{text=JSON.parse(raw)?.text;}catch{}const images=commandSessionImages(command.sessionId,raw);if((typeof text!=="string"||!text.trim())&&!images.length)continue;const normalized=typeof text==="string"?text:"",count=overlap.get(normalized)??0;if(s.source==="adopted"&&Date.parse(command.acceptedAt)<=copiedAt&&count>0){overlap.set(normalized,count-1);continue;}
-inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?`📎×${images.length}${normalized?` ${normalized}`:""}`:normalized,ts:command.acceptedAt,...(images.length?{images}:{})});}state.messages=[...state.messages,...inputs].sort((a,b)=>(Date.parse(a.ts||"")||0)-(Date.parse(b.ts||"")||0));const resume=!s.archive&&s.nativeRef?{id:s.nativeRef,tool:s.providerId,cmd:s.providerId==="claude"?`cd ${shellQuote(s.cwd)} && claude --resume ${shellQuote(s.nativeRef)}`:s.providerId==="codebuddy"?`cd ${shellQuote(s.cwd)} && codebuddy --resume ${shellQuote(s.nativeRef)}`:buildCodexResumeCommand(s.cwd,s.nativeRef,s.providerHome||"codex")}:null;Object.assign(state,{resume,fullAccess:s.access==="full-access"||s.access==="bypass"});this.stateCache.set(s.id,{signature,state:structuredClone(state)});return this.withQueue(s,state);}
+  /** 某会话在热 journal 里的事件（按 historyReset 截到重置之后）。snapshot 已按会话分桶时直接取桶，不再每次重扫全部事件。 */
+  private sessionEvents(s: SessionRecord, allEvents: readonly RunnerEventRecord[], snapshot?: RunnerSnapshot): RunnerEventRecord[] {
+    const mine = snapshot?.bySession?.get(s.id) ?? allEvents.filter((event) => event.sessionId === s.id);
+    if (!s.historyResetCommandId) return mine;
+    const resetIndex = mine.findIndex((event) => event.commandId === s.historyResetCommandId && event.type === "completed");
+    if (resetIndex >= 0) return mine.slice(resetIndex + 1);
+    // 重置点不在热 journal：多半已被每日归档挪走——那热 journal 里剩下的全是重置之后的；两边都没有才是"什么都不可见"
+    return this.archivedEvents(s).some((event) => event.commandId === s.historyResetCommandId && event.type === "completed") ? mine : [];
+  }
+  /** 会话的归档事件（按归档文件指纹记忆；一天最多变一次）。 */
+  private archivedEvents(s: SessionRecord): RunnerEventRecord[] {
+    const archiveKey = archivedSessionEventsSignature(this.dataRoot, s.id), memo = this.archiveMemo.get(s.id);
+    if (memo?.archiveKey === archiveKey) return memo.events;
+    const events = archiveKey === "none" ? [] : readArchivedSessionEvents(this.dataRoot, s.id);
+    this.archiveMemo.set(s.id, { archiveKey, events });
+    return events;
+  }
+  /** 重建投影时要回放的归档事件：/new 之后的历史重置同样截断归档——以前归档部分不截，重置前的旧对话会从归档里"复活"。 */
+  private archivedForRebuild(s: SessionRecord): RunnerEventRecord[] {
+    const all = this.archivedEvents(s);
+    if (!s.historyResetCommandId) return all;
+    const resetIndex = all.findIndex((event) => event.commandId === s.historyResetCommandId && event.type === "completed");
+    return resetIndex >= 0 ? all.slice(resetIndex + 1) : [];
+  }
+  /** 会话状态指纹：只含**这个会话**的事件/命令尾巴 + 记录 updatedAt + 初始历史/归档文件指纹。
+   *  以前用 events.jsonl 的 size:mtime——任何会话追加一条事件，全部会话的缓存一起作废，网页 2.5s 轮询
+   *  和侧栏 60s 刷新就变成对整个 journal 的反复重放（2026-09-13 实测 31k blob 逐个读+校验 3.8s，
+   *  daemon 每两分钟整段卡死 4-6s）。 */
+  private sessionSignature(s: SessionRecord, events: readonly RunnerEventRecord[], commands: ReadonlyMap<string, RunnerCommandRecord>): string {
+    let count = 0, last = "";
+    for (const command of commands.values()) if (command.sessionId === s.id) { count++; last = command.commandId; }
+    return `${events.length}:${events.at(-1)?.eventId ?? ""}|${count}:${last}|${s.updatedAt}|${s.historyResetCommandId ?? ""}|${this.historyKey(s)}|${archivedSessionEventsSignature(this.dataRoot, s.id)}`;
+  }
+  private historyKey(s: SessionRecord): string { return `${initialHistorySignature(this.dataRoot, s.id)}|${this.historyMarkers.get(s.id)?.text ?? ""}`; }
+  private readInputCached(journal: RunnerCommandJournal, command: RunnerCommandRecord): string | undefined {
+    if (this.inputCache.has(command.commandId)) return this.inputCache.get(command.commandId);
+    const raw = journal.readInput(command);
+    if (this.inputCache.size >= INPUT_CACHE_LIMIT) this.inputCache.clear();
+    this.inputCache.set(command.commandId, raw);
+    return raw;
+  }
+  /** 只算指纹不投影：索引扫描先拿它和上次入库的比，没变就连投影都省了。 */
+  indexSignature(id: string, snapshot?: RunnerSnapshot): string | null {
+    const s = this.repo.getById(id) ?? this.repo.getByTaskId(id); if (!s) return null;
+    if (s.archive) return `archive|${this.historyKey(s)}|${s.updatedAt}`;
+    if (s.isolated) return `isolated|${this.historyKey(s)}|${s.updatedAt}`;
+    const journal = snapshot?.journal ?? new RunnerEventJournal(this.dataRoot);
+    const commands = snapshot?.commands ?? new Map(new RunnerCommandJournal(this.dataRoot).readStrict().map((c) => [c.commandId, c]));
+    return this.sessionSignature(s, this.sessionEvents(s, snapshot?.events ?? journal.readStrict(), snapshot), commands);
+  }
+  /** 索引/侧栏用：不过 canary 门、不问 runner、不截断消息——纯本地投影。签名没变就不必重写索引。 */
+  projectForIndex(id: string, snapshot?: RunnerSnapshot): { signature: string; state: KernelSessionState } | null {
+    const s = this.repo.getById(id) ?? this.repo.getByTaskId(id); if (!s) return null;
+    if (s.archive) return { signature: `archive|${this.historyKey(s)}|${s.updatedAt}`, state: this.archivedState(s) };
+    if (s.isolated) return { signature: `isolated|${this.historyKey(s)}|${s.updatedAt}`, state: this.isolatedState(s) };
+    return this.projectSession(s, snapshot);
+  }
+  private runnerState(s: SessionRecord, snapshot?: RunnerSnapshot): KernelSessionState { return this.withQueue(s, this.projectSession(s, snapshot).state); }
+  private projectSession(s: SessionRecord, snapshot?: RunnerSnapshot): { signature: string; state: KernelSessionState } {
+    const journal = snapshot?.journal ?? new RunnerEventJournal(this.dataRoot);
+    const commands = snapshot?.commands ?? new Map(new RunnerCommandJournal(this.dataRoot).readStrict().map((c) => [c.commandId, c]));
+    const events = this.sessionEvents(s, snapshot?.events ?? journal.readStrict(), snapshot);
+    const signature = this.sessionSignature(s, events, commands);
+    const cached = this.stateCache.get(s.id);
+    if (cached?.signature === signature) return { signature, state: structuredClone(cached.state) };
+    // 增量投影：同一会话的投影器常驻，只 apply 新到的事件；初始历史 / 归档文件 / 重置点变了才整个重建。
+    // 以前每次缓存失效都新建投影器从头重放全部事件（每条 payload blob 读盘 + sha256），活跃会话被网页
+    // 2.5s 轮询一次就重放一次。
+    const historyKey = this.historyKey(s), archiveKey = archivedSessionEventsSignature(this.dataRoot, s.id);
+    let live = this.projections.get(s.id);
+    const reusable = !!live && live.historyKey === historyKey && live.archiveKey === archiveKey && live.resetCommandId === s.historyResetCommandId && live.applied <= events.length && (live.applied === 0 || events[live.applied - 1].eventId === live.lastEventId);
+    if (!reusable) {
+      const holder = { commands }, history = readInitialHistory(this.dataRoot, s.id);
+      const projector = new RunnerAgentStateProjector(s, (event) => { const raw = journal.readPayload(event); return raw ? JSON.parse(raw) : null; }, (id) => holder.commands.get(id), history.length ? history : (this.historyMarkers.has(s.id) ? [this.historyMarkers.get(s.id)!] : []));
+      live = { projector, holder, applied: 0, lastEventId: "", historyKey, archiveKey, resetCommandId: s.historyResetCommandId };
+      this.rebuilds++;
+      try { for (const event of this.archivedForRebuild(s)) projector.apply(event); } catch (error) { this.projections.delete(s.id); throw error; }
+    }
+    live!.holder.commands = commands;
+    try { for (let i = live!.applied; i < events.length; i++) live!.projector.apply(events[i]); }
+    catch (error) { this.projections.delete(s.id); throw error; }   // 半截 apply 的投影器不能留：下次从头重建
+    live!.applied = events.length; live!.lastEventId = events.at(-1)?.eventId ?? "";
+    this.projections.set(s.id, live!);
+    const state = { ...live!.projector.state(), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}), ...(s.archive ? { alive: false, turn: "idle", partial: "", pending: [], operability: "read-only" as const, archiveState: s.archive.state } : { operability: "active" as const }) } as KernelSessionState;
+    const commandJournal=new RunnerCommandJournal(this.dataRoot),orderedCommands=[...commands.values()],resetCommandIndex=s.historyResetCommandId?orderedCommands.findIndex((command)=>command.commandId===s.historyResetCommandId):-1,snapshotHistory=readInitialHistorySnapshot(this.dataRoot,s.id),copiedAt=Date.parse(snapshotHistory?.copiedAt||"")||0,createdAt=Date.parse(s.createdAt)||0,overlap=new Map<string,number>(); if(s.source==="adopted")for(const message of snapshotHistory?.messages??[])if(message.role==="user"&&(Date.parse(message.ts||"")||0)>=createdAt)overlap.set(message.text,(overlap.get(message.text)??0)+1);const inputs: import("./types.ts").DevMsg[]=[];for(const [index,command] of orderedCommands.entries()){if(index<=resetCommandIndex||command.sessionId!==s.id||!["start-run","resume-run","send-input"].includes(command.kind))continue;const raw=this.readInputCached(commandJournal,command);if(raw===undefined)continue;let text="";try{text=JSON.parse(raw)?.text;}catch{}const images=commandSessionImages(command.sessionId,raw);if((typeof text!=="string"||!text.trim())&&!images.length)continue;const normalized=typeof text==="string"?text:"",count=overlap.get(normalized)??0;if(s.source==="adopted"&&Date.parse(command.acceptedAt)<=copiedAt&&count>0){overlap.set(normalized,count-1);continue;}
+inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?`📎×${images.length}${normalized?` ${normalized}`:""}`:normalized,ts:command.acceptedAt,...(images.length?{images}:{})});}state.messages=[...state.messages,...inputs].sort((a,b)=>(Date.parse(a.ts||"")||0)-(Date.parse(b.ts||"")||0));const resume=!s.archive&&s.nativeRef?resumeFor(s,s.nativeRef):null;Object.assign(state,{resume,fullAccess:s.access==="full-access"||s.access==="bypass"});
+    this.stateCache.set(s.id, { signature, state: structuredClone(state) });
+    return { signature, state };
+  }
   /** 排队消息挂在 state 上返回。必须在 stateCache 之外贴：队列变化不进 signature，
    *  写进缓存的话撤回一条要等下一次 runner journal 变动才看得见。 */
   private withQueue(s:SessionRecord,state:KernelSessionState):KernelSessionState{const queued=this.queue.view(s.id);return queued.length?{...state,queued}:state;}
-  private projectHandoffChain(s:SessionRecord,current:KernelSessionState,snapshot?:{journal:RunnerEventJournal;commands:Map<string,RunnerCommandRecord>;events:RunnerEventRecord[];signature:string}):KernelSessionState{
+  private projectHandoffChain(s:SessionRecord,current:KernelSessionState,snapshot?:RunnerSnapshot):KernelSessionState{
     const chain:{session:SessionRecord;state:KernelSessionState}[]=[{session:s,state:current}],seen=new Set([s.id]);let cursor=s,predecessorOmitted=false;
     for(;;){const id=cursor.handoff?.predecessorId;if(!id)break;if(seen.has(id)||chain.length>=1_000){predecessorOmitted=true;break;}const predecessor=this.repo.getById(id);if(!predecessor){predecessorOmitted=true;break;}seen.add(id);chain.unshift({session:predecessor,state:this.runnerState(predecessor,snapshot)});cursor=predecessor;}
     const messages:import("./types.ts").DevMsg[]=[];for(let index=0;index<chain.length;index++){const item=chain[index],internalIds=new Set(this.bridge.list(item.session.id).filter(c=>c.clientMutationId?.startsWith("handoff:")).map(c=>c.commandId));if(index){const previous=chain[index-1].session;messages.push({role:"system",name:"handoff",text:`已从 ${previous.providerId} 接力到 ${item.session.providerId}${previous.handoff?.reason?`：${previous.handoff.reason}`:""}`,ts:item.session.handoff?.at??item.session.createdAt});}for(const message of item.state.messages){const commandId=message.name?.startsWith("command:")?message.name.slice(8):undefined;if(commandId&&internalIds.has(commandId))continue;messages.push(commandId?(({name:_name,...visible})=>visible)(message):message);}}
     let chars=0,messageOmitted=false;const bounded:import("./types.ts").DevMsg[]=[];for(const message of messages.reverse()){if(bounded.length>=200||chars+message.text.length>128_000){messageOmitted=true;break;}chars+=message.text.length;bounded.push(message);}bounded.reverse();
     if(predecessorOmitted||messageOmitted)bounded.unshift({role:"system",name:"history",text:`⚠️ 历史已按显示预算截断${predecessorOmitted?"，部分接力前序不可用":""}${messageOmitted?"，较早消息已省略":""}`,ts:s.updatedAt});
-    return{...current,messages:bounded,...(s.handoff?.predecessorId?{handoff:{predecessorId:s.handoff.predecessorId,at:s.handoff.at,...(s.handoff.reason?{reason:s.handoff.reason}:{}),currentProviderId:s.providerId}}:{})};
+    // 会话谱系：链上每个 Session 一条（含当前），带原生 ID 与恢复命令；被 /new 换掉的旧 ref 也列出——历史"保留"了却查不到入口等于没保留
+    const lineage:import("./contracts.ts").SessionLineageEntry[]=chain.map((item,index)=>{const record=item.session,successor=chain[index+1]?.session;return{sessionId:record.id,providerId:record.providerId,...(record.model?{model:record.model}:{}),...(record.effort?{effort:record.effort}:{}),cwd:record.cwd,nativeRef:record.nativeRef,resume:record.nativeRef?resumeFor(record,record.nativeRef):null,createdAt:record.createdAt,...(successor?{handedOffAt:record.handoff?.successorId?record.handoff.at:successor.createdAt,...(record.handoff?.reason?{reason:record.handoff.reason}:{})}:{}),current:index===chain.length-1,...(record.previousRefs?.length?{previousRefs:record.previousRefs.map((ref)=>({nativeRef:ref,resume:resumeFor(record,ref)}))}:{})};});
+    return{...current,messages:bounded,lineage,...(s.handoff?.predecessorId?{handoff:{predecessorId:s.handoff.predecessorId,at:s.handoff.at,...(s.handoff.reason?{reason:s.handoff.reason}:{}),currentProviderId:s.providerId}}:{})};
   }
   async states(ids: readonly string[]): Promise<Map<string,KernelSessionState>>{const out=new Map<string,KernelSessionState>();if(this.mode!=="runner"){for(const id of ids)try{out.set(id,await this.state(id));}catch{}return out;}const sessions=[] as SessionRecord[];for(const id of ids)try{const s=this.session(id);if(s.archive){out.set(id,this.archivedState(s));continue;}if(s.isolated){out.set(id,this.isolatedState(s));continue;}await this.ensureInitialHistory(s);await this.reconcile(s);sessions.push(s);}catch{}const snapshot=readStableRunnerSnapshot(this.dataRoot);for(const s of sessions)out.set(this.taskId(s,s.taskIds.find(id=>ids.includes(id))??s.id),this.projectHandoffChain(s,this.runnerState(s,snapshot),snapshot));return out;}
   async state(id:string):Promise<KernelSessionState>{const persisted=this.repo.getById(id)??this.repo.getByTaskId(id);if(persisted?.archive)return this.archivedState(persisted);if(persisted?.isolated)return this.isolatedState(persisted);if(this.mode!=="runner")return structuredClone(await(await this.legacy()).getAgentState(id));let s=this.recoverHistoryReset(this.session(id));try{await this.ensureInitialHistory(s);await this.reconcile(s);s=this.recoverHistoryReset(this.session(id));return this.projectHandoffChain(s,this.runnerState(s));}catch(error:any){const code=String(error?.code||"");if(!code.startsWith("RUNNER_")&&!/ENOENT|ECONNREFUSED|connect/i.test(String(error)))throw error;s=this.session(id);return{...this.projectHandoffChain(s,this.runnerState(s)),stale:true,errorCode:code||"RUNNER_UNAVAILABLE"};}}
@@ -156,11 +275,14 @@ inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?
     if (!retry && (this.queue.list(s.id).length || await this.busy(s))) { this.queue.push(s.id, parseQueued(input.text, input.images ?? [], input.clientMutationId)); return { queued: true }; }
     return this.submitTurn(s, taskId, input);
   }
-  async handoff(id:string,input:{providerId:"claude"|"codex"|"codebuddy";model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean}):Promise<SessionMutationResult & {sessionId:string;providerId:"claude"|"codex"|"codebuddy"}>{
+  async handoff(id:string,input:{providerId:"claude"|"codex"|"codebuddy";model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean}):Promise<SessionMutationResult & {sessionId:string;providerId:"claude"|"codex"|"codebuddy";inPlace?:true}>{
     if(this.mode!=="runner")throw new KernelSessionPolicyError("SESSION_RUNNER_DISABLED","会话配置接力只支持 Runner Session");
     const old=this.writableSession(id);this.assertOperable(old);const taskId=this.taskId(old,id),options=this.effectiveOptions(input.providerId,input.model,input.effort,old);
     if(old.control!=="ownward")throw new KernelSessionPolicyError("SESSION_CONTROL_REQUIRED","未持有输入权，不能接力");
     if(old.providerId===input.providerId&&(input.model===undefined||old.model===input.model)&&(input.effort===undefined||old.effort===input.effort))throw new KernelSessionPolicyError("SESSION_HANDOFF_SAME_PROVIDER","Provider、模型和思考深度均未变化");
+    // 同 Provider 只是换模型/深度：就地改，不接力。接力会新建 Session 并只带 40 条截断快照——原生上下文全丢，
+    // 而两家 CLI 本来就支持带新参数续聊。老客户端（安卓/iOS）仍打 handoff 接口，在这里统一改道。
+    if(old.providerId===input.providerId){const r=await this.reconfigure(id,{...(input.model!==undefined?{model:input.model}:{}),...(input.effort!==undefined?{effort:input.effort}:{})});return{queued:r.queued,...(r.commandId?{commandId:r.commandId}:{}),...(r.runId?{runId:r.runId}:{}),...(r.outcomeUnknown!==undefined?{outcomeUnknown:r.outcomeUnknown}:{}),sessionId:r.sessionId,providerId:r.providerId,inPlace:true as const};}
     this.runner.require(input.providerId,"stream");await this.reconcile(old);
     if(await this.busy(old))throw new KernelSessionPolicyError("SESSION_HANDOFF_RUNNING","当前轮仍在运行，不能接力");
     if(this.queue.list(old.id).length)throw new KernelSessionPolicyError("SESSION_HANDOFF_QUEUED","存在待发送消息，不能接力");
@@ -173,6 +295,27 @@ inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?
     let moved:ReturnType<SessionRepository["handoff"]>;try{moved=this.repo.handoff({taskId,expectedSessionId:old.id,providerId:input.providerId,...options,reason});}catch(error){if(error instanceof SessionRepositoryError&&error.message==="SESSION_HANDOFF_STALE")throw new KernelSessionPolicyError("SESSION_HANDOFF_STALE","会话已被另一个接力请求更新，请刷新后重试");throw error;}
     try{const receipt=await this.submitTurn(moved.current,taskId,{text:prompt,clientMutationId:`handoff:${moved.previous.id}:${input.providerId}`});this.stateCache.delete(moved.previous.id);this.stateCache.delete(moved.current.id);return{...receipt,sessionId:moved.current.id,providerId:input.providerId};}
     catch(error:any){if(error?.outcomeUnknown!==true){if(typeof error?.commandId==="string")this.bridge.abandon(error.commandId,String(error?.code||"RUNNER_SUBMIT_REJECTED"));this.repo.rollbackHandoff(moved.current.id);}throw error;}
+  }
+  /** 同 Provider 就地改模型/思考深度。两家 CLI 原生都支持带着新参数续聊（claude --resume 加 --model/--effort；
+   *  codex exec -m … resume <thread>，2026-09-05 实测 rollout 里逐轮记录的 model 随之切换），所以不走跨 Provider 的
+   *  「新建 Session + 重放有界历史」——那条路会丢掉原生上下文（只剩 40 条截断快照）还多花一轮 token。
+   *  排队消息不挡：它们是对同一个会话说的，换个模型照样该发；待处理审批要挡：claude 侧要重启 CLI，审批会随进程一起没。 */
+  async reconfigure(id:string,input:{model?:string;effort?:string}):Promise<SessionMutationResult & {sessionId:string;providerId:"claude"|"codex"|"codebuddy";model?:string;effort?:string}>{
+    if(this.mode!=="runner")throw new KernelSessionPolicyError("SESSION_RUNNER_DISABLED","会话就地改配置只支持 Runner Session");
+    const s=this.writableSession(id);this.assertOperable(s);const taskId=this.taskId(s,id),options=this.effectiveOptions(s.providerId,input.model,input.effort,s);
+    if(s.control!=="ownward")throw new KernelSessionPolicyError("SESSION_CONTROL_REQUIRED","未持有输入权，不能改配置");
+    const patch={...(options.model!==undefined&&options.model!==s.model?{model:options.model}:{}),...(options.effort!==undefined&&options.effort!==s.effort?{effort:options.effort}:{})};
+    if(!Object.keys(patch).length)throw new KernelSessionPolicyError("SESSION_RECONFIGURE_NOOP","模型和思考深度均未变化");
+    this.runner.require(s.providerId,"set-options");await this.reconcile(s);
+    if(await this.busy(s))throw new KernelSessionPolicyError("SESSION_RECONFIGURE_RUNNING","当前轮仍在运行，等结束或中断后再改");
+    if(this.projectHandoffChain(s,this.runnerState(s)).pending.length)throw new KernelSessionPolicyError("SESSION_RECONFIGURE_PENDING","存在待处理审批，先处理完再改");
+    const command=this.reserveControl(s,taskId,"set-options",patch);let receipt:RunnerCommandReceipt;
+    // 确定性失败（Runner 明确拒绝/失败）要把 bridge 上这条控制命令作废，否则它会一直算「进行中」把会话卡成 busy；
+    // 结果未知（超时/断线）则留着，按 commandId 补查——与 handoff 同一套处置
+    try{receipt=await this.runner.submit(taskId,s,"set-options",patch,command);await this.finishControl(taskId,command);}
+    catch(error:any){if(error?.outcomeUnknown!==true)this.bridge.abandon(command.commandId,String(error?.code||"RUNNER_CONTROL_FAILED"));throw error;}
+    this.repo.updateOptions(s.id,patch);this.stateCache.delete(s.id);
+    return{queued:false,...receipt,sessionId:s.id,providerId:s.providerId,...(options.model?{model:options.model}:{}),...(options.effort?{effort:options.effort}:{})};
   }
   /** 真正下发一轮（不再判忙）：send 的直发路径和队列 flush 共用，两边的 identity/幂等语义必须一致。 */
   private async submitTurn(s: SessionRecord, taskId: string, input: SessionInput): Promise<SessionMutationResult> {

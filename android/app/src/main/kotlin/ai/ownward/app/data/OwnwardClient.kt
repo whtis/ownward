@@ -123,6 +123,9 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
     // ---- 任务 / agent 会话 ----
     suspend fun tasks(): List<WorkTask> = get("/api/tasks")
     suspend fun recentSessions(): List<RecentSession> = get("/api/dev/recent")
+    /** 各家订阅额度（服务端 60s 缓存；拿不到的那家为 null） */
+    suspend fun usage(): ProvidersUsage = get("/api/usage")
+
     suspend fun devMessages(id: String): AgentState =
         get("/api/dev/messages?id=" + id.urlEnc())
 

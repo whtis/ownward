@@ -1,8 +1,8 @@
 import { RunnerServer, type RunnerProviderResolver } from "./server.ts";
-import { resolve } from "path";
+import { join, resolve } from "path";
 import { ClaudeCodeRunnerProvider } from "../providers/claude-code/adapter.ts";
 import { CodexRunnerProvider } from "../providers/codex/adapter.ts";
-import { cfg } from "../util.ts";
+import { cfg, rotateLogFile } from "../util.ts";
 import { emitCoreLog } from "../kernel/observability/contracts.ts";
 
 const dataRoot = resolve(process.env.OWNWARD_DATA_ROOT || "data");
@@ -21,4 +21,10 @@ const resolver: RunnerProviderResolver = (providerId) => {
 const server = new RunnerServer(dataRoot, resolver);for(const provider of providers.values())server.registerProvider(provider);server.start();
 let shuttingDown = false;
 for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => { if (shuttingDown) return; shuttingDown = true; void server.shutdown(5_000).then(() => process.exit(0), (error) => { emitCoreLog({ event: "runner-shutdown-failed", moduleType: "runner", moduleId: "session-runner", operation: "shutdown", errorClass: (error as any)?.code || "UNKNOWN", msg: "runner shutdown failed" }); process.exit(1); }); });
+// runner.log 也是 launchd 一路追加，之前完全没有轮转：Provider 帧日志一天能写出几百 MB
+// （2026-09-09 实测 23MB 里 7 万行是同一条丢帧记录）。daemon 只在启动时转一次就够——它重启得勤；
+// runner 可以连着跑几周不重启，所以启动转一次之后还要挂个定时器。
+const runnerLog = join(dataRoot, "logs", "runner.log");
+rotateLogFile(runnerLog);
+setInterval(() => rotateLogFile(runnerLog), 30 * 60_000).unref();
 emitCoreLog({event:"runner-ready",moduleType:"runner",moduleId:"session-runner",operation:"start",msg:`pid=${process.pid}`},console.log);

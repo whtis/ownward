@@ -9,7 +9,7 @@ const OUT = [
   "PID\tStatus\tLabel",
   "99415\t0\tcom.cloudflare.cloudflared.ownward",
   "40800\t0\tai.ownward.daemon",
-  "-\t0\tai.ownward.example-sync",
+  "-\t0\tai.ownward.idle-job",
 ].join("\n");
 
 describe("parseLaunchdPid", () => {
@@ -18,7 +18,7 @@ describe("parseLaunchdPid", () => {
   });
 
   test("没在跑（pid 为 -）返回 null", () => {
-    expect(parseLaunchdPid(OUT, "ai.ownward.example-sync")).toBe(null);
+    expect(parseLaunchdPid(OUT, "ai.ownward.idle-job")).toBe(null);
   });
 
   test("label 不存在返回 null，不做前缀匹配", () => {

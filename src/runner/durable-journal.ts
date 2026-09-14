@@ -222,6 +222,37 @@ export class DurableJsonlJournal<T> {
     if (value.diagnostics.length) throw new Error(`${this.file} 有 ${value.diagnostics.length} 条损坏或不支持记录`);
     return [...(value.records as T[])];
   }
+  /** 与 read() 同语义（照样返回 diagnostics，不抛），但**不深拷贝**：记录是共享的冻结对象，
+   *  数组是浅拷贝。给需要看 diagnostics、又只做只读投影的热路径用（RunnerEventJournal）。 */
+  readShared(): JournalRead<T> {
+    const value = this.readCached();
+    return { records: [...(value.records as T[])], diagnostics: value.diagnostics };
+  }
+  /** 当前缓存内容的指纹 `dev:ino:size`。journal 是 append-only、改写一律 tmp+rename 换 inode，
+   *  所以「同 dev/ino 且 size 只增」⇔「旧内容是新内容的前缀」——跨调用复用前缀计算结论的依据。
+   *  必须在一次 read/readShared/readStrict 之后取，才反映刚读到的那份内容。 */
+  cacheToken(): string {
+    const c = journalCaches.get(this.file);
+    return c ? `${c.dev}:${c.ino}:${c.size}` : "";
+  }
+  /** 在写锁内把 journal 整体换成 records：tmp + fsync + rename（换 inode）+ fsync 目录，
+   *  与 repairTruncatedTail 同一套耐久序列。换 inode 会让所有读者（含跨进程增量尾读和
+   *  交叉校验备忘）失效重算，不会读到半新半旧。
+   *  调用方必须保证 records 仍满足全部不变量（顺序、每命令 sequence 从 1 连续、lifecycle）。 */
+  rewrite(records: readonly T[]): void {
+    const { lock } = lockPaths(this.file);
+    withRunnerFileLock(lock, (recheck) => {
+      const raw = records.map((r) => JSON.stringify(r) + "\n").join("");
+      const tmp = `${this.file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        writeFileSync(tmp, raw, { flag: "wx", mode: 0o600 });
+        const f = openSync(tmp, "r"); try { fsyncSync(f); } finally { closeSync(f); }
+        recheck(); renameSync(tmp, this.file); journalCaches.delete(this.file);
+        const dfd = openSync(dirname(this.file), "r"); try { fsyncSync(dfd); } finally { closeSync(dfd); }
+        chmodSync(this.file, 0o600);
+      } finally { try { rmSync(tmp); } catch {} }
+    });
+  }
   append(raw: unknown): { appended: boolean; record: T } {
     const next = this.parse(raw);
     return this.appendParsed(() => next);

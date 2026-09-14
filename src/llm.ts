@@ -83,15 +83,23 @@ const rules = () => {
   return owner ? `${owner}\n\n${base}` : base;
 };
 
-export async function llmJson(prompt: string): Promise<any | null> {
+/** opts.timeoutMs：默认 3 分钟够日报/周报；月度复盘这种十万字素材的长稿要给更久，由调用方按素材量决定。 */
+export async function llmJson(prompt: string, opts: { timeoutMs?: number; quiet?: boolean } = {}): Promise<any | null> {
   const engine = (cfg.llm?.engine || "claude") as LlmEngine;
   const configured = cfg.llm?.fallbackEngine;
   const fallback = configured === false || configured === "off" ? null
     : (configured || (engine === "claude" ? "codex" : null)) as LlmEngine | null;
-  return runWithFailover(engine, fallback, (provider) => provider === "codex" ? viaCodex(prompt) : viaClaude(prompt));
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  return runWithFailover(engine, fallback, (provider) => provider === "codex" ? viaCodex(prompt, timeoutMs) : viaClaude(prompt, timeoutMs),
+    opts.quiet ? async () => {} : reportFailover, opts.quiet ? () => {} : clearFailoverNotice);
 }
 
-async function viaClaude(prompt: string): Promise<ProviderResult> {
+/** run() 超时只给 code=124、stderr 为空；不补一句 "timed out" 的话 isFailoverEligible 判不出来，备用引擎永远不接手。 */
+function providerError(r: { code: number; stdout: string; stderr: string }): string {
+  return r.code === 124 ? "timed out" : (r.stderr || r.stdout).slice(-500);
+}
+
+async function viaClaude(prompt: string, timeoutMs: number): Promise<ProviderResult> {
   const args = [
     "-p", prompt,
     "--model", cfg.llm?.claudeModel || "haiku",
@@ -102,19 +110,19 @@ async function viaClaude(prompt: string): Promise<ProviderResult> {
     rules() + "\n\n不要使用任何工具。最终回复必须是且只能是一个 JSON 对象，不要 markdown 代码块，不要任何解释文字。",
   ];
   const r = await run([cfg.llm?.claudeBin || "claude", ...args], {
-    timeoutMs: 180_000,
+    timeoutMs,
     cwd: ROOT,
     env: { DISABLE_OMC: "1" },     // 关掉用户级 OMC hooks，避免注入编排指令
   });
   if (r.code !== 0) {
-    const error = (r.stderr || r.stdout).slice(-500);
+    const error = providerError(r);
     log(`claude -p failed (${r.code}): ${error}`);
     return { value: null, error };
   }
   return { value: parseJson(r.stdout) };
 }
 
-async function viaCodex(prompt: string): Promise<ProviderResult> {
+async function viaCodex(prompt: string, timeoutMs: number): Promise<ProviderResult> {
   const dir = mkdtempSync(join(tmpdir(), "ownward-llm-"));
   const outFile = join(dir, "last.txt");
   const args = [
@@ -124,9 +132,9 @@ async function viaCodex(prompt: string): Promise<ProviderResult> {
   if (cfg.llm?.codexModel) args.push("-m", cfg.llm.codexModel);
   args.push(prompt);
   try {
-    const r = await run([cfg.llm?.codexBin || "codex", ...args], { timeoutMs: 180_000 });
+    const r = await run([cfg.llm?.codexBin || "codex", ...args], { timeoutMs });
     if (r.code !== 0) {
-      const error = (r.stderr || r.stdout).slice(-500);
+      const error = providerError(r);
       log(`codex exec failed (${r.code}): ${error}`);
       return { value: null, error };
     }

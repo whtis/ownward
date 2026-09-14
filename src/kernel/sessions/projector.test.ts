@@ -5,13 +5,13 @@ import { describe, expect, test } from "bun:test";
 import { RunnerAgentStateProjector, toolBrief } from "./runner-consumer.ts";
 
 const session: any = { id: "s1", providerId: "claude", control: "ownward" };
-function project(events: { type: string; body?: unknown; commandKind?: string }[], providerId = "claude") {
+function project(events: { type: string; body?: unknown; commandKind?: string; reason?: string }[], providerId = "claude") {
   const payloads = new Map<string, unknown>();
   const p = new RunnerAgentStateProjector({ ...session, providerId } as any, (e: any) => payloads.get(e.eventId), (id) => ({ kind: "start-run" }) as any);
   events.forEach((e, i) => {
     const eventId = `e${i}`;
     if (e.body !== undefined) payloads.set(eventId, e.body);
-    p.apply({ eventId, sequence: i + 1, type: e.type, at: `2026-08-20T00:00:0${i}.000Z`, commandId: "c1", runId: "r1", sessionId: "s1", providerId, ...(e.body !== undefined ? { payloadRef: `payloads/${"0".repeat(64)}.blob` } : {}) } as any);
+    p.apply({ eventId, sequence: i + 1, type: e.type, at: `2026-08-20T00:00:0${i}.000Z`, commandId: "c1", runId: "r1", sessionId: "s1", providerId, ...(e.body !== undefined ? { payloadRef: `payloads/${"0".repeat(64)}.blob` } : {}), ...(e.reason ? { reason: e.reason } : {}) } as any);
   });
   return p.state();
 }
@@ -62,11 +62,18 @@ describe("RunnerAgentStateProjector 消息展开", () => {
     const s = project([
       { type: "session-updated", body: { nativeRef: "n1", model: "claude-fable-5", commands: ["compact", "clear"] } },
       { type: "usage", body: { scope: "request", inputTokens: 1200, outputTokens: 5, contextTokens: 1200 } },
-      { type: "usage", body: { scope: "turn", inputTokens: 99999, outputTokens: 50, contextTokens: 99999 } },
+      { type: "usage", body: { scope: "turn", inputTokens: 99999, outputTokens: 50, contextTokens: 99999, contextWindow: 1_000_000 } },
     ]);
     expect(s.commands).toEqual(["compact", "clear"]);
     expect(s.model).toBe("claude-fable-5");
     expect(s.ctxTokens).toBe(1200);
+    // 窗口大小只有 turn 级 usage（result 帧 modelUsage）才带；前端拿它换算 ctx%，不再按 200k 猜
+    expect(s.ctxWindow).toBe(1_000_000);
+  });
+
+  test("turn 级 usage 不带 contextWindow（旧 CLI）时 state 不出 ctxWindow 键，前端退回按模型估算", () => {
+    const s = project([{ type: "usage", body: { scope: "turn", inputTokens: 10, outputTokens: 1, contextTokens: 10 } }]);
+    expect("ctxWindow" in s).toBe(false);
   });
 
   test("tokens 出 legacy 别名：turn 级累计 input/output/total（web token pill 与安卓面板都读旧键）", () => {
@@ -188,5 +195,30 @@ describe("notice 渲染边界", () => {
     const s = project([{ type: "provider-notice", body: { category: "compact_ok" } }]);
     expect(s.messages[0]).toMatchObject({ role: "system", text: "✅ 上下文已压缩" });
     expect(s.messages[0].name).toBeUndefined();
+  });
+});
+
+// 一条 failed 的 run 以前在界面上等于什么都没发生：turn 拨回 idle，没有任何消息。
+// 用户那条消息（来自 command journal 的投影）孤零零挂着——「上屏了但 AI 没反应」就是这么来的。
+describe("失败的 turn 不许在界面上无声无息", () => {
+  test("provider_busy 失败留下可见解释", () => {
+    const s = project([{ type: "started" }, { type: "failed", reason: "provider_busy" }]);
+    expect(s.messages).toHaveLength(1);
+    expect(s.messages[0]).toMatchObject({ role: "system", name: "error" });
+    expect(s.messages[0].text).toContain("没送到");
+    expect(s.turn).toBe("idle");
+  });
+  test("其它失败原因也照样透出", () => {
+    const s = project([{ type: "failed", reason: "provider_exit" }]);
+    expect(s.messages[0].text).toContain("provider_exit");
+  });
+  test("已经有 notice 讲过原因的失败不重复报", () => {
+    const s = project([{ type: "provider-notice", body: { category: "rate_limited", message: "429" } }, { type: "failed", reason: "provider_result_error" }]);
+    expect(s.messages).toHaveLength(1);
+    expect(s.messages[0].text).toContain("限流");
+  });
+  test("completed 与用户自己按的 interrupted 不加噪音", () => {
+    expect(project([{ type: "completed" }]).messages).toHaveLength(0);
+    expect(project([{ type: "interrupted", reason: "user_interrupt" }]).messages).toHaveLength(0);
   });
 });

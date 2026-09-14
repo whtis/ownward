@@ -46,3 +46,5 @@ else {
 }
 if (fakePrompt === "TURN_FAILED") send({ type: "turn.failed", error: { message: "fake failed" } });
 else send({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 3, reasoning_output_tokens: 1 } });
+// 终态帧已经发出、进程还没退：adapter 的 finally 要等它，这段就是「日志上不忙、Provider 还攥着」的窗口
+if (fakePrompt === "LINGER_AFTER_DONE") await Bun.sleep(400);

@@ -1,5 +1,5 @@
-// 飞书「夜间收割」存储：每晚 24:00 把当天跟我有关的消息落盘，默认全部纳入当日工作总结
-// （daily-digest，AI 自行判相关性）；飞书 tab 取消勾选 = 排除某条。按日期分桶：{ "YYYY-MM-DD": LarkDailyMsg[] }。
+// 飞书「夜间收割」存储：每晚 24:00 保留当天消息，日报仅取已勾选的私聊。
+// 群聊仍可在飞书 tab 查看，但不作为本人的工作。按日期分桶：{ "YYYY-MM-DD": LarkDailyMsg[] }。
 import { readFileSync } from "fs";
 import { join } from "path";
 import { DATA, ensureDir, fmt, log } from "./util.ts";
@@ -87,11 +87,13 @@ export function selectAllLarkMsgs(date: string, selected: boolean): number {
 }
 
 /** 供 daily-digest 取用：优先今天分桶；今天还没收割（分桶不存在）则回退到昨天，
- *  以兼容「digest 18:30 当天生成」和「24:00/次日重生成」两种时机。返回已勾选的消息。 */
+ *  以兼容「digest 18:30 当天生成」和「24:00/次日重生成」两种时机。返回已勾选的私聊。 */
 export function selectedLarkForDigest(digestDate: string): LarkDailyMsg[] {
   const store = load();
   const yday = fmt(new Date(new Date(`${digestDate}T00:00:00+08:00`).getTime() - 86400_000), "date");
   const bucketDate = store[digestDate] ? digestDate : (store[yday] ? yday : null);
   if (!bucketDate) return [];
-  return (store[bucketDate] || []).filter((m) => m.selected);
+  // 日报只纳入与本人直接对话的消息；群聊/旁观信息保留在原始收割桶里，
+  // 但不再进入日报素材，避免把旁观内容写成自己的工作。
+  return (store[bucketDate] || []).filter((m) => m.selected && m.chat_type === "p2p");
 }

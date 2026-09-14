@@ -58,10 +58,13 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import ai.ownward.app.data.AgentState
 import ai.ownward.app.data.ApiException
 import ai.ownward.app.data.OwnwardClient
+import ai.ownward.app.data.ProviderUsage
+import ai.ownward.app.data.ProvidersUsage
 import ai.ownward.app.data.ImageEncoder
 import ai.ownward.app.data.OutImage
 import ai.ownward.app.ui.theme.ownwardColors
@@ -78,6 +81,9 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
     var pendingImages by remember { mutableStateOf<List<Pair<Uri, OutImage>>>(emptyList()) }
     var sending by remember { mutableStateOf(false) }
     var providers by remember { mutableStateOf(mapOf<String, List<String>>()) }
+    // 各家订阅额度：独立于会话状态，60s 才问一次（服务端也缓存 60s），拿不到就保留上一份
+    var usage by remember { mutableStateOf<ProvidersUsage?>(null) }
+    var usageAt by remember { mutableStateOf(0L) }
     var handoffTarget by remember { mutableStateOf<String?>(null) }
     var handoffProvider by remember { mutableStateOf("") }
     var handoffModel by remember { mutableStateOf("") }
@@ -101,6 +107,10 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
             error = null
         } catch (e: Exception) {
             error = e.message
+        }
+        if (System.currentTimeMillis() - usageAt >= 60_000L) {
+            usageAt = System.currentTimeMillis()
+            runCatching { client.usage() }.onSuccess { usage = it }
         }
     }
 
@@ -179,14 +189,25 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                                 }
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text(
-                                when {
-                                    state?.turn == "running" -> "运行中"
-                                    state != null && state!!.control != "ownward" -> "只旁观"
-                                    else -> "会话"
-                                },
-                                style = MaterialTheme.typography.titleSmall,
-                            )
+                            Column {
+                                Text(
+                                    when {
+                                        state?.turn == "running" -> "运行中"
+                                        state != null && state!!.control != "ownward" -> "只旁观"
+                                        else -> "会话"
+                                    },
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+                                // 引擎 · 模型 · 深度 常驻标题栏：接力或就地换模型后一眼能看出现在是谁在干活，不用点进详情
+                                state?.let { s ->
+                                    Text(
+                                        sessionIdentityLabel(s),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
                         }
                     },
                     navigationIcon = { DrawerOrBackButton(onBack) },
@@ -204,6 +225,25 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                     },
                     colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent),
                 )
+                // 额度常驻标题栏下方（web 头部徽标 / iOS 顶部胶囊同款）：哪家引擎就显哪家的窗口，70%/90% 变色；
+                // 标题栏高度固定，塞第三行会被裁，所以单独占一行
+                state?.let { s ->
+                    val providerUsage = usage?.forProvider(agentProvider(s))
+                    usageLabel(providerUsage)?.let { label ->
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when (usageSeverity(providerUsage)) {
+                                2 -> ownwardColors.Danger
+                                1 -> ownwardColors.Warn
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            maxLines = 1,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                        )
+                    }
+                }
                 state?.let { PlanStrip(it.plan) }
                 // Runner 不可达时服务端回 stale 快照——必须可见，否则对着过期数据以为 agent 在干活
                 if (state?.stale == true) {
@@ -462,6 +502,36 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
                     }
                 }
                 // 释放后在别的终端续聊的命令（服务端按 nativeRef 拼好），复制到剪贴板方便发给 Mac
+                // 会话谱系：接力链上每个引擎的原生会话 ID + 恢复命令（服务端拼好，这里只展示/复制）；没有 ref 的如实说
+                if (s.lineage.isNotEmpty()) {
+                    Text("会话谱系与恢复命令", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp))
+                    s.lineage.forEach { entry ->
+                        val rows: List<Triple<String, String?, String?>> =
+                            entry.previousRefs.map { Triple<String, String?, String?>("已被 /new 换掉", it.nativeRef, it.resume?.cmd) } +
+                                listOf(Triple<String, String?, String?>(if (entry.current) "当前" else "已接力${entry.reason?.let { "：$it" } ?: ""}", entry.nativeRef, entry.resume?.cmd))
+                        rows.forEach { (label, ref, cmd) ->
+                                Text(
+                                    "${entry.providerId} · $label · 模型 ${entry.model?.takeIf { it.isNotBlank() } ?: "默认"} · 深度 ${entry.effort?.takeIf { it.isNotBlank() } ?: "默认"}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                                )
+                                if (ref.isNullOrBlank() || cmd.isNullOrBlank()) {
+                                    Text("尚无原生会话 ID", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                } else {
+                                    Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant) {
+                                        Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                cmd, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                                                maxLines = 2, modifier = Modifier.weight(1f),
+                                            )
+                                            TextButton(onClick = { clipboard.setText(AnnotatedString(cmd)) }) { Text("复制") }
+                                        }
+                                    }
+                                }
+                            }
+                    }
+                }
                 val cmd = s.resume?.cmd?.takeIf { it.isNotBlank() && s.control == "observing" }
                 if (cmd != null) {
                     Text(
@@ -560,6 +630,41 @@ fun handoffBlockReason(state: AgentState): String? = when {
 
 fun agentProvider(state: AgentState): String =
     state.providerId?.takeIf { it.isNotBlank() } ?: state.backend.ifBlank { "claude" }
+
+/** 标题栏副标题：引擎 · 模型 · 深度（空值写「默认」，别把三段里的某一段悄悄省掉） */
+fun sessionIdentityLabel(state: AgentState): String =
+    "${agentProvider(state)} · ${state.model?.takeIf { it.isNotBlank() } ?: "默认模型"} · ${state.effort?.takeIf { it.isNotBlank() } ?: "默认深度"}"
+
+/** 额度一行：按会话引擎取对应家的窗口，写法对齐 web 头部 / statusline 的「5h 46%(3h10m)」——
+ *  括号里是距重置时间。拿不到返回 null（不画），空着比错数字好 */
+fun usageLabel(usage: ProviderUsage?, now: Long = System.currentTimeMillis()): String? {
+    val windows = usage?.windows?.takeIf { it.isNotEmpty() } ?: return null
+    return "额度 " + windows.joinToString(" · ") { w ->
+        val eta = usageEta(w.resetsAt, now)
+        "${w.label} ${Math.round(w.percent)}%" + (if (eta.isEmpty()) "" else "($eta)")
+    }
+}
+
+/** 距重置：2d2h / 3h10m / 45m；已过期或解析不了给空串（服务端出口是标准 ISO，带不带毫秒都可能） */
+fun usageEta(resetsAt: String?, now: Long = System.currentTimeMillis()): String {
+    val at = resetsAt?.let { runCatching { java.time.OffsetDateTime.parse(it).toInstant().toEpochMilli() }.getOrNull() } ?: return ""
+    val mins = Math.round((at - now) / 60000.0)
+    if (mins <= 0) return ""
+    val d = mins / 1440
+    val h = (mins % 1440) / 60
+    val m = mins % 60
+    return when {
+        d > 0 -> "${d}d" + (if (h > 0) "${h}h" else "")
+        h > 0 -> "${h}h" + (if (m > 0) "${m}m" else "")
+        else -> "${m}m"
+    }
+}
+
+/** 最满的那个窗口过 70%/90% 变色（web/tasks.js 同阈值）：0 正常 / 1 警告 / 2 危险 */
+fun usageSeverity(usage: ProviderUsage?): Int {
+    val worst = usage?.windows?.maxOfOrNull { it.percent } ?: 0.0
+    return if (worst >= 90) 2 else if (worst >= 70) 1 else 0
+}
 
 fun sessionConfigIsNoop(
     currentProvider: String,
