@@ -143,6 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -180,3 +181,5 @@ jobs:
             gh release create "$TAG" "$APK" dist/android.json dist/SHA256SUMS "${ARGS[@]}"
           fi
           gh release view "$TAG" --json url -q .url
+          # GITHUB_TOKEN-created releases do not emit a release event; refresh Pages explicitly.
+          gh workflow run pages.yml --ref main
