@@ -192,18 +192,21 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     finally { await session.mutex.run(() => { if (session.controlOperation === command.commandId) session.controlOperation = undefined; }); }
   }
   private async *approval(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> {
-    const session = this.requireSession(command), parsed = parseClaudeApprovalInput(input), requestId = command.approvalRequestId!; let pending!: PendingApproval, ack!: Promise<void>;
+    const session = this.requireSession(command), parsed = parseClaudeApprovalInput(input), requestId = command.approvalRequestId!; let pending!: PendingApproval;
     await session.mutex.run(() => {
       pending = session.pending.get(requestId)!;
       if (!pending || pending.reserved || pending.runId !== parsed.targetRunId || session.turn?.command.runId !== parsed.targetRunId) throw providerError("PROVIDER_APPROVAL_STALE", "审批请求已处理、过期或绑定不匹配");
       if (session.controlOperation) throw providerError("PROVIDER_SESSION_BUSY", "Claude control command 正在处理"); session.controlOperation = command.commandId;
-      pending.reserved = true; ack = this.controlWait(session, requestId);
+      pending.reserved = true;
     });
     try {
       yield this.event(command, "started", session.nativeRef ? { nativeRef: session.nativeRef } : {});
       const response = parsed.response === "allow" ? { behavior: "allow", updatedInput: parsed.updatedInput ?? pending.input } : { behavior: "deny", message: parsed.message || "用户拒绝" };
-      if (!this.write(session, JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: requestId, response } }) + "\n")) { this.rejectControl(session, requestId, providerError("PROVIDER_UNAVAILABLE", "Claude approval 写入失败")); throw providerError("PROVIDER_UNAVAILABLE", "Claude approval 写入失败"); }
-      await ack; await session.mutex.run(() => session.pending.delete(requestId)); yield this.event(command, "completed");
+      // can_use_tool 的答复是我们回给 CLI 的 control_response，CLI 不会再回 ack——写进 stdin 即送达，CLI 随即继续执行。
+      // 以前在这里等 ack：真实 CLI 下每次审批都 5s 后 PROVIDER_NO_ACK，答复被记成 failed、pending 解除保留后又弹一遍，
+      // 还把 claude 健康标 degraded。interrupt 是我们发的 control_request，仍等 ack。
+      if (!this.write(session, JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: requestId, response } }) + "\n")) throw providerError("PROVIDER_UNAVAILABLE", "Claude approval 写入失败");
+      await session.mutex.run(() => session.pending.delete(requestId)); yield this.event(command, "completed");
     } catch (error) { await session.mutex.run(() => { pending.reserved = false; }); throw error; }
     finally { await session.mutex.run(() => { if (session.controlOperation === command.commandId) session.controlOperation = undefined; }); }
   }

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "path";
 import { DATA, log } from "../../util.ts";
 import { toolBrief } from "./runner-consumer.ts";
+import { logDecision, matchRule, patternFor, type RuleKind } from "../../approval.ts";
 
 /** 与 legacy PERM_TIMEOUT_MS 同值：挂起等人，6 小时才兜底拒绝（防会话永久泄漏）。 */
 export const RUNNER_PERM_TIMEOUT_MS = 6 * 60 * 60_000;
@@ -72,6 +73,13 @@ function briefFromPayload(payload: unknown): { question: boolean; brief: string;
   return { question: false, brief: `${toolName}: ${toolBrief(input)}`, options: [], toolName, input };
 }
 
+/** 审批载荷 → 「总是批准」要记的规则键（与 legacy 同一套 patternFor 归纳）。问题类、认不出工具的不记，返回 null。 */
+export function approvalRuleToRemember(payload: unknown): { toolName: string; input: any; brief: string; kind: RuleKind; pattern: string } | null {
+  const meta = briefFromPayload(payload);
+  if (meta.question || meta.toolName === "unknown-tool") return null;
+  return { toolName: meta.toolName, input: meta.input, brief: meta.brief, ...patternFor(meta.toolName, meta.input) };
+}
+
 let sweeping = false;
 
 /** daemon 每 60s 调一次。所有副作用逐项 try/catch：单个会话出错不拖垮整轮。 */
@@ -122,7 +130,19 @@ export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
       if (!state.notified[key]) {
         try {
           const raw = eventJournal.readPayload(p.event as any);
-          const meta = briefFromPayload(raw ? JSON.parse(raw) : null);
+          const payload = raw ? JSON.parse(raw) : null, meta = briefFromPayload(payload);
+          // 命中「总是批准」规则（会话级/全局）→ 直接放行，不开 Action、不弹横幅/飞书卡，只记审计（legacy agent-session 同语义）。
+          // 放行失败就照常弹审批，宁可多问一次也不能让请求无声挂住。
+          const remembered = approvalRuleToRemember(payload), rule = remembered ? matchRule(taskId, remembered.toolName, remembered.input) : null;
+          if (remembered && rule) {
+            try {
+              const { createSessionService } = await import("../../session-service.ts");
+              await createSessionService(taskId, [], dataRoot).respondApproval(p.sessionId, p.requestId, { allow: true });
+              logDecision({ taskId, requestId: p.requestId, toolName: remembered.toolName, kind: remembered.kind, pattern: remembered.pattern, decision: "auto-allow", by: "rule", ruleScope: rule.scope, detail: remembered.brief });
+              log(`approval sweep: [${taskId}] 命中自动批准规则 ${rule.scope}:${remembered.kind}:${remembered.pattern}，已放行`);
+              continue;
+            } catch (e) { log(`approval sweep auto-allow [${key}]: ${e instanceof Error ? e.name : "unknown"}，改为人工审批`); }
+          }
           const { openAction } = await import("../../actions.ts");
           openAction({
             id: `perm:${taskId}:${p.requestId}`,

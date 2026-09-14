@@ -2,6 +2,13 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.2.3] - 2026-09-14
+
+### Fixed
+
+- Runner approval rules remembered from the “always approve” action now apply to matching requests, preventing repeated approval prompts.
+- Claude approval replies no longer wait for a nonexistent CLI acknowledgement, so accepted approvals complete promptly.
+
 ## [1.2.2] - 2026-09-14
 
 ### Added

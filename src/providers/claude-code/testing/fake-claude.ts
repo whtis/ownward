@@ -77,7 +77,9 @@ function onFrame(frame: any) {
     if (text === "NO_ACK_LONG") { waiting = "long-noack"; return; }
     const canary=/OWNWARD_(?:CANARY|RESUME)_[0-9a-f-]+/.exec(text)?.[0];complete(canary??`reply:${text};images:${imageCount};pid:${process.pid};envleak:${process.env.CLAUDE_CODE_SECRET_SHOULD_CLEAR || process.env.CODEBUDDY_SECRET_SHOULD_CLEAR || "none"};args:${args.join("|")}`); return;
   }
-  if (frame?.type === "control_response" && waiting === "approval") { waiting = null; write({ type: "control_response", response: { subtype: "success", request_id: frame.response?.request_id } }); complete(`approval:${frame.response?.response?.behavior}`); return; }
+  // 真实 Claude Code CLI 收到 can_use_tool 的 control_response 后不回 ack，直接继续执行（2.1.267/2.1.270 实测）；
+  // 这里曾经回显 ack，导致契约测试全绿而生产里每次审批都 PROVIDER_NO_ACK
+  if (frame?.type === "control_response" && waiting === "approval") { waiting = null; complete(`approval:${frame.response?.response?.behavior}`); return; }
   if (frame?.type === "control_request" && frame.request?.subtype === "interrupt" && waiting === "long") {
     waiting = null; write({ type: "control_response", response: { subtype: "success", request_id: frame.request_id } }); write({ type: "result", is_error: true, subtype: "interrupted", usage: { input_tokens: 1, output_tokens: 0 } });
   }

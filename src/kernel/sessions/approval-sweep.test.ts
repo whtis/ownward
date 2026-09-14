@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RUNNER_PERM_TIMEOUT_MS, classifyApprovals, type ApprovalCommandLike, type ApprovalEventLike } from "./approval-sweep.ts";
+import { RUNNER_PERM_TIMEOUT_MS, approvalRuleToRemember, classifyApprovals, type ApprovalCommandLike, type ApprovalEventLike } from "./approval-sweep.ts";
 
 const NOW = Date.parse("2026-08-20T10:00:00Z");
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
@@ -54,5 +54,21 @@ describe("classifyApprovals", () => {
     const events = [ev({}), ev({ type: "completed", commandId: "resp-1", approvalRequestId: undefined })];
     const { pending } = classifyApprovals(events, [cmd({ kind: "send-input" })], NOW);
     expect(pending).toHaveLength(1);
+  });
+});
+
+// Runner 模式「总是批准」曾经只透传 remember、从不落规则：点「总是（全局）」同类命令下一条照弹。
+// 规则键必须和 legacy 同一套 patternFor 归纳，否则老规则在 Runner 会话里命不中
+describe("approvalRuleToRemember", () => {
+  test("Bash 按命令首词/高危键记忆，普通工具按工具名", () => {
+    expect(approvalRuleToRemember({ toolName: "Bash", input: { command: "curl -s http://127.0.0.1:4517/api/x" } })).toMatchObject({ kind: "bash", pattern: "curl", toolName: "Bash" });
+    expect(approvalRuleToRemember({ toolName: "Bash", input: { command: "git -C repo push --force origin x" } })).toMatchObject({ kind: "bash", pattern: "git push --force" });
+    expect(approvalRuleToRemember({ toolName: "WebFetch", input: { url: "https://x" } })).toMatchObject({ kind: "tool", pattern: "WebFetch" });
+  });
+
+  test("问题类与认不出工具的载荷不记忆", () => {
+    expect(approvalRuleToRemember({ kind: "question", question: "选哪个？", options: ["A", "B"] })).toBeNull();
+    expect(approvalRuleToRemember({ input: { command: "ls" } })).toBeNull();
+    expect(approvalRuleToRemember(null)).toBeNull();
   });
 });
