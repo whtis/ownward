@@ -7,7 +7,7 @@ import { archiveMeetingSource, contentHash, MAX_MEETING_BYTES, readMeetingArchiv
 export interface MeetingRow {
   week: string;        // 周标题原文，如 "08.31-09.04"
   section: string;     // 表格所属的二级标题（周会文档里有「研发复盘」「质量复盘」），晨会没有则为空
-  person: string;      // 飞书显示名，如 "Tis 吴海涛"
+  person: string;      // 飞书显示名，如 "Alex 张三"
   cells: { col: string; text: string }[];
   partialWeek?: boolean;
 }
@@ -85,7 +85,7 @@ export function cellToText(html: string): string {
 }
 
 /** 从文档正文里抽出「窗口内的周 × 指定人」的行。
- *  days 是取材窗口覆盖的 YYYY-MM-DD 列表；people 是显示名子串（"吴海涛"能匹配 "Tis 吴海涛"）。 */
+ *  days 是取材窗口覆盖的 YYYY-MM-DD 列表；people 是显示名子串（"张三"能匹配 "Alex 张三"）。 */
 export function extractMeetingRows(content: string, days: string[], people: string[], diagnostics: string[] = []): MeetingRow[] {
   if (!days.length || !people.length) return [];
   const sorted = [...days].sort();

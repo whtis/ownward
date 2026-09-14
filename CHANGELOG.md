@@ -2,6 +2,12 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.2.4] - 2026-09-15
+
+### Fixed
+
+- Recent session cards label each session with the engine that is currently running it. A session handed off to another engine is no longer shown with the engine it was originally dispatched to.
+
 ## [1.2.3] - 2026-09-14
 
 ### Fixed

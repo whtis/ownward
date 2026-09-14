@@ -55,10 +55,10 @@ describe("建议正文不再是裸 JSON", () => {
     Function("Settings", `${block}; return { proposalView, proposalObsLabel };`)({ skills, registry });
 
   test("四种动作都渲染成「动作 + Skill + 位置」", () => {
-    const api = view({ observations: [{ id: "o1", name: "aiphone", engine: "claude", scope: "user", displayPath: "~/.claude/skills/aiphone" }] }, { skills: [{ id: "sk1", name: "aiphone" }] });
+    const api = view({ observations: [{ id: "o1", name: "secondary-project", engine: "claude", scope: "user", displayPath: "~/.claude/skills/secondary-project" }] }, { skills: [{ id: "sk1", name: "secondary-project" }] });
     expect(api.proposalView({ kind: "delete", observationId: "o1" })).toMatchObject({ title: "删除部署" });
-    expect(api.proposalView({ kind: "delete", observationId: "o1" }).detail).toContain("~/.claude/skills/aiphone");
-    expect(api.proposalView({ kind: "adopt", observationIds: ["o1"] }).title).toBe("纳管 aiphone");
+    expect(api.proposalView({ kind: "delete", observationId: "o1" }).detail).toContain("~/.claude/skills/secondary-project");
+    expect(api.proposalView({ kind: "adopt", observationIds: ["o1"] }).title).toBe("纳管 secondary-project");
     expect(api.proposalView({ kind: "migrate", skillId: "sk1", engine: "codex", removeSource: true }).title).toBe("迁移到 codex（并移除原部署）");
     expect(api.proposalView({ kind: "repair", skillId: "sk1", engine: "claude" }).title).toBe("重建 claude 受管链接");
   });

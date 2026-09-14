@@ -14,18 +14,18 @@ const doc = [
   "# 08.31-09.04",
   "",
   standupTable(
-    row("Tis 吴海涛", "<ol><li seq=\"1\">关联率纳入录音</li></ol>", "计划：<ol><li>看板</li></ol><hr/><br/>结果：<ol><li>看板上线</li></ol>", "计划：<hr/><br/>结果：")
-    + row("Ivy 吴迪", "", "计划：<hr/><br/>结果：<ul><li>妙记接入<ul><li>逐字稿链路跑通</li></ul></li></ul>", "计划：<hr/><br/>结果：")
-    + row("Swann 王聪", "<ol><li>小麦复盘</li></ol>", "计划：<hr/><br/>结果：<ol><li>初稿</li></ol>", ""),
+    row("Alex 张三", "<ol><li seq=\"1\">指标纳入报表</li></ol>", "计划：<ol><li>看板</li></ol><hr/><br/>结果：<ol><li>看板上线</li></ol>", "计划：<hr/><br/>结果：")
+    + row("Blair 李四", "", "计划：<hr/><br/>结果：<ul><li>妙记接入<ul><li>逐字稿链路跑通</li></ul></li></ul>", "计划：<hr/><br/>结果：")
+    + row("Chris 王五", "<ol><li>季度复盘</li></ol>", "计划：<hr/><br/>结果：<ol><li>初稿</li></ol>", ""),
   ),
   "",
   "# 07.27-07.31",
   "",
-  standupTable(row("Tis 吴海涛", "", "计划：<hr/><br/>结果：<ol><li>七月末的事</li></ol>", "")),
+  standupTable(row("Alex 张三", "", "计划：<hr/><br/>结果：<ol><li>七月末的事</li></ol>", "")),
   "",
   "# 模板",
   "",
-  standupTable(row("Tis 吴海涛", "", "计划：<hr/><br/>结果：<ol><li>模板里的假内容</li></ol>", "")),
+  standupTable(row("Alex 张三", "", "计划：<hr/><br/>结果：<ol><li>模板里的假内容</li></ol>", "")),
 ].join("\n");
 
 const augustDays = Array.from({ length: 31 }, (_, i) => `2026-08-${String(i + 1).padStart(2, "0")}`);
@@ -49,18 +49,18 @@ describe("cellToText", () => {
     expect(t).toBe("计划：\n- A & B\n\n结果：\n- 外\n  - 内");
   });
   test("文档引用留标题，人员引用留姓名", () => {
-    expect(cellToText(`看 <cite doc-id="x" file-type="docx" title="8月复盘&amp;9月目标" type="doc"></cite> 和 ${user("Ivy 吴迪")}`))
-      .toBe("看 「文档：8月复盘&9月目标」 和 Ivy 吴迪");
+    expect(cellToText(`看 <cite doc-id="x" file-type="docx" title="8月复盘&amp;9月目标" type="doc"></cite> 和 ${user("Blair 李四")}`))
+      .toBe("看 「文档：8月复盘&9月目标」 和 Blair 李四");
   });
 });
 
 describe("extractMeetingRows", () => {
   test("只取窗口内的周、只取点名的人、空骨架格子不算内容", () => {
-    const rows = extractMeetingRows(doc, augustDays, ["吴海涛", "吴迪"]);
-    // 7.27-7.31 那周整周在 8 月之前，不相交，不取；王聪没点名，不取
+    const rows = extractMeetingRows(doc, augustDays, ["张三", "李四"]);
+    // 7.27-7.31 那周整周在 8 月之前，不相交，不取；王五没点名，不取
     expect(rows.map((r) => `${r.week}|${r.person}`)).toEqual([
-      "08.31-09.04|Tis 吴海涛",
-      "08.31-09.04|Ivy 吴迪",
+      "08.31-09.04|Alex 张三",
+      "08.31-09.04|Blair 李四",
     ]);
     const tis = rows[0];
     expect(tis.cells.map((c) => c.col)).toEqual(["本周目标/要事", "周一"]);   // 周二是空骨架，被丢掉
@@ -71,30 +71,30 @@ describe("extractMeetingRows", () => {
   });
   test("跨月的周按相交取：7.27-7.31 那周对 8 月窗口不相交，对 7 月窗口相交；模板节永远不取", () => {
     const julyDays = ["2026-07-01", "2026-07-31"];
-    const rows = extractMeetingRows(doc, julyDays, ["吴海涛"]);
+    const rows = extractMeetingRows(doc, julyDays, ["张三"]);
     expect(rows.map((r) => r.week)).toEqual(["07.27-07.31"]);
     expect(JSON.stringify(rows)).not.toContain("模板里的假内容");
   });
   test("标签带属性（<table border> <th style> <tr class> <td style>）照样解析，不会整张表静默丢掉", () => {
     const styled = "# 0803-0807\n\n<table border=\"1\"><thead><tr class=\"h\"><th style=\"width:80px\">人员</th><th>周一</th></tr></thead><tbody>"
-      + `<tr class="d"><td style="color:red">${user("Ivy 吴迪")}</td><td align="left">计划：<hr/>结果：<ol><li>带属性也行</li></ol></td></tr></tbody></table>`;
-    const rows = extractMeetingRows(styled, augustDays, ["吴迪"]);
+      + `<tr class="d"><td style="color:red">${user("Blair 李四")}</td><td align="left">计划：<hr/>结果：<ol><li>带属性也行</li></ol></td></tr></tbody></table>`;
+    const rows = extractMeetingRows(styled, augustDays, ["李四"]);
     expect(rows).toHaveLength(1);
     expect(rows[0].cells).toEqual([{ col: "周一", text: "计划：\n结果：\n- 带属性也行" }]);
   });
   test("没有人员表头的表格（周会里的质量复盘等）跳过", () => {
-    const other = "# 0803-0807\n\n## 质量复盘\n\n<table><thead><tr><th>问题</th><th>处理</th></tr></thead><tbody><tr><td>吴海涛</td><td>x</td></tr></tbody></table>";
-    expect(extractMeetingRows(other, augustDays, ["吴海涛"])).toEqual([]);
+    const other = "# 0803-0807\n\n## 质量复盘\n\n<table><thead><tr><th>问题</th><th>处理</th></tr></thead><tbody><tr><td>张三</td><td>x</td></tr></tbody></table>";
+    expect(extractMeetingRows(other, augustDays, ["张三"])).toEqual([]);
   });
   test("周会文档：表格归属最近的二级标题", () => {
     const weekly = "# 0831-0904\n\n## 研发复盘\n\n<table><thead><tr><th>人员</th><th>本周目标</th><th>达成情况</th><th>下周计划</th></tr></thead><tbody>"
-      + row("Ivy 吴迪", "<ul><li>妙记对接</li></ul>", "<ol><li>接入卡片</li></ol>", "<ol><li>迁 Temporal</li></ol>") + "</tbody></table>";
-    const rows = extractMeetingRows(weekly, augustDays, ["吴迪"]);
+      + row("Blair 李四", "<ul><li>妙记对接</li></ul>", "<ol><li>接入卡片</li></ol>", "<ol><li>迁 Temporal</li></ol>") + "</tbody></table>";
+    const rows = extractMeetingRows(weekly, augustDays, ["李四"]);
     expect(rows).toHaveLength(1);
     expect(rows[0].section).toBe("研发复盘");
     expect(rows[0].cells.map((c) => c.col)).toEqual(["本周目标", "达成情况", "下周计划"]);
     const text = renderMeetingRows("周会", rows);
-    expect(text).toContain("----- 周会 · 0831-0904 · 研发复盘 · Ivy 吴迪 -----");
+    expect(text).toContain("----- 周会 · 0831-0904 · 研发复盘 · Blair 李四 -----");
     expect(text).toContain("[达成情况]\n- 接入卡片");
   });
 });

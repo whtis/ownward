@@ -6,13 +6,13 @@ import { archiveMeetingSource, readMeetingArchive, type MeetingSource } from "./
 import { meetingNotesMaterial } from "./meeting-notes.ts";
 
 const url = "https://example.feishu.cn/docx/archive-split-test";
-const doc = "# 0831-0904\n<table><tr><th>人员</th><th>周一</th><th>周二</th></tr><tr><td>Ivy 吴迪</td><td>八月完成</td><td>九月完成</td></tr></table>";
+const doc = "# 0831-0904\n<table><tr><th>人员</th><th>周一</th><th>周二</th></tr><tr><td>Blair 李四</td><td>八月完成</td><td>九月完成</td></tr></table>";
 
 test("月报取材缺归档时直接失败，不联网或创建归档", async () => {
   const root = mkdtempSync(join(tmpdir(), "ownward-report-archive-"));
   let requests = 0;
   try {
-    await expect(meetingNotesMaterial("晨会", url, ["2026-08-31"], ["吴迪"], 30_000, {
+    await expect(meetingNotesMaterial("晨会", url, ["2026-08-31"], ["李四"], 30_000, {
       root, archive: false, fetch: async () => { requests++; return doc; },
     })).rejects.toThrow("归档");
     expect(requests).toBe(0);
@@ -27,7 +27,7 @@ test("归档后可离线取材，月报和试运行均不刷新版本或调用�
     const original = await archiveMeetingSource(url, doc, root);
     for (const dryRun of [false, true]) {
       const sources: MeetingSource[] = [];
-      const text = await meetingNotesMaterial("晨会", url, ["2026-08-31"], ["吴迪"], 30_000, {
+      const text = await meetingNotesMaterial("晨会", url, ["2026-08-31"], ["李四"], 30_000, {
         root, archive: false, dryRun, sources, fetch: async () => { requests++; throw new Error("不应联网"); },
       });
       expect(text).toContain("八月完成");

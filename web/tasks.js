@@ -192,12 +192,16 @@ function tkSetView(v) {
   if (r) r.dataset.on = String(v === "recent");
   renderTaskList();
 }
+/** 引擎标签：优先当前 provider（接力后会变），派发时的 mode 只做兜底——与 iOS engineLabel 同口径 */
+function engineTag(mode, backend, providerId) {
+  return backend || providerId || (mode === "codex-bg" ? "codex" : mode === "codebuddy-bg" ? "codebuddy" : "claude");
+}
 function rcCardHtml(s) {
   const state = sessionState("task", s), hit = rcHits()?.get(s.id);
   return `<div class="card clickable" ${state.tone ? `data-tone="${state.tone}"` : ""} data-selected="${Tasks.sel === s.id}" onclick="Tasks.select('${jsq(s.id)}')">
     <div class="top">${sessionStateHtml(state)}
       <span class="task-project">${esc(s.project)}</span>
-      <span class="tag">${s.mode === "codex-bg" ? "codex" : s.mode === "codebuddy-bg" ? "codebuddy" : "claude"}</span>
+      <span class="tag">${esc(engineTag(s.mode, s.backend, s.providerId))}</span>
       <span class="right mono">${ageText(new Date(s.lastAt).toISOString())}</span></div>
     <div class="body task-card-title">${esc(s.title)}</div>
     ${s.last ? `<div class="body" style="color:var(--text-tertiary);-webkit-line-clamp:1;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">${esc(s.last)}</div>` : ""}
@@ -218,7 +222,7 @@ function rcExtraHitsHtml() {
   const known = new Set(Tasks.recent.map((s) => s.id));
   return [...hits.entries()].filter(([id]) => !known.has(id)).map(([id, h]) => `
     <div class="card clickable" data-selected="${Tasks.sel === id}" onclick="Tasks.select('${jsq(id)}')">
-      <div class="top"><span class="task-project">${esc(h.project || "?")}</span><span class="tag">${esc(h.mode === "codex-bg" ? "codex" : h.mode === "codebuddy-bg" ? "codebuddy" : "claude")}</span><span class="right mono">${h.lastAt ? ageText(new Date(h.lastAt).toISOString()) : "更早"}</span></div>
+      <div class="top"><span class="task-project">${esc(h.project || "?")}</span><span class="tag">${esc(engineTag(h.mode, h.providerId, ""))}</span><span class="right mono">${h.lastAt ? ageText(new Date(h.lastAt).toISOString()) : "更早"}</span></div>
       <div class="body task-card-title">${esc(h.title || id)}</div>
       <div class="body" style="color:var(--text-tertiary);-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">🔍 ${esc(h.snippet)}</div>
     </div>`).join("");
