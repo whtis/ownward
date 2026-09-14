@@ -22,7 +22,7 @@ android {
         applicationId = "ai.ownward.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 202609141
+        versionCode = 202609142
         versionName = "1.2.2"
     }
 
