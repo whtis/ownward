@@ -1,3 +1,67 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ownward · 个人工作台</title><link rel="stylesheet" href="style.css"></head>
-<body><main><nav><strong>ownward</strong><a href="https://github.com/whtis/ownward">GitHub</a></nav><section class="hero"><p class="eyebrow">YOUR WORK, YOUR MACHINE</p><h1>把重要的事，<em>带在身边。</em></h1><p class="lede">Ownward 是一个运行在 Mac 上的个人工作台：收集事件、交给 Agent 分流，把需要行动的事送到你的手机。</p><div class="actions"><a class="button" id="download" href="https://github.com/whtis/ownward/releases">下载 Android</a><a class="secondary" href="https://github.com/whtis/ownward#readme">查看文档 →</a></div><p id="release" class="release">正在读取最新版本…</p></section><section class="grid"><article><b>留在你的机器上</b><p>工作数据、凭据与 vault 由你的 Mac 掌握。Ownward 不要求把个人工作流搬到第三方云端。</p></article><article><b>Agent 替你分流</b><p>消息、邮件、代码通知和日程进入同一条工作流，真正需要行动的内容才进入队列。</p></article><article><b>手机只做最后一公里</b><p>随时查看 Action、聊天和提醒。新版本从这里获取，daemon 离线时也可继续使用。</p></article></section><footer>Apache-2.0 · <a href="https://github.com/whtis/ownward/issues">反馈问题</a></footer></main><script>fetch('android.json',{cache:'no-store'}).then(r=>r.json()).then(x=>{if(x.versionName){document.querySelector('#release').textContent='最新 Android：'+x.versionName+'（'+x.versionCode+'）';if(x.downloadUrl)document.querySelector('#download').href=x.downloadUrl}}).catch(()=>{document.querySelector('#release').textContent='Android 版本请前往 GitHub Releases 获取';});</script></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Ownward：把 AI 开发工作的记忆、接力、起草和远程操作接起来。开源、本地运行在 Mac 上。">
+  <title>Ownward · AI 工具会换，工作记忆别丢</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar wrap">
+    <a class="wordmark" href="./"><span class="mark">O</span> ownward</a>
+    <nav><a href="#how">怎么工作</a><a href="#why">为什么</a><a href="https://github.com/whtis/ownward">GitHub ↗</a></nav>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <div class="hero-copy">
+        <p class="kicker">YOUR WORK, YOUR MACHINE</p>
+        <h1>AI 工具会换，<br><em>工作记忆别丢。</em></h1>
+        <p class="lede">Ownward 是一个开源、本地运行在 Mac 上的 AI 开发工作台。它把任务记录、项目知识、引擎接力和手机操作，接成一条连续的工作。</p>
+        <div class="actions"><a class="button" href="https://github.com/whtis/ownward#readme">开始使用</a><a class="text-link" href="#why">先看它解决什么 →</a></div>
+        <p class="micro">Claude Code · Codex · CodeBuddy　/　你的 Mac 执行　/　你的 Markdown 记忆</p>
+      </div>
+      <div class="hero-visual" aria-label="Ownward 把任务、Agent 和项目记忆连接起来的示意图">
+        <div class="orbit orbit-a"></div><div class="orbit orbit-b"></div>
+        <div class="node node-memory"><span>记忆</span><b>项目<br>Markdown</b></div>
+        <div class="node node-agent"><span>Agent</span><b>Claude<br>Codex</b></div>
+        <div class="node node-phone"><span>手机</span><b>派任务<br>看进度</b></div>
+        <div class="core"><span>OWNWARD</span><strong>工作<br>连续性</strong></div>
+        <div class="signal signal-1">换引擎</div><div class="signal signal-2">到点起草</div>
+      </div>
+    </section>
+
+    <section id="why" class="problem wrap">
+      <p class="kicker">THE GAP BETWEEN TOOLS</p>
+      <div class="split"><h2>烦的不是 AI 不会写，<br><em>是工作接不上。</em></h2><p>Claude 限流换 Codex，背景要重讲；三个 CLI 改同一个项目，记录散在三处；周报到了，还得翻聊天、对 Git。Ownward 把中间这段接住。</p></div>
+    </section>
+
+    <section id="how" class="pillars wrap">
+      <div class="section-head"><p class="kicker">FOUR CONTINUOUS MOVES</p><h2>把一次开发，<br>变成可以继续的工作。</h2></div>
+      <div class="cards">
+        <article class="card card-memory"><div class="num">01</div><h3>把记忆归拢到项目</h3><p>Claude Code、Codex、CodeBuddy 的任务回到同一套记录：目标、过程、diff、commit 和结论。终端里开的会话也能自动收割成 Markdown。</p><div class="card-foot">inbox　/　log　/　flights　/　候选记忆</div></article>
+        <article class="card card-relay"><div class="num">02</div><h3>限流了，换引擎继续</h3><p>新引擎接手必要的近期历史、工作目录、附加目录和权限。它先看真实 Git 状态，再继续做事；旧会话链始终可回看。</p><div class="handoff"><span>Claude</span><i>→</i><span>Codex</span><i>→</i><span>CodeBuddy</span></div></article>
+        <article class="card card-routine"><div class="num">03</div><h3>周报到点自动起草</h3><p>Routine 从近期记录、任务结果和项目记忆取材，生成待审草稿。搜集和起草交给 AI，是否写进飞书由你拍板。</p><div class="approval"><span class="dot"></span> 等待人工确认 <b>→</b> 写入文档</div></article>
+        <article class="card card-mobile"><div class="num">04</div><h3>手机连着自己的 Mac</h3><p>晚上派任务，早上看流式回复、diff、测试和 PR。代码、凭据与 Agent CLI 留在 Mac，手机只负责操作界面。</p><div class="phone-line"><span>Mac</span><b>↔</b><span>Android / iOS</span></div></article>
+      </div>
+    </section>
+
+    <section class="flow wrap"><div class="flow-label"><p class="kicker">THE LOOP</p><h2>下一次，不必<br>从头解释。</h2></div><div class="flow-track"><div><b>派任务</b><span>从 Web / 手机 / Terminal</span></div><i>→</i><div><b>执行</b><span>Agent 接力完成</span></div><i>→</i><div><b>留下事实</b><span>diff · commit · 结论</span></div><i>→</i><div><b>继续工作</b><span>记忆带入下一次</span></div></div></section>
+
+    <section class="cta wrap"><div><p class="kicker">OPEN SOURCE · APACHE-2.0</p><h2>让工作有一个<br><em>连续的落点。</em></h2><p>需要 Mac、Bun、Git，以及至少一个已登录的 Agent CLI。</p></div><div class="cta-actions"><a class="button" href="https://github.com/whtis/ownward#3-%E5%88%86%E9%92%9F%E8%B7%91%E8%B5%B7%E6%9D%A5">查看安装步骤</a><a class="download" id="download" href="https://github.com/whtis/ownward/releases">下载 Android <span>↗</span></a><small id="release">正在读取最新版本…</small></div></section>
+
+    <section class="boundaries wrap"><p class="kicker">HONEST BOUNDARIES</p><p>Ownward 不是 IDE，也不是 Agent 安全沙箱；它不把代码搬到云端，也不会自动导入 ChatGPT 或 Claude 网页端的全部历史。早期 alpha，安全边界仍然在你这边。</p><a href="https://github.com/whtis/ownward/blob/main/docs/remote-access.md">阅读远程访问说明 →</a></section>
+  </main>
+  <footer class="wrap"><span>ownward / your work, your machine</span><span><a href="https://github.com/whtis/ownward">GitHub</a> · Apache-2.0</span></footer>
+  <script>
+    const releaseEl = document.querySelector('#release');
+    const downloadEl = document.querySelector('#download');
+    const validDownload = value => { try { const u = new URL(value); return u.protocol === 'https:' && u.hostname === 'github.com' && u.pathname.startsWith('/whtis/ownward/releases/download/'); } catch { return false; } };
+    fetch('android.json', {cache:'no-store'}).then(r => { if (!r.ok) throw new Error('metadata'); return r.json(); }).then(x => {
+      if (typeof x.versionName !== 'string' || !Number.isFinite(x.versionCode)) throw new Error('metadata');
+      releaseEl.textContent = `最新 Android：${x.versionName}（${x.versionCode}）`;
+      if (validDownload(x.downloadUrl)) downloadEl.href = x.downloadUrl;
+    }).catch(() => { releaseEl.textContent = 'Android 版本请前往 GitHub Releases 获取'; });
+  </script>
+</body>
+</html>
