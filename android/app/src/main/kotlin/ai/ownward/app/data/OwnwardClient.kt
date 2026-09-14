@@ -334,16 +334,29 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
         get(fsDirsPath(path))
 
     // ---- 应用自更新 ----
-    suspend fun appRelease(): AppRelease = get("/api/app/android")
+    /** Public Pages metadata is the primary channel; daemon remains an offline/LAN fallback. */
+    suspend fun appRelease(): AppRelease = withContext(Dispatchers.IO) {
+        runCatching {
+            http.newCall(Request.Builder().url(PUBLIC_RELEASE_URL).header("Accept", "application/json").build())
+                .execute().use { response ->
+                    if (!response.isSuccessful) error("public metadata HTTP ${response.code}")
+                    AppJson.decodeFromString<AppRelease>(response.body?.string() ?: error("empty metadata"))
+                }
+        }.getOrElse { get("/api/app/android") }
+    }
 
-    suspend fun downloadApk(dest: java.io.File) = withContext(Dispatchers.IO) {
-        streamHttp.newCall(req("/app/ownward.apk").build()).execute().use { resp ->
+    suspend fun downloadApk(dest: java.io.File, downloadUrl: String? = null) = withContext(Dispatchers.IO) {
+        val request = if (!downloadUrl.isNullOrBlank()) Request.Builder().url(downloadUrl).build()
+            else req("/app/ownward.apk").build()
+        streamHttp.newCall(request).execute().use { resp ->
             if (!resp.isSuccessful) throw ApiException(resp.code, "下载失败 HTTP ${resp.code}")
             dest.outputStream().use { out ->
                 resp.body!!.byteStream().copyTo(out)
             }
         }
     }
+
+    companion object { private const val PUBLIC_RELEASE_URL = "https://whtis.github.io/ownward/android.json" }
 
     private fun JsonObject.str(key: String): String =
         (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: ""

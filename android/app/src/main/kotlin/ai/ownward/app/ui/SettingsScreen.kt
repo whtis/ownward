@@ -190,7 +190,7 @@ fun SettingsScreen(app: App, config: ServerConfig, onBack: () -> Unit) {
                         scope.launch {
                             try {
                                 val apk = File(context.cacheDir, "ownward-update.apk")
-                                app.client(config).downloadApk(apk)
+                                app.client(config).downloadApk(apk, r.downloadUrl.takeIf { it.isNotBlank() })
                                 val uri = FileProvider.getUriForFile(
                                     context, BuildConfig.APPLICATION_ID + ".fileprovider", apk
                                 )

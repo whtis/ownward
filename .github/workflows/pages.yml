@@ -1,0 +1,46 @@
+name: deploy-pages
+on:
+  push:
+    branches: [main]
+    paths: [site/**, .github/workflows/pages.yml]
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Android metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          try:
+            raw=subprocess.check_output(['gh','api','repos/whtis/ownward/releases?per_page=50'], text=True)
+            releases=[x for x in json.loads(raw) if not x.get('draft') and x.get('tag_name','').startswith('android-v')]
+            r=releases[0] if releases else {}
+            a=next((x for x in r.get('assets',[]) if x['name'].endswith('.apk')),None)
+            if a:
+              n=r['tag_name'].removeprefix('android-v'); name,code=n.rsplit('+',1)
+              checks=next((x for x in r['assets'] if x['name']=='SHA256SUMS'),None)
+              sha=''
+              if checks:
+                txt=subprocess.check_output(['gh','api',checks['url'],'-H','Accept: application/octet-stream'],text=True)
+                sha=next((line.split()[0] for line in txt.splitlines() if a['name'] in line),'')
+              json.dump({'ok':True,'versionName':name,'versionCode':int(code),'notes':r.get('body',''),'downloadUrl':a['browser_download_url'],'sha256':sha},open('site/android.json','w'),ensure_ascii=False)
+          except Exception as e: print('metadata unavailable:',e)
+          PY
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: {path: site}
+      - id: deployment
+        uses: actions/deploy-pages@v4

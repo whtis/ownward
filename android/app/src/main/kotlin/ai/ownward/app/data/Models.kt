@@ -424,4 +424,6 @@ data class AppRelease(
     val versionName: String = "",
     val versionCode: Int = 0,
     val notes: String = "",
+    val downloadUrl: String = "",
+    val sha256: String = "",
 )
