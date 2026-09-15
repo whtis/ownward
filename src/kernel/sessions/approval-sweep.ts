@@ -80,11 +80,17 @@ export function approvalRuleToRemember(payload: unknown): { toolName: string; in
   return { toolName: meta.toolName, input: meta.input, brief: meta.brief, ...patternFor(meta.toolName, meta.input) };
 }
 
-let sweeping = false;
+let sweeping = false, sweepAgain = false, kickTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** consume 拉到新审批时由 daemon 调：短时间内多次触发合并成一轮，正在跑就排一轮补跑。 */
+export function kickRunnerApprovalSweep(dataRoot = DATA): void {
+  if (kickTimer) return;
+  kickTimer = setTimeout(() => { kickTimer = null; void sweepRunnerApprovals(dataRoot).catch((e) => log(`approval sweep (kick): ${e instanceof Error ? e.name : "unknown"}`)); }, 100);
+}
 
 /** daemon 每 60s 调一次。所有副作用逐项 try/catch：单个会话出错不拖垮整轮。 */
 export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
-  if (sweeping) return; sweeping = true;
+  if (sweeping) { sweepAgain = true; return; } sweeping = true;
   try {
     const { RunnerCommandJournal, RunnerEventJournal } = await import("../../runner/journals.ts");
     const eventJournal = new RunnerEventJournal(dataRoot);
@@ -141,7 +147,7 @@ export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
               logDecision({ taskId, requestId: p.requestId, toolName: remembered.toolName, kind: remembered.kind, pattern: remembered.pattern, decision: "auto-allow", by: "rule", ruleScope: rule.scope, detail: remembered.brief });
               log(`approval sweep: [${taskId}] 命中自动批准规则 ${rule.scope}:${remembered.kind}:${remembered.pattern}，已放行`);
               continue;
-            } catch (e) { log(`approval sweep auto-allow [${key}]: ${e instanceof Error ? e.name : "unknown"}，改为人工审批`); }
+            } catch (e) { log(`approval sweep auto-allow [${key}]: ${(e as any)?.code ?? (e instanceof Error ? e.name : "unknown")}，改为人工审批`); }
           }
           const { openAction } = await import("../../actions.ts");
           openAction({
@@ -185,5 +191,5 @@ export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
     const known = new Set([...pending.map((p) => `${p.sessionId}:${p.requestId}`), ...resolved.map((r) => `${r.sessionId}:${r.requestId}`)]);
     for (const key of Object.keys(state.notified)) if (!known.has(key)) { delete state.notified[key]; dirty = true; }
     if (dirty) saveState(dataRoot, state);
-  } finally { sweeping = false; }
+  } finally { sweeping = false; if (sweepAgain) { sweepAgain = false; kickRunnerApprovalSweep(dataRoot); } }
 }

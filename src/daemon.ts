@@ -213,7 +213,7 @@ async function main() {
   if (sessionMode === "off") void import("./session-service.ts").then(async m=>{if(await m.sweepLegacyApprovalsIfPresent())setInterval(()=>m.sweepLegacyApprovalsIfPresent(),60_000);}).catch(e=>log(`legacy approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
   // Runner 默认写链的审批投影 + 6h 兜底超时（与上面的 legacy sweep 对称：那条只覆盖 mode=off 的存量会话）。
   // 没有它，Runner 审批只活在会话视图里：人不在屏幕前不知道任务卡住，且永不超时收敛。
-  if (sessionMode !== "off") void import("./kernel/sessions/approval-sweep.ts").then(m=>{setInterval(()=>void m.sweepRunnerApprovals().catch(e=>log(`approval sweep: ${e instanceof Error?e.name:"unknown"}`)),60_000);}).catch(e=>log(`approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
+  if (sessionMode !== "off") void import("./kernel/sessions/approval-sweep.ts").then(m=>{import("./kernel/sessions/service.ts").then(s=>s.onRunnerApprovalRequested(m.kickRunnerApprovalSweep)); setInterval(()=>void m.sweepRunnerApprovals().catch(e=>log(`approval sweep: ${e instanceof Error?e.name:"unknown"}`)),60_000);}).catch(e=>log(`approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
   // 事件 journal 归档：只增不减的话（实测 ~1000 条/天、每月 +12MB）冷启动解析和内存都会一路涨。
   // 启动时先做一次，之后每天一次；旧记录进 runner/archive/sessions/，一条不删，旧会话照常回读。
   if (sessionMode !== "off") {

@@ -2,6 +2,12 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.2.7] - 2026-09-15
+
+### Fixed
+
+- Runner approval rules now resolve handoff sessions to their owning task and trigger the approval sweep immediately, so “always approve” works reliably without waiting for the periodic sweep.
+
 ## [1.2.6] - 2026-09-15
 
 ### Fixed
