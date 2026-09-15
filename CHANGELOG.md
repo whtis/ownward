@@ -2,6 +2,13 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.2.6] - 2026-09-15
+
+### Fixed
+
+- Routine draft editor on Android keeps its Close / Save / Save and write actions above the text, so they stay reachable on devices where the full-screen dialog pushed the bottom row off screen.
+- Image attachments on user messages are right-aligned with the user bubble on Android and iOS; agent images stay on the left.
+
 ## [1.2.5] - 2026-09-15
 
 ### Added

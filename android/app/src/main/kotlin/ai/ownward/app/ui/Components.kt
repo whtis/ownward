@@ -489,19 +489,24 @@ fun DevMessageRow(msg: DevMsg, client: OwnwardClient) {
             modifier = Modifier.fillMaxWidth().then(copy).padding(horizontal = 16.dp, vertical = 3.dp),
         )
     }
-    MsgImages(msg.images, client) // 用户消息带附件时，缩略图跟在气泡下
+    MsgImages(msg.images, client, alignEnd = msg.role == "user") // 用户消息带附件时，缩略图跟在气泡下、同样靠右
 }
 
+/** 消息图片条：横向可滚。用户发的图靠右（跟气泡一边），agent 的图靠左。
+ *  横滚容器给子项无限宽度，Row 自己没有多余空间可排——靠右只能靠外层 Box 把整条 Row 对齐到末端。 */
 @Composable
-private fun MsgImages(images: List<String>?, client: OwnwardClient) {
+private fun MsgImages(images: List<String>?, client: OwnwardClient, alignEnd: Boolean = false) {
     if (images.isNullOrEmpty()) return
     val context = LocalContext.current
     val auth = client.authHeader()
-    Row(
+    Box(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
-            .horizontalScroll(rememberScrollState()),
+            .padding(start = if (alignEnd) 56.dp else 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+        contentAlignment = if (alignEnd) Alignment.CenterEnd else Alignment.CenterStart,
+    ) {
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         images.forEach { path ->
@@ -517,6 +522,7 @@ private fun MsgImages(images: List<String>?, client: OwnwardClient) {
                     .background(MaterialTheme.colorScheme.surfaceVariant),
             )
         }
+    }
     }
 }
 

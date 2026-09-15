@@ -316,7 +316,7 @@ struct DevMessageRow: View {
                     Text(msg.text).caption().padding(.horizontal, 16).padding(.vertical, 3)
                         .copyOnLongPress(msg.text)
                 }
-                MsgImages(paths: msg.images, client: client)
+                MsgImages(paths: msg.images, client: client, alignEnd: msg.role == "user")   // 用户附件跟气泡一边靠右
             }
         }
     }
@@ -392,9 +392,12 @@ struct ToolRunGroup: View {
     }
 }
 
+/// 消息图片条：横向可滚。用户发的图靠右（跟气泡一边），agent 的图靠左——
+/// 横滚容器里内容比视口窄时按 defaultScrollAnchor 对齐，比视口宽时照常滚动。
 struct MsgImages: View {
     let paths: [String]?
     let client: OwnwardClient
+    var alignEnd = false
     var body: some View {
         if let paths, !paths.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
@@ -405,8 +408,9 @@ struct MsgImages: View {
                             .clipShape(RoundedRectangle(cornerRadius: OWRadius.m))
                     }
                 }
-                .padding(.horizontal, 16).padding(.vertical, 4)
+                .padding(.leading, alignEnd ? 56 : 16).padding(.trailing, 16).padding(.vertical, 4)
             }
+            .defaultScrollAnchor(alignEnd ? .trailing : .leading)
         }
     }
 }

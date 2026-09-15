@@ -398,25 +398,8 @@ private fun RoutineRow(
         Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp, vertical = 12.dp)) {
                 Text(r.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    if (loading) CircularProgressIndicator(Modifier.align(Alignment.Center))
-                    else if (!loadedSuccessfully) Column {
-                        Text(loadError ?: "草稿未加载", color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = ::openDraft) { Text("重试") }
-                    } else Column(Modifier.fillMaxSize()) {
-                        if (draftStale) Text("素材已更新，这份草稿可能过期，请重新核对。", color = ownwardColors.Warn)
-                        OutlinedTextField(
-                            value = content,
-                            onValueChange = { content = it },
-                            readOnly = !routineCanEdit(draftStatus),
-                            enabled = !submitting,
-                            label = { Text(if (routineCanEdit(draftStatus)) "草稿正文" else "正文（只读）") },
-                            modifier = Modifier.fillMaxWidth().weight(1f),
-                        )
-                    }
-                }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 3) }
+                // 操作按钮放正文上方：放在底部时在部分机型（ColorOS 手势导航）上会被全屏 Dialog 顶出屏幕外，
+                // 用户打开草稿找不到「保存」。放顶部无论底部内边距怎么算都看得见。
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(enabled = !submitting, onClick = { reviewing = false }) { Text("关闭") }
                     if (!loading && routineCanSubmit(draftStatus, loadedSuccessfully)) {
@@ -435,6 +418,25 @@ private fun RoutineRow(
                                 write = { client.routineWrite(r.id, r.date) },
                             ) }, close = true)
                         }) { Text("保存并写入") }
+                    }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, maxLines = 3) }
+                Spacer(Modifier.height(4.dp))
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    if (loading) CircularProgressIndicator(Modifier.align(Alignment.Center))
+                    else if (!loadedSuccessfully) Column {
+                        Text(loadError ?: "草稿未加载", color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = ::openDraft) { Text("重试") }
+                    } else Column(Modifier.fillMaxSize()) {
+                        if (draftStale) Text("素材已更新，这份草稿可能过期，请重新核对。", color = ownwardColors.Warn)
+                        OutlinedTextField(
+                            value = content,
+                            onValueChange = { content = it },
+                            readOnly = !routineCanEdit(draftStatus),
+                            enabled = !submitting,
+                            label = { Text(if (routineCanEdit(draftStatus)) "草稿正文" else "正文（只读）") },
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                        )
                     }
                 }
             }
