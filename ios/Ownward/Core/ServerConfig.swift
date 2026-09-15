@@ -49,6 +49,8 @@ final class AppSettings {
 
     private(set) var config: ServerConfig
     private var cachedClient: (ServerConfig, OwnwardClient)?
+    /// 设置页发现新版本但用户按了「以后再说」：设置入口亮红点，直到装上新版或再查确认已是最新
+    var updateAvailable = false
 
     init() {
         let url = UserDefaults.standard.string(forKey: Self.urlKey) ?? ""

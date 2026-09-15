@@ -80,6 +80,7 @@ struct InboxView: View {
     let openSettings: () -> Void
     @State private var store: InboxStore
     @Environment(\.openURL) private var openURL
+    @Environment(AppSettings.self) private var settings
     /// DEBUG 直达：-ownward.debugRoutineDraft <routineId> 启动即打开该例行的审稿页（截图/自动化用）
     private var debugRoutineDraft: String? {
         #if DEBUG
@@ -149,8 +150,14 @@ struct InboxView: View {
                     .accessibilityLabel("刷新")
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { openSettings() } label: { Image(systemName: "gearshape") }
-                    .accessibilityLabel("设置")
+                Button { openSettings() } label: {
+                    Image(systemName: "gearshape")
+                        // 设置入口红点：有发现但没装的新版本（AppSettings.updateAvailable，设置页维护）
+                        .overlay(alignment: .topTrailing) {
+                            if settings.updateAvailable { Circle().fill(OW.danger).frame(width: 7, height: 7).offset(x: 3, y: -3) }
+                        }
+                }
+                .accessibilityLabel("设置")
             }
         }
         .refreshable { Haptics.tap(); await store.refresh() }

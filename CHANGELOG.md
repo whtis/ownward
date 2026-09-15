@@ -2,6 +2,17 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.2.5] - 2026-09-15
+
+### Added
+
+- Mobile settings now groups update status, source code, project homepage, version, and license details in one consistent About section.
+- Android and iOS keep a visible update indicator after an update is deferred, and reuse the existing GitHub Pages update channel with daemon fallback.
+
+### Fixed
+
+- Mobile update metadata and download links now follow the public release channel consistently.
+
 ## [1.2.4] - 2026-09-15
 
 ### Fixed

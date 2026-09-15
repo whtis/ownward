@@ -1,45 +1,24 @@
-# Maintaining the public repository
+# Public release maintenance
 
-Ownward is developed in a private operational repository and released to the
-separate public repository as reviewed file snapshots. This deliberately keeps
-private commit history, production evidence, local paths, data, and credentials
-out of the public Git object graph.
+Ownward's public repository is updated from a reviewed `oss-*` worktree. A
+release is a source snapshot, so its semantic version and changelog are part
+of the public contract.
 
-## Publish a reviewed update
+## Version parity
 
-1. Start from the private repository's current `master` in an isolated
-   `oss-sync` worktree.
-2. Bring across only changes suitable for the public source tree. Remove
-   operational evidence, local paths, personal or customer identifiers, and
-   private documentation. Prepare the release metadata before committing.
-3. Commit that reviewed candidate in the private repo, then run the exporter
-   from that clean candidate:
+The public repository carries the **same version as the internal repository**.
+Do not open a separate public patch line: when a fix ships internally as
+`x.y.z`, the public snapshot that carries it is `x.y.z` too. This keeps the two
+histories comparable and removes the bookkeeping that a divergent public
+version required.
 
-   ```bash
-   export OWNWARD_PUBLIC_DENYLIST="$HOME/.config/ownward/public-denylist.txt"
-   cd /path/to/ownward-oss-sync
-   bash scripts/export-public.sh \
-     --target /path/to/ownward-public \
-     --apply --push \
-     --message "feat: describe the public change"
-   ```
+## Release metadata
 
-The exporter refuses dirty source or target trees, requires an `oss-*` review
-worktree, requires the public target's `origin` to be `whtis/ownward`, verifies
-that `main` is current, scans the archived snapshot for known private markers,
-checks release metadata and the version gate, and runs `./verify.sh`. It first
-creates the public commit in a temporary Git worktree; only after that succeeds
-does it fast-forward public `main`. It exports with `git archive`, so private
-commits and Git objects are never copied.
-
-## Release metadata and Desk lock
-
-Every public content change is a release. Keep these three values identical in
-the reviewed source candidate:
+Keep these three values identical for every public release:
 
 - `package.json` → `version`
 - `src/kernel/extensions/contracts.ts` → `KERNEL_VERSION`
-- the first release heading in `CHANGELOG.md` → `## [x.y.z]`
+- the first `## [x.y.z]` entry in `CHANGELOG.md`
 
 Validate a candidate before exporting it:
 
@@ -47,37 +26,42 @@ Validate a candidate before exporting it:
 bun scripts/release-metadata.ts check /path/to/ownward-oss-sync /path/to/ownward-public
 ```
 
-The exporter repeats this check against the exact archived candidate and public
-baseline. A changed archive must have a strictly greater semver than the public
-target. If the archive and target tree are identical and versions are equal,
-the exporter reports that it already matches and exits successfully, so retries
-remain idempotent. An equal-version archive with any content difference is
-rejected.
+The optional second path is the current public checkout. It compares only its
+package version, so the first release that introduces `CHANGELOG.md` can still
+be checked. The candidate version must be strictly greater than the public
+baseline. Use patch releases for compatible fixes and documentation, minor
+releases for additive Kernel capabilities, and a major release only for a
+breaking contract. Increment `KERNEL_API_VERSION` only when an existing
+extension contract becomes incompatible.
 
-Use patch releases for compatible fixes and documentation, minor releases for
-additive Kernel capabilities, and a major release only for a breaking contract.
-Increment `KERNEL_API_VERSION` only when an existing extension contract becomes
-incompatible.
+## Desk lock contract
 
-The public repository carries the same version as the private one. There is no
-separate public patch line: a fix released privately as `x.y.z` is published as
-`x.y.z` here too.
+Desk locks to the **internal** repository, not to the public snapshot — the
+public repository is a mirror and an Android release channel, not Desk's
+dependency source. Update Desk's `ownward.lock.json` when Desk should pick up a
+new Ownward build:
 
-After a successful public snapshot push, create the matching `vX.Y.Z` tag in
-`whtis/ownward`. Desk locks to the private repository rather than to this
-mirror, so its `ownward.lock.json` records the private commit it is built
-against and that checkout's `package.json` version; the Desk packager enforces
-both against the checkout and does not read the repository field. Keep Desk's
-`minKernelVersion` unchanged unless Desk actually uses an API introduced in the
-new kernel; a compatible Kernel release does not require a Desk manifest change.
+- `repository` is the internal slug the private Ownward repository;
+- `commit` is the internal `master` commit Desk is built against;
+- `version` must equal that checkout's `package.json` version.
 
-Keep the denylist outside every Git repository and include local account names,
-hostnames, IP addresses, product codenames, customer identifiers, and other
-organization-specific terms that must never be published.
+The Desk packager enforces `commit` and `version` against the `OWNWARD_ROOT`
+checkout it builds from; it does not read `repository`, so that field is
+documentation for humans.
 
-## Bring public contributions back
+Keep Desk's `minKernelVersion` unchanged when it does not use a newly added
+Kernel capability. Raise it when the Desk manifest starts depending on the new
+release; a compatible Kernel release does not by itself require a Desk
+manifest change. Desk's manifest version is independent and may remain the
+same when only its lock target changes.
 
-Review and merge community pull requests in `whtis/ownward` first. Then
-cherry-pick the selected public commits into the private development branch.
-Never add the public remote to the production checkout as a shortcut, and never
-force-push public `main` from the private repository.
+The export gate must run `release-metadata.ts check` against the exact archived
+candidate and the public baseline before creating a public commit. Tag the
+published commit as `vX.Y.Z` after review. Do not copy private Git history,
+runtime data, credentials, local paths, or organization-specific text into the
+public snapshot. The author credit in the mobile Settings footer (`Tis Wu`) and
+the repository / homepage links are **not** organization-specific text: keep
+them verbatim (see `docs/app-guidelines.md`). Fixes made directly in the public
+checkout must be backported to the internal repository before the next export,
+otherwise the export overwrites them (2026-09: the Pages release channel in
+`OwnwardClient.kt` had drifted this way).

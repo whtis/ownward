@@ -1,5 +1,10 @@
 package ai.ownward.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.LocalContext
+import ai.ownward.app.App
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -285,7 +290,12 @@ fun AppDrawer(
                     Text("新对话")
                 }
                 Spacer(Modifier.weight(1f))
-                RoundIconButton(Icons.Outlined.Settings, "设置") { go(DrawerDest.Settings) }
+                // 设置入口红点：有发现但没装的新版本（App.updateAvailable，设置页维护）
+                val updateAvailable by (LocalContext.current.applicationContext as App).updateAvailable.collectAsState()
+                Box {
+                    RoundIconButton(Icons.Outlined.Settings, "设置") { go(DrawerDest.Settings) }
+                    if (updateAvailable) Box(Modifier.align(Alignment.TopEnd).size(9.dp).background(ownwardColors.Danger, CircleShape))
+                }
             }
         }
     }
