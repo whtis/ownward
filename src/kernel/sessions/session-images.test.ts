@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { SessionRepository } from "../../sessions/repository.ts";
@@ -51,6 +51,26 @@ describe("session-scoped Runner upload images", () => {
     const other = fresh(), bad = stageRunnerAttachment(other, PNG.toString("base64"));
     new RunnerCommandJournal(other).accept({ commandId: "mime-command", runId: "mime-run", kind: "start-run", sessionId: "mime-session", providerId: "claude", input: JSON.stringify({ text: "x", images: [{ mediaType: "image/svg+xml", blob: bad }] }) });
     expect(readSessionImage(other, "mime-session", bad.sha256)).toBeNull();
+  });
+
+  test("入站图片在 send 就被判死：类型伪装 / 超限 / 坏 base64 都不落 blob", async () => {
+    const root = fresh(), cwd = join(root, "repo"); mkdirSync(cwd);
+    new SessionRepository(root).reserve({ taskId: "task", providerId: "claude", cwd });
+    const service = new KernelSessionService(root, { mode: "runner" });
+    const rejected = [
+      { media_type: "image/svg+xml", data: PNG.toString("base64") },                       // 白名单外
+      { media_type: "image/png", data: Buffer.from("<script>x</script>").toString("base64") }, // 声明 png 实际不是（魔数）
+      { media_type: "image/png", data: "not base64!!" },                                   // 坏 base64
+      { media_type: "image/png", data: Buffer.alloc(6 * 1024 * 1024, 7).toString("base64") }, // 单张超限
+    ];
+    for (const image of rejected) {
+      await expect(service.send("task", { text: "look", images: [image] })).rejects.toMatchObject({ code: "SESSION_IMAGE_INVALID" });
+    }
+    // 拒掉的图一个 blob 都不许落盘——校验必须在 stageRunnerAttachment 之前
+    expect(existsSync(join(root, "runner", "attachments"))).toBe(false);
+    expect(new RunnerCommandJournal(root).readStrict()).toHaveLength(0);
+    await expect(service.send("task", { text: "too many", images: Array.from({ length: 7 }, () => ({ media_type: "image/png", data: PNG.toString("base64") })) }))
+      .rejects.toMatchObject({ code: "SESSION_IMAGE_INVALID" });
   });
 
   test("reuses a bounded journal index for misses and invalidates it after append", () => {

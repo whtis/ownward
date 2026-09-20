@@ -73,3 +73,21 @@ describe("cli catalog", () => {
     } finally { cfg.providers = prev; }
   });
 });
+
+describe("provider catalog enabled 标记", () => {
+  test("被 enabled=false 关掉的引擎要如实报出来——派发弹窗据此不再列它", async () => {
+    const previous = structuredClone(cfg.providers ?? {});
+    try {
+      // codebuddy 是显式 opt-in：不写 enabled:true 就算关（与 runner/entry.ts、canary 过滤同口径）
+      (cfg as any).providers = { "claude-code": { command: ["claude"] }, codex: { command: ["codex"], enabled: false }, codebuddy: { command: ["codebuddy"] } };
+      resetCliHelpCache();
+      const off = await providerCatalog();
+      expect(off.enabled).toEqual({ claude: true, codex: false, codebuddy: false });
+
+      (cfg as any).providers = { "claude-code": { enabled: false }, codex: {}, codebuddy: { enabled: true, command: ["codebuddy"] } };
+      resetCliHelpCache();
+      const on = await providerCatalog();
+      expect(on.enabled).toEqual({ claude: false, codex: true, codebuddy: true });
+    } finally { (cfg as any).providers = previous; resetCliHelpCache(); }
+  });
+});

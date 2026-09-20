@@ -578,6 +578,14 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   }
 
   // ---- 周期性职责（routine：草稿→人审→受控写入飞书文档） ----
+  // 工作台在前台时不重复推送：客户端聚焦时每 30s 报一次，notify 据此降级成 feed-only
+  if (req.method === "POST" && p === "/api/presence") {
+    const { markPresence, presenceState } = await import("./presence.ts");
+    const body = await req.json().catch(() => ({})) as { client?: string };
+    markPresence(String(body.client || "web").slice(0, 20));
+    return json({ ok: true, ...presenceState() });
+  }
+
   if (p === "/api/routines") {
     const { todayRoutines } = await import("./routines.ts");
     return json(todayRoutines());
@@ -658,6 +666,30 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     catch (e) { return json({ ok: false, msg: String(e instanceof Error ? e.message : e) }, 500); }
   }
 
+  // ---- Worktree 清理：bg 任务的隔离目录只增不减，这里给清单与批量清理（口径见 src/worktrees.ts）----
+  if (req.method === "GET" && p === "/api/worktrees") {
+    const { listWorktrees, worktreeRetentionDays } = await import("./worktrees.ts");
+    try {
+      const r = await listWorktrees({ withSize: url.searchParams.get("size") !== "0" });
+      return json({ ok: true, ...r, retentionDays: worktreeRetentionDays() });
+    } catch (e) { return json({ ok: false, msg: e instanceof Error ? e.message : String(e) }, 500); }
+  }
+  if (req.method === "POST" && p === "/api/worktrees/remove") {
+    const body = await req.json().catch(() => ({})) as { names?: string[]; states?: string[]; force?: boolean; keepBranch?: boolean };
+    const { cleanupWorktrees } = await import("./worktrees.ts");
+    const names = Array.isArray(body.names) ? body.names.filter((n) => typeof n === "string" && n) : [];
+    const VALID_STATES: ReadonlySet<string> = new Set(["busy", "dirty", "unmerged", "clean", "orphan"]);
+    const rawStates = Array.isArray(body.states) ? body.states : undefined;
+    if (rawStates?.some((s) => typeof s !== "string" || !VALID_STATES.has(s))) return json({ ok: false, msg: `states 只能是 ${[...VALID_STATES].join(" / ")}` }, 400);
+    const states = rawStates as import("./worktrees.ts").WorktreeState[] | undefined;
+    if (!names.length && !states?.length) return json({ ok: false, msg: "要么给 names，要么给 states" }, 400);
+    try {
+      const r = await cleanupWorktrees({ ...(names.length ? { names } : {}), ...(states?.length ? { states } : {}), force: !!body.force, keepBranch: !!body.keepBranch });
+      const done = r.results.filter((x) => x.ok).length, failed = r.results.filter((x) => !x.ok);
+      return json({ ok: true, ...r, msg: `清理 ${done} 个，释放 ${(r.freedKb / 1024 / 1024).toFixed(1)}G${failed.length ? `；${failed.length} 个跳过` : ""}` });
+    } catch (e) { return json({ ok: false, msg: e instanceof Error ? e.message : String(e) }, 400); }
+  }
+
   // ---- 项目启动器 ----
   // 收藏 + 近期任务/会话目录并集：收藏是手动维护的（开源化重置后常年一条），
   // 派发下拉的真实价值来自「你最近在哪些目录干过活」——从活动数据自动喂
@@ -735,7 +767,10 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
 
   // ---- 最近会话：ownward 原生引擎对话（人派的，排除 routine/evolve 代笔与 terminal/旁观） ----
   if (p === "/api/dev/recent") {
-    return json(await recentSessionsSnapshot(async()=>{
+    // archived=1 取已归档的那半边。切分放在 3s 快照之外：两个视图共用同一份计算，切来切去不重算。
+    const wantArchived = url.searchParams.get("archived") === "1";
+    const { isArchived } = await import("./archived-sessions.ts");
+    const all = await recentSessionsSnapshot(async()=>{
     // 读数全部来自派生索引：扫描只重投影签名变了的会话（没事发生时就是几十次 stat），不再把 100 个会话各重放一遍
     const { sessionIndex, sweepSessionIndex } = await import("./session-index.ts");
     await sweepSessionIndex({ maxAgeMs: 2_000, roots: cfg.architecture?.allowedRoots ?? [] });
@@ -761,8 +796,10 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
       .filter((s) => s.msgs > 0)   // 两边都没消息的空壳不算「有过对话」
       .sort((a, b) => b.lastAt - a.lastAt || (+new Date(b.startedAt) || 0) - (+new Date(a.startedAt) || 0) || (a.id < b.id ? 1 : -1));
     const seenDk = new Set<string>();
-    return list.filter((s) => !seenDk.has(s.dk) && seenDk.add(s.dk)).map(({ dk, ...s }) => s).slice(0, 100);
-    }));
+    return list.filter((s) => !seenDk.has(s.dk) && seenDk.add(s.dk)).map(({ dk, ...s }) => s);
+    });
+    // 归档判据带 lastAt：归档后又有新活动的会话自动回到「最近」，不需要用户去恢复
+    return json(all.filter((s) => isArchived(s.id, s.lastAt) === wantArchived).slice(0, 100));
   }
 
   // ---- 跨会话全文搜索：读派生索引，不打开任何会话 ----
@@ -786,6 +823,34 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   }
 
   // ---- 开发会话（引擎任务：追问/审批/中断/接管；CC 与 codex 统一走 agent-backend 分发层） ----
+  // ---- 会话附件上传（任意文件；图片仍走 images 那条 base64 image block 的路） ----
+  // 裸 body 上传（同 convert-heic）：文件名走 query，避免 multipart 解析与 base64 膨胀。
+  if (p === "/api/uploads") {
+    const U = await import("./session-uploads.ts");
+    const scope = url.searchParams.get("scope") || "";
+    try {
+      if (req.method === "GET") return json({ ok: true, files: U.listUploads(scope).map(({ name, bytes }) => ({ name, bytes })) });
+      if (req.method === "POST") {
+        const declared = Number(req.headers.get("content-length") || 0);
+        if (declared > U.UPLOAD_MAX_BYTES) return json({ ok: false, msg: `文件太大（${(declared / 1048576).toFixed(1)}MB）：单个文件上限 ${(U.UPLOAD_MAX_BYTES / 1048576).toFixed(0)}MB` }, 413);
+        const raw = await readLimitedBody(req, U.UPLOAD_MAX_BYTES);
+        if (!raw.ok) return json({ ok: false, msg: `文件超过 ${(U.UPLOAD_MAX_BYTES / 1048576).toFixed(0)}MB 上限` }, 413);
+        const staged = U.stageUpload(scope, url.searchParams.get("name") || "upload", raw.bin);
+        return json({ ok: true, name: staged.name, bytes: staged.bytes });
+      }
+      return json({ ok: false, msg: "method not allowed" }, 405);
+    } catch (e: any) {
+      const code = String(e?.code || "");
+      return json({ ok: false, msg: String(e?.message || e), ...(code ? { errorCode: code } : {}) }, code === "UPLOAD_SCOPE_INVALID" || code === "UPLOAD_NAME_INVALID" ? 400 : code.startsWith("UPLOAD_") ? 413 : 500);
+    }
+  }
+  if (req.method === "POST" && p === "/api/uploads/remove") {
+    const U = await import("./session-uploads.ts");
+    const body = await req.json() as { scope?: string; name?: string };
+    try { return json({ ok: U.removeUpload(body.scope || "", body.name || ""), msg: "已移除" }); }
+    catch (e: any) { return json({ ok: false, msg: String(e?.message || e) }, 400); }
+  }
+
   if (p === "/api/dev/messages") {
     const id = url.searchParams.get("id") || "";
     try {
@@ -837,8 +902,34 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     } catch (e) { return sessionError(e); }
   }
   if (req.method === "POST" && p === "/api/dev/send") {
-    const body = await req.json() as { id: string; text: string; images?: { media_type: string; data: string }[]; clientMutationId?: string };
-    if (!body.text?.trim() && !body.images?.length) return json({ ok: false, msg: "内容为空" }, 400);
+    // 带图请求先按上限读，别等 JSON.parse 把几十 MB 拉进内存（同 /api/chat/send）
+    const { MAX_IMAGE_BODY_BYTES } = await import("./image-input.ts");
+    const declared = Number(req.headers.get("content-length") || 0);
+    if (declared > MAX_IMAGE_BODY_BYTES) return json({ ok: false, msg: `请求体太大（${(declared / 1048576).toFixed(1)}MB）：少发几张图或先压缩` }, 413);
+    const raw = await readLimitedBody(req, MAX_IMAGE_BODY_BYTES);
+    if (!raw.ok) return json({ ok: false, msg: "请求体太大：少发几张图或先压缩" }, 413);
+    let body: { id: string; text: string; images?: { media_type: string; data: string }[]; clientMutationId?: string; uploadScope?: string };
+    try { body = JSON.parse(raw.bin.toString("utf8")); }
+    catch { return json({ ok: false, msg: "请求 JSON 不合法" }, 400); }
+    // 附件：文件不能进 stream-json，只能落盘后把绝对路径写进正文，并确保 agent 有权读那个目录。
+    // 目录按 taskId 分且只授权这一层——同一会话后续再传就落进同一个已授权目录，不必反复发 add-dir。
+    let uploadTrailerText = "";
+    if (body.uploadScope) {
+      const U = await import("./session-uploads.ts");
+      try {
+        // 先把草稿目录里的文件搬进 uploads/<taskId>/ 再拼正文——正文写的必须是落定后的最终路径。
+        // 每条消息一个新草稿 scope，所以这里只会带上「这一条」新加的附件，不会把上一条的重列一遍。
+        const { scope, files } = U.mergeUploadScope(body.uploadScope, body.id);
+        if (files.length) {
+          uploadTrailerText = U.uploadTrailer(files);
+          const dir = U.uploadScopeDir(scope);
+          const { SessionRepository } = await import("./sessions/repository.ts");
+          const granted = new Set(new SessionRepository(DATA).getByTaskId(body.id)?.extraDirs ?? []);
+          if (!granted.has(dir)) await (await sessionService(body.id)).service.addDirectory(body.id, dir);
+        }
+      } catch (e) { return sessionError(e); }
+    }
+    if (!body.text?.trim() && !body.images?.length && !uploadTrailerText) return json({ ok: false, msg: "内容为空" }, 400);
     // 斜杠命令：只拦 ownward 语义的 /new（/clear 同义）= 同任务丢上下文重开（逃生门）。
     // 其余 / 开头全部透传——实测 stream-json 下 CC 自己解释斜杠命令（含用户自定义命令）：
     // 能执行的直接执行（如 /compact，有 status 帧透出过程），不可用的回 synthetic 说明文本（已可见）
@@ -850,7 +941,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
       } catch (e) { return sessionError(e); }
     }
     try {
-      const r = await (await sessionService(body.id)).service.send(body.id, { text: body.text || "", images: body.images || [], ...(body.clientMutationId ? { clientMutationId: body.clientMutationId } : {}) });
+      const r = await (await sessionService(body.id)).service.send(body.id, { text: (body.text || "") + uploadTrailerText, images: body.images || [], ...(body.clientMutationId ? { clientMutationId: body.clientMutationId } : {}) });
       return json({ ok: true, queued: r?.queued ?? false, msg: r?.queued ? "已加入队列，本轮结束自动发送" : "已发送", ...(r?.commandId ? { commandId: r.commandId, runId: r.runId } : {}) });
     } catch (e) { return sessionError(e); }
   }
@@ -978,6 +1069,20 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     return json({ ok: true, msg: "已取消置顶" });
   }
 
+  // ---- 会话归档（最近会话「归档」：从列表隐藏，不删任何东西，有新活动自动回来） ----
+  if (p === "/api/sessions/archived") {
+    const { archivedSessions } = await import("./archived-sessions.ts");
+    return json({ ok: true, archived: archivedSessions() });
+  }
+  if (req.method === "POST" && p === "/api/sessions/archive") {
+    const body = await req.json() as { id?: string; restore?: boolean };
+    if (!body.id || typeof body.id !== "string") return json({ ok: false, msg: "缺会话 id" }, 400);
+    const { archiveSession, restoreSession } = await import("./archived-sessions.ts");
+    if (body.restore) { restoreSession(body.id); return json({ ok: true, msg: "已恢复到最近会话" }); }
+    archiveSession(body.id);
+    return json({ ok: true, msg: "已归档（会话保留，有新活动会自动回来）" });
+  }
+
   // ---- 项目隐藏（任务列「删除项目」：隐藏组，不删会话，有新活动自动回来） ----
   if (p === "/api/projects/dismissed") {
     const { dismissedProjects } = await import("./dismissed-projects.ts");
@@ -1006,8 +1111,21 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   }
   if (p === "/api/actions") return json(listActions());
   if (req.method === "POST" && p === "/api/actions/state") {
-    const body = await req.json() as { id: string; state: "snoozed" | "dismissed" | "resolved"; snoozeMin?: number };
-    return json({ ok: setActionState(body.id, body.state, body.snoozeMin || 120), msg: { snoozed: "稍后再说", dismissed: "已忽略", resolved: "已完成" }[body.state] });
+    // ids = 今天页多选批处理（一次写盘）；id = 单卡按钮。两者只认其一，ids 优先。
+    const body = await req.json() as { id?: string; ids?: string[]; state: "snoozed" | "dismissed" | "resolved"; snoozeMin?: number };
+    if (!["snoozed", "dismissed", "resolved"].includes(body.state)) return json({ ok: false, msg: "未知状态" }, 400);
+    const label = { snoozed: "稍后再说", dismissed: "已忽略", resolved: "已完成" }[body.state];
+    if (Array.isArray(body.ids)) {
+      const ids = body.ids.filter((x): x is string => typeof x === "string" && !!x);
+      if (!ids.length) return json({ ok: false, msg: "没有选中任何行动项" }, 400);
+      if (ids.length > 500) return json({ ok: false, msg: "一次最多处理 500 条" }, 400);
+      const { setActionStates } = await import("./actions.ts");
+      const n = setActionStates(ids, body.state, body.snoozeMin || 120);
+      // 勾选后被别处收掉的按认不到处理：告诉用户实际改了几条，不假装全成功
+      return json({ ok: n > 0, changed: n, msg: n === ids.length ? `${label} ${n} 条` : n ? `${label} ${n} 条（另 ${ids.length - n} 条已不在待办中）` : "选中的行动项都已不在待办中" });
+    }
+    if (!body.id) return json({ ok: false, msg: "缺 id" }, 400);
+    return json({ ok: setActionState(body.id, body.state, body.snoozeMin || 120), msg: label });
   }
 
   // ---- Role（角色：vault <scope>/roles/ 里的持久化一等对象） ----

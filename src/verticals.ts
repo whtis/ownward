@@ -169,12 +169,32 @@ export function scopedTasks(roots: string[], capabilities: readonly string[]=[])
   return Object.freeze({
     async startWork(input) {
       input={...input,...(["model","effort","permission"] as const).reduce((out,key)=>({...out,[key]:typeof input[key]==="string"&&input[key]!.trim()===""?undefined:typeof input[key]==="string"?input[key]!.trim():input[key]}),{})};
-      const keys=["dir","task","bg","codex","provider","worktree","model","effort","permission","extraDirs","images"], imageOk=(image:unknown)=>!!image&&typeof image==="object"&&!Array.isArray(image)&&Object.keys(image).every((key)=>["media_type","data"].includes(key))&&typeof (image as any).media_type==="string"&&typeof (image as any).data==="string";
+      const keys=["dir","task","bg","codex","provider","worktree","model","effort","permission","extraDirs","images","uploadScope"], imageOk=(image:unknown)=>!!image&&typeof image==="object"&&!Array.isArray(image)&&Object.keys(image).every((key)=>["media_type","data"].includes(key))&&typeof (image as any).media_type==="string"&&typeof (image as any).data==="string";
       if (!input || typeof input!=="object"||Object.keys(input).some((k)=>!keys.includes(k))||typeof input.dir !== "string" || typeof input.task !== "string" || !input.task.trim()||input.task.length>100_000||["bg","codex","worktree"].some((key)=>(input as any)[key]!==undefined&&typeof (input as any)[key]!=="boolean")||["model","effort"].some((key)=>(input as any)[key]!==undefined&&typeof (input as any)[key]!=="string")||(input.images!==undefined&&(!Array.isArray(input.images)||!input.images.every(imageOk)))) throw new Error("VERTICAL_TASK_INPUT_INVALID");
       if (input.permission !== undefined && !["safe","bypass"].includes(input.permission)) throw new Error("VERTICAL_TASK_INPUT_INVALID");if(input.provider!==undefined&&!["claude","codex","codebuddy"].includes(input.provider))throw new Error("VERTICAL_TASK_INPUT_INVALID");if(input.permission==="bypass"&&(!capabilities.includes("tasks:full-access")||cfg.architecture?.allowFullAccess!==true))throw Object.assign(new Error("SESSION_ACCESS_NOT_GRANTED: Vertical capability 与 architecture.allowFullAccess 必须同时授权"),{code:"SESSION_ACCESS_NOT_GRANTED"}); if(input.extraDirs!==undefined&&(!Array.isArray(input.extraDirs)||input.extraDirs.some((x)=>typeof x!=="string")))throw new Error("VERTICAL_TASK_INPUT_INVALID");
+      if (input.uploadScope !== undefined && (typeof input.uploadScope !== "string" || !input.uploadScope)) throw new Error("VERTICAL_TASK_INPUT_INVALID");
       if (input.bg === false && input.extraDirs?.length) throw new Error("VERTICAL_TASK_INPUT_INVALID: terminal 模式不支持附加目录");
-      const dir = grant(input.dir), extraDirs = canonicalTaskExtraDirs(input.extraDirs, dir, grant);
-      return startWork(dir, input.task, { bg: input.bg, codex: input.codex, provider: input.provider, worktree: input.worktree, model: input.model, effort: input.effort, permission: input.permission??"safe", extraDirs, images: input.images });
+      const dir = grant(input.dir);
+      let extraDirs = canonicalTaskExtraDirs(input.extraDirs, dir, grant), task = input.task;
+      // 附件：文件进不了 stream-json，只能落盘 + 把绝对路径写进任务正文。正文在服务端拼，
+      // 客户端只给 scope——路径由服务端从 scope 推，客户端伪造不了别的目录。
+      if (input.uploadScope) {
+        const U = await import("./session-uploads.ts");
+        // 先落定目录再拼正文：反过来的话正文里会留下一串改名后失效的路径。
+        // 派发时任务还没 id，只能把 draft-<uuid> 就地改成 sent-<uuid>（换个不被 sweep 收的前缀）。
+        const { scope, files } = U.sealUploadScope(input.uploadScope);
+        if (files.length) {
+          task += U.uploadTrailer(files);
+          // terminal 模式不过 add-dir（agent 就在用户终端里跑，本来就能读）；后台模式必须授权，
+          // 否则 agent 拿到路径却读不动，报一句「没权限」比不给路径更让人困惑。
+          if (input.bg !== false) {
+            const uploadDir = U.uploadScopeDir(scope);
+            try { extraDirs = canonicalTaskExtraDirs([...(extraDirs ?? []), uploadDir], dir, grant); }
+            catch { throw new Error("VERTICAL_TASK_INPUT_INVALID: 附件目录不在 architecture.allowedRoots 内，agent 读不到——把 Ownward 的 data 目录纳入授权根再试"); }
+          }
+        }
+      }
+      return startWork(dir, task, { bg: input.bg, codex: input.codex, provider: input.provider, worktree: input.worktree, model: input.model, effort: input.effort, permission: input.permission??"safe", extraDirs, images: input.images });
     },
     list: () => structuredClone(loadTasks().filter((task) => {
       try { grant(task.cwd); return true; } catch { return false; }

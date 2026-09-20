@@ -12,7 +12,7 @@ import { CrashGuard } from "./crash-guard.ts";
 import { dispatchDeployHelper } from "./deploy-helper.ts";
 import { startServer } from "./server.ts";
 import { runTriage } from "./triage.ts";
-import { DATA, ROOT, cfg, ensureDir, log, rotateLogFile, run, updateState } from "./util.ts";
+import { DATA, ROOT, cfg, ensureDir, log, rotateLogFile, run, updateState, workbenchUrl } from "./util.ts";
 import { ensureCompatibleSchema } from "./storage/schema.ts";
 import { recoverClaims } from "./spool.ts";
 import { reconcileLegacySessions } from "./sessions/repository.ts";
@@ -120,9 +120,13 @@ async function verifyEvolve(t: { id: string; cwd: string }) {
   });
   await notify(
     pass
-      ? `🧬 Ownward 演进就绪 [${t.id}]\n${stat}\nverify PASS → 上线: own apply ${t.id}（或使用任务卡按钮）`
-      : `🧬❌ 演进验证失败 [${t.id}]\n${(r.stdout.match(/❌.*/g) || []).slice(0, 3).join("\n")}`,
-    { source: "dispatch" },
+      ? `🧬 Ownward 演进就绪 [${t.id}]`
+      : `🧬❌ 演进验证失败 [${t.id}]`,
+    { source: "dispatch", level: "act", key: `evolve:${t.id}`,
+      context: pass
+        ? [stat.split("\n").pop()?.trim() || "verify PASS", "上线：own apply 或任务卡按钮"]
+        : [...(r.stdout.match(/❌.*/g) || []).slice(0, 3), "要决定重试还是放弃"],
+      actions: [{ text: "打开任务", url: workbenchUrl(`/?tab=tasks&task=${t.id}`), primary: true }] },
   );
 }
 
@@ -213,7 +217,8 @@ async function main() {
   if (sessionMode === "off") void import("./session-service.ts").then(async m=>{if(await m.sweepLegacyApprovalsIfPresent())setInterval(()=>m.sweepLegacyApprovalsIfPresent(),60_000);}).catch(e=>log(`legacy approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
   // Runner 默认写链的审批投影 + 6h 兜底超时（与上面的 legacy sweep 对称：那条只覆盖 mode=off 的存量会话）。
   // 没有它，Runner 审批只活在会话视图里：人不在屏幕前不知道任务卡住，且永不超时收敛。
-  if (sessionMode !== "off") void import("./kernel/sessions/approval-sweep.ts").then(m=>{import("./kernel/sessions/service.ts").then(s=>s.onRunnerApprovalRequested(m.kickRunnerApprovalSweep)); setInterval(()=>void m.sweepRunnerApprovals().catch(e=>log(`approval sweep: ${e instanceof Error?e.name:"unknown"}`)),60_000);}).catch(e=>log(`approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
+  // 60s 只是兜底节奏：consume 拉到新审批即时 kick 一轮，命中「总是批准」规则亚秒放行，不等人先点。
+  if (sessionMode !== "off") void import("./kernel/sessions/approval-sweep.ts").then(async m=>{setInterval(()=>void m.sweepRunnerApprovals().catch(e=>log(`approval sweep: ${e instanceof Error?e.name:"unknown"}`)),60_000);(await import("./kernel/sessions/service.ts")).onRunnerApprovalRequested(root=>{if(root===DATA)m.kickRunnerApprovalSweep(root);});}).catch(e=>log(`approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
   // 事件 journal 归档：只增不减的话（实测 ~1000 条/天、每月 +12MB）冷启动解析和内存都会一路涨。
   // 启动时先做一次，之后每天一次；旧记录进 runner/archive/sessions/，一条不删，旧会话照常回读。
   if (sessionMode !== "off") {
@@ -222,6 +227,13 @@ async function main() {
       if (r.archived) log(`event archive: 归档 ${r.archived} 条 / ${r.sessions.length} 个会话，热 journal 余 ${r.kept} 条`);
     }).catch(e=>log(`event archive: ${e instanceof Error?e.message:"unknown"}`));
     setTimeout(archive, 30_000); setInterval(archive, 86_400_000);
+    // 会话附件：派发弹窗里传了文件又没派发出去的草稿目录没人认领，跟着这班车每天收一次。
+    // 已提升成 taskId 的目录不动——会话还活着，agent 随时可能回头读那些文件。
+    const sweepUp = () => void import("./session-uploads.ts").then(m=>{
+      const n = m.sweepUploads();
+      if (n) log(`upload sweep: 清理 ${n} 个过期草稿附件目录`);
+    }).catch(e=>log(`upload sweep: ${e instanceof Error?e.message:"unknown"}`));
+    setTimeout(sweepUp, 45_000); setInterval(sweepUp, 86_400_000);
     // bridge 台账剪枝：跟上面同一个毛病的另一半。events 有归档兜着，bridge 此前完全没人管，
     // 而它比 events 更疼——advance() 在热路径上整份重写，文件多大每次推进就多贵。
     const prune = () => void import("./kernel/sessions/bridge-store.ts").then(m=>{
@@ -229,6 +241,18 @@ async function main() {
       if (r.pruned) log(`bridge prune: 剪掉 ${r.pruned} 条已终结命令，余 ${r.kept} 条`);
     }).catch(e=>log(`bridge prune: ${e instanceof Error?e.message:"unknown"}`));
     setTimeout(prune, 45_000); setInterval(prune, 86_400_000);
+  }
+
+  // Worktree 定时回收：bg 编码任务的隔离目录只增不减，实测一个月积到 58 个 / 6.3G。
+  // 默认关（dispatch.worktreeRetentionDays=0）；开了也只删「干净且已落地、N 天没动」的——
+  // 有未提交改动或还有提交没合进主检出/远端的一律留着并计数进日志，删目录不该是顺手丢掉没验收的活。
+  {
+    const sweep = () => void import("./worktrees.ts").then(async (m) => {
+      const r = await m.sweepWorktrees();
+      const done = r.results.filter((x) => x.ok).length, left = Object.entries(r.skipped).map(([s, n]) => `${s} ${n}`).join("、");
+      if (done || r.results.length) log(`worktree sweep: 清理 ${done} 个，释放 ${(r.freedKb / 1024 / 1024).toFixed(1)}G${left ? `；未动：${left}` : ""}`);
+    }).catch((e) => log(`worktree sweep: ${e instanceof Error ? e.message : "unknown"}`));
+    setTimeout(sweep, 120_000); setInterval(sweep, 86_400_000);
   }
 
   // 编码任务看护：bg 任务退出 → 通知 + 自动收割；演进任务额外跑验证门；routine 任务回写状态
@@ -250,10 +274,22 @@ async function main() {
         await notify(
           t.exitCode === 0 ? `✅ 文档写入完成 [${t.task.split("\n")[0].slice(0, 40)}]`
             : `❌ 文档写入失败（可能是冲突/定位失败），任务页看详情后重试`,
-          { source: "dispatch" });
+          t.exitCode === 0
+            ? { source: "dispatch", level: "fyi", key: `routine-write:${t.id}` }
+            : { source: "dispatch", level: "act", key: `routine-write:${t.id}`,
+                context: [`任务：${t.task.split("\n")[0].slice(0, 60)}`, "写入没落地，草稿还在，处理完可以重派"],
+                actions: [{ text: "打开任务", url: workbenchUrl(`/?tab=tasks&task=${t.id}`), primary: true }] });
         continue; // routine 任务不收割、不开失败 Action（状态机自己管）
       }
-      await notify(`${icon} ${t.kind === "evolve" ? "演进" : "编码"}任务结束 [${t.project}] ${t.task.slice(0, 50)}\n退出码 ${t.exitCode}${t.branch ? `，分支 ${t.branch}` : ""}`, { source: "dispatch" });
+      // 成功只报 feed/横幅：多轮接力会话每轮结束都会 reap 一次，同一个任务曾经一周推了 54 条飞书。
+      // 失败才值得把人从飞书叫回来，且必须带上「哪个项目、为什么失败、从哪儿接着处理」。
+      const label = `${icon} ${t.kind === "evolve" ? "演进" : "编码"}任务结束 [${t.project}] ${t.task.slice(0, 50)}\n退出码 ${t.exitCode}${t.branch ? `，分支 ${t.branch}` : ""}`;
+      await notify(label, t.exitCode === 0
+        ? { source: "dispatch", level: "fyi", key: `task-end:${t.id}` }
+        : { source: "dispatch", level: "act", key: `task-fail:${t.id}`,
+            context: [`项目：${t.project}`, `任务：${t.task.split("\n")[0].slice(0, 60)}`,
+              `退出码 ${t.exitCode}${t.branch ? `，分支 ${t.branch}` : ""}`],
+            actions: [{ text: "打开任务", url: workbenchUrl(`/?tab=tasks&task=${t.id}`), primary: true }] });
       if (t.kind === "evolve" && t.exitCode === 0) {
         verifyEvolve(t).catch((e) => log(`verify evolve [${t.id}] failed: ${e}`));
       }

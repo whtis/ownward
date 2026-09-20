@@ -29,9 +29,11 @@ export async function fetchDocContent(docUrl: string): Promise<string> {
 /** 周标题 → 日期区间。兼容 "08.31-09.04" / "0831-0904" / "0511 - 0515"；
  *  跨年的周（12.29-01.02）用 year 和 year±1 各试一遍，谁能落到窗口里算谁。 */
 export function parseWeekRange(heading: string, year: number): { start: string; end: string }[] {
-  const m = heading.replace(/^#+\s*/, "").match(/^(\d{2})\.?(\d{2})\s*[-–~]\s*(\d{2})\.?(\d{2})\b/);
+  // 带点的写法月份可以是一位（项目周报写 "9.07-9.11"）；不带点的必须四位，否则 "907" 没法切
+  const h = heading.replace(/^#+\s*/, "");
+  const m = h.match(/^(\d{1,2})\.(\d{1,2})\s*[-–~]\s*(\d{1,2})\.(\d{1,2})\b/) || h.match(/^(\d{2})(\d{2})\s*[-–~]\s*(\d{2})(\d{2})\b/);
   if (!m) return [];
-  const [, sm, sd, em, ed] = m;
+  const [sm, sd, em, ed] = m.slice(1, 5).map((x) => x.padStart(2, "0"));
   const out: { start: string; end: string }[] = [];
   for (const y of [year, year - 1, year + 1]) {
     const start = `${y}-${sm}-${sd}`;
@@ -202,5 +204,65 @@ export async function meetingNotesMaterial(label: string, docUrl: string, days: 
     log(`meeting notes fetch failed [${label}]: ${msg}`);
     opts.warnings?.push(`${label}：取材失败，无可用归档，请补充材料`);
     return `===== ${label}记录 =====\n(拉取失败：${msg.slice(0, 120)}；本次只能依据工作日志)`;
+  }
+}
+
+export interface OwnedSection { week: string; section: string; text: string }
+
+/** 分节式文档（项目周报：# 周 → ## 项目 → ### 成员 / 进展 / 复盘…）没有「行=人」的表，
+ *  按「## 分节的成员行点到了我」认领整节。只看成员行——正文里顺口 @ 到我的别人的分节不算我的。 */
+export function extractOwnedSections(content: string, days: string[], people: string[], perSection = 3_000): OwnedSection[] {
+  if (!days.length || !people.length) return [];
+  const sorted = [...days].sort();
+  const [winStart, winEnd] = [sorted[0], sorted[sorted.length - 1]];
+  const year = Number(winStart.slice(0, 4));
+  const wants = people.map((p) => p.trim().replace(/\s+/g, " ")).filter(Boolean);
+  const out: OwnedSection[] = [];
+  for (const sec of content.split(/^(?=# )/m)) {
+    const heading = sec.split("\n", 1)[0];
+    if (!parseWeekRange(heading, year).some((r) => r.start <= winEnd && r.end >= winStart)) continue;
+    const week = heading.replace(/^#+\s*/, "").trim();
+    for (const sub of sec.split(/^(?=## )/m)) {
+      if (!sub.startsWith("## ")) continue;
+      const memberLine = sub.split("\n").find((l) => /^#{0,4}\s*(?:成员|负责人|人员)[:：]/.test(cellToText(l)));
+      if (!memberLine) continue;
+      const names = [...memberLine.matchAll(/\buser-name="([^"]*)"/g)].map((x) => x[1]);
+      if (!names.length) names.push(...cellToText(memberLine).replace(/^.*?[:：]/, "").split(/[,，、]+/));
+      const mine = names.some((n) => { const norm = n.trim().replace(/\s+/g, " "); return wants.some((w) => norm === w || norm.split(/[\s·|]+/).includes(w)); });
+      if (!mine) continue;
+      const [first, ...rest] = sub.split("\n");
+      // 看板截图的 alt 是飞书自动生成的几百字图片描述，对写作没用还挤占配额
+      const text = cellToText(rest.join("\n").replace(/!\[[^\]]*\]\([^)]*\)/g, "[图]").replace(/^#{3,}\s*/gm, "\n"));
+      if (text) out.push({ week, section: cellToText(first.replace(/^##\s*/, "")).trim(), text: text.length > perSection ? `${text.slice(0, perSection)}\n[本节已截断]` : text });
+    }
+  }
+  return out;
+}
+
+/** 「我之前在这份文档里亲手写过的内容」：日报/周报生成前先回看往期——那是经我审过或手写的定稿，
+ *  用来对账上期计划、补工作日志收不到的非编码工作、对齐口径。表格式文档抽我的行，分节式文档认领我的分节。
+ *  只读不归档（归档是月度复盘的显式动作，日报每天刷会让待审的月报草稿天天报「素材已变」）；
+ *  拉不到就返回空串照常生成，不能因为飞书抖一下就没了日报。 */
+export async function priorWritingMaterial(docUrl: string, days: string[], people: string[], cap = 8_000, opts: {
+  fetch?: typeof fetchDocContent; warnings?: string[];
+} = {}): Promise<string> {
+  if (!docUrl || !days.length || !people.length) return "";
+  try {
+    const content = await (opts.fetch || fetchDocContent)(docUrl);
+    const rows = extractMeetingRows(content, days, people);
+    // 最新一期排最前：cap 截断时丢的是最旧的，对账要用的上一期永远留得住
+    const blocks = rows.length
+      ? rows.map((r) => renderMeetingRows("", [{ ...r, partialWeek: false }]))   // 「跨月周」提示是月度复盘的口径，这里的窗口本来就是按天切的
+      : extractOwnedSections(content, days, people).map((s) => `----- ${s.week} · ${s.section} -----\n${s.text}`);
+    if (!blocks.length) return "";
+    const year = Number([...days].sort()[0].slice(0, 4));
+    const weekStart = (b: string) => parseWeekRange(b.match(/^-----\s*(.+?)\s*(?:·|-----)/)?.[1] || "", year)[0]?.start || "";
+    const text = blocks.map((b, i) => ({ b, i, k: weekStart(b) })).sort((x, y) => y.k.localeCompare(x.k) || x.i - y.i).map((x) => x.b).join("\n\n");
+    return `===== 我之前亲手写的（${days[0]} ~ ${days.at(-1)}，来自本文档）=====\n${text.slice(0, cap)}${text.length > cap ? "\n[更早的往期内容已省略]" : ""}`;
+  } catch (e) {
+    const msg = String(e instanceof Error ? e.message : e);
+    log(`prior writing fetch failed: ${msg}`);
+    opts.warnings?.push("往期内容没拉到，本次草稿只依据工作日志，上期计划未对账");
+    return "";
   }
 }

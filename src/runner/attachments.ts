@@ -12,7 +12,7 @@ const pattern = /^attachments\/([a-f0-9]{64})\.blob$/;
 /** Kernel 在 submit 前预置大附件；IPC 只携带短 ref，不放宽 1MiB frame。 */
 export function stageRunnerAttachment(dataRoot: string, base64: string): RunnerAttachmentRef {
   if (typeof base64 !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw Object.assign(new Error("附件不是合法 base64"), { code: "RUNNER_INPUT_INVALID" });
-  const bytes = Buffer.byteLength(base64); if (bytes > RUNNER_MAX_BLOB_BYTES) throw Object.assign(new Error("附件超过 blob 上限"), { code: "RUNNER_INPUT_TOO_LARGE" });
+  const bytes = Buffer.byteLength(base64); if (bytes > RUNNER_MAX_BLOB_BYTES) throw Object.assign(new Error(`附件超过 blob 上限（base64 ${(RUNNER_MAX_BLOB_BYTES / 1048576).toFixed(0)}MB），请压到 5MB 以内再发`), { code: "RUNNER_INPUT_TOO_LARGE" });
   return withRunnerFileLock(join(dataRoot, "runner", ".blob-maintenance"), () => {
   const sha256 = hash(base64), runner = join(dataRoot, "runner"), dir = join(runner, "attachments"), file = join(dir, `${sha256}.blob`);
   mkdirSync(dir, { recursive: true, mode: 0o700 }); chmodSync(runner, 0o700); chmodSync(dir, 0o700);

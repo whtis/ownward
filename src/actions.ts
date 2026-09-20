@@ -84,16 +84,33 @@ export function resolveActionExact(id: string, resolution: string): boolean {
   return true;
 }
 
-export function setActionState(id: string, state: "snoozed" | "dismissed" | "resolved", snoozeMin = 120): boolean {
-  const list = load();
-  const a = list.find((x) => x.id === id);
-  if (!a) return false;
+/** 纯改字段，不落盘——单条与批量共用，批量只在末尾 save 一次。 */
+function applyActionState(a: Action, state: "snoozed" | "dismissed" | "resolved", snoozeMin: number): void {
   a.state = state;
   a.updatedAt = new Date().toISOString();
   if (state === "snoozed") a.snoozedUntil = new Date(Date.now() + snoozeMin * 60_000).toISOString();
   if (state === "resolved") a.resolution = "manual";
+}
+
+export function setActionState(id: string, state: "snoozed" | "dismissed" | "resolved", snoozeMin = 120): boolean {
+  const list = load();
+  const a = list.find((x) => x.id === id);
+  if (!a) return false;
+  applyActionState(a, state, snoozeMin);
   save();
   return true;
+}
+
+/** 今天页多选批处理：一次 save 收敛 N 条，避免 N 次全量写盘。
+ *  返回真正改到的条数——列表每 60s 刷新，用户勾选后某条可能已被别处收掉，认不到的静默跳过。 */
+export function setActionStates(ids: readonly string[], state: "snoozed" | "dismissed" | "resolved", snoozeMin = 120): number {
+  const wanted = new Set(ids);
+  if (!wanted.size) return 0;
+  const list = load();
+  let n = 0;
+  for (const a of list) { if (!wanted.has(a.id)) continue; applyActionState(a, state, snoozeMin); n++; }
+  if (n) { save(); log(`action ${state} (batch): ×${n}`); }
+  return n;
 }
 
 /** 到期的 snoozed 回到 open；清理 7 天前的终态记录 */

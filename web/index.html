@@ -26,7 +26,7 @@
       d.dataset.wpIntensity = ["subtle", "normal", "vivid"].includes(b.intensity) ? b.intensity : "normal";
       d.style.setProperty("--wp-image", b.wp);
     }
-    if (["pixel", "win98"].includes(b.look)) d.dataset.look = b.look;
+    if (["pixel", "win98", "ink"].includes(b.look)) d.dataset.look = b.look;
     if (hex.test(b.themeColor || "")) document.getElementById("meta-theme")?.setAttribute("content", b.themeColor);
   } catch (e) { /* 缓存坏了走原生 */ }
 })();
@@ -136,13 +136,16 @@
       <button class="icon-btn extra-dir-add" id="w-extra-browse" title="添加附加目录" aria-label="添加附加目录" type="button">＋</button>
     </div>
     <label>任务描述</label>
-    <textarea id="w-task" placeholder="修复登录页闪退…（可粘贴/拖入图片，仅后台任务）"></textarea>
+    <textarea id="w-task" placeholder="修复登录页闪退…（可粘贴/拖入图片或文件，仅后台任务）"></textarea>
     <div class="composer-imgs" id="w-imgs" style="padding:6px 0 0"></div>
+    <div class="composer-files" id="w-files"></div>
     <div class="row" style="margin-top:6px">
       <button class="icon-btn" id="w-attach" title="添加图片" type="button">🖼</button>
-      <span style="font-size:11px;color:var(--text-tertiary)">图片随任务发给 agent（terminal 模式不支持）</span>
+      <button class="icon-btn" id="w-attach-file" title="添加文件（任意类型）" type="button">📎</button>
+      <span style="font-size:11px;color:var(--text-tertiary)">图片直接进消息；文件落盘后把路径交给 agent（terminal 模式不授权目录）</span>
     </div>
-    <input type="file" id="w-file" accept="image/*" multiple hidden>
+    <input type="file" id="w-file" accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif" multiple hidden>
+    <input type="file" id="w-file-any" multiple hidden>
     <div class="row">
       <label style="margin:0;display:flex;gap:5px;align-items:center"><input type="checkbox" id="w-bg" checked> 后台运行</label>
       <label style="margin:0;display:flex;gap:5px;align-items:center">引擎 <select id="w-engine" style="width:110px"><option value="claude">claude</option><option value="codex">codex</option><option value="codebuddy">codebuddy</option></select></label>
@@ -282,9 +285,11 @@
 
 <script src="/app.js"></script>
 <script src="/image-viewer.js"></script>
+<script src="/composer-images.js"></script>
 <script src="/skin.js"></script>
 <script src="/today.js"></script>
 <script src="/feed.js"></script>
+<script src="/composer-files.js"></script>
 <script src="/tasks.js"></script>
 <script src="/chat.js"></script>
 <script src="/lark.js"></script>

@@ -17,9 +17,12 @@ import { assertProviderOptions } from "../../session-options.ts";
 export const PROVIDER_CAPABILITIES: Readonly<Record<SessionProviderId, ReadonlySet<SessionCapability>>> = {
   claude: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
   codex: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
-  // CodeBuddy 走 Claude Code 协议克隆：能力面近 claude，但 CLI 无 --permission-prompt-tool（审批桥）→ 不声明 approval；
+  // CodeBuddy 走 Claude Code 协议克隆：审批桥是 stream-json 上的 control_request/can_use_tool ↔ control_response，
+  // 与 --permission-prompt-tool 旗标无关（那只是真 CC 的启动开关；克隆 CLI 不认，spawn 已按 probe 降级成只给 --permission-mode）。
+  // 2026-09-16 实测 codebuddy 照发 can_use_tool，漏声明 approval 会让 respondApproval 抛 PROVIDER_CAPABILITY_UNSUPPORTED、
+  // 审批卡永远答不了、turn 挂到 runner 重启才收敛成 unknown-outcome → 必须声明 approval；
   // transcript 是私有格式，无 history 能力（adapter readHistory 会拒）
-  codebuddy: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
+  codebuddy: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
 };
 
 export class KernelSessionPolicyError extends Error {

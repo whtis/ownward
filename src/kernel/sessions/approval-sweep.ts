@@ -88,7 +88,7 @@ export function kickRunnerApprovalSweep(dataRoot = DATA): void {
   kickTimer = setTimeout(() => { kickTimer = null; void sweepRunnerApprovals(dataRoot).catch((e) => log(`approval sweep (kick): ${e instanceof Error ? e.name : "unknown"}`)); }, 100);
 }
 
-/** daemon 每 60s 调一次。所有副作用逐项 try/catch：单个会话出错不拖垮整轮。 */
+/** daemon 每 60s 调一次，另由 kickRunnerApprovalSweep 即时触发。所有副作用逐项 try/catch：单个会话出错不拖垮整轮。 */
 export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
   if (sweeping) { sweepAgain = true; return; } sweeping = true;
   try {
@@ -159,7 +159,7 @@ export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
             ref: { task_id: taskId },
           } as any);
           const { notify } = await import("../../notify.ts");
-          void notify(`🔐 任务 [${taskId}] ${meta.question ? "提问" : "等待审批"}\n${meta.brief}`, { source: "dispatch", noLark: true }).catch(() => {});
+          void notify(`🔐 任务 [${taskId}] ${meta.question ? "提问" : "等待审批"}\n${meta.brief}`, { source: "dispatch", level: "fyi", key: `approval:${taskId}:${p.requestId}` }).catch(() => {});
           void import("../../lark-cards.ts").then((m) =>
             meta.question ? m.sendQuestionCard(taskId, p.requestId, meta.questionText || meta.brief, meta.options) : m.sendPermCard(taskId, p.requestId, meta.brief),
           ).catch(() => {});

@@ -35,6 +35,8 @@ export interface CliProviderCatalog extends StaticProviderCapability {
 export interface ProviderCatalog {
   claude: CliProviderCatalog;
   codebuddy: CliProviderCatalog;
+  /** 被 providers.<id>.enabled=false 关掉的引擎不该还摆在派发弹窗的下拉里——选了必然 PROVIDER_MISSING */
+  enabled: Record<"claude" | "codex" | "codebuddy", boolean>;
   codex: {
     label: string; source: CodexCatalog["source"]; fetchedAt: string | null; reason?: string;
     defaultModel: string; handoffModel: string; handoffEffort: string;
@@ -71,6 +73,12 @@ export async function providerCatalog(): Promise<ProviderCatalog> {
   return {
     claude,
     codebuddy,
+    // claude 的配置键是 claude-code；codebuddy 是显式 opt-in（enabled 必须为 true），与 runner/entry.ts 同口径
+    enabled: {
+      claude: cfg.providers?.["claude-code"]?.enabled !== false,
+      codex: cfg.providers?.codex?.enabled !== false,
+      codebuddy: cfg.providers?.codebuddy?.enabled === true,
+    },
     codex: {
       label: "Codex", source: codex.source, fetchedAt: codex.fetchedAt, ...(codex.reason ? { reason: codex.reason } : {}),
       defaultModel: DEFAULT_CODEX_MODEL, handoffModel: DEFAULT_CODEX_MODEL, handoffEffort: "medium",

@@ -8,6 +8,7 @@ const Tasks = {
   ccMsgs: [], ccOffset: 0, // 旁观增量
   ccList: [],              // 本机全部 agent 会话（去重后混进项目组；含 ownward 之外开的 claude/codex）
   recent: [], rq: "",      // 最近会话分区：ownward 原生引擎对话 + 筛选词
+  archivedList: [], showArchived: false,   // 已归档会话（/api/dev/recent?archived=1）与「正在看归档」视图开关
   rqHits: null, rqTimer: null,   // 筛选词的全文命中（/api/search）：{ q, byTask: Map<taskId, {snippet, hit}> }
   pinned: [],              // 置顶会话（daemon 持久化）
   dismissed: {},           // 隐藏的项目组 {project: epochMs}
@@ -97,17 +98,20 @@ function tkSetContext(project, title) {
 /** 分组视图的辅助数据：全部会话 + 置顶 + 隐藏项目（任务本体走 SSE/轮询） */
 async function loadTasksAux() {
   Tasks.auxError = "";
-  const [cc, pin, dis, rc, us] = await Promise.all([
+  const [cc, pin, dis, rc, us, ar] = await Promise.all([
     getJSON("/api/cc/sessions").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/sessions/pinned").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/projects/dismissed").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/dev/recent").catch(() => (Tasks.auxError = "部分会话暂时无法载入", null)),
     getJSON("/api/usage").catch(() => null),   // 额度拿不到不算错：徽标不画就是了
+    // 归档列表：与「最近」共用服务端 3s 快照，多这一次不会多算一遍
+    getJSON("/api/dev/recent?archived=1").catch(() => null),
   ]);
   if (cc) Tasks.ccList = cc;
   if (pin?.pinned) Tasks.pinned = pin.pinned;
   if (dis?.dismissed) Tasks.dismissed = dis.dismissed;
   if (rc) Tasks.recent = rc;
+  if (ar) Tasks.archivedList = ar;
   if (us && JSON.stringify(us) !== JSON.stringify(Tasks.usage)) { Tasks.usage = us; renderUsagePill(); }
   Tasks.auxLoaded = true;
   if (Tasks.selKind === "cc" && Tasks.sel) void pollCcObserve(Tasks.sel, Tasks.selKind, true);
@@ -207,30 +211,57 @@ function rcCardHtml(s) {
     ${s.last ? `<div class="body" style="color:var(--text-tertiary);-webkit-line-clamp:1;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">${esc(s.last)}</div>` : ""}
     ${hit ? `<div class="body" style="color:var(--text-secondary);-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">🔍 ${esc(hit.snippet)}</div>` : ""}
     <div class="foot"><span class="mono" style="font-size:11px;color:var(--text-tertiary)">💬 ${s.msgs}${s.userMsgs > 1 ? ` · 追问 ${s.userMsgs - 1}` : ""}</span>
-      <span style="flex:1"></span>${pinBtnHtml("task", s.id, s.project, s.title, "")}</div>
+      <span style="flex:1"></span>${rcArchiveBtnHtml(s.id)}${pinBtnHtml("task", s.id, s.project, s.title, "")}</div>
   </div>`;
+}
+/** 归档 / 恢复：卡片整体是「打开会话」，按钮必须自己吞掉点击 */
+function rcArchiveBtnHtml(id) {
+  return Tasks.showArchived
+    ? `<button class="button sm ghost" title="恢复到最近会话" aria-label="恢复" onclick="event.stopPropagation();rcArchive('${jsq(id)}',true)">恢复</button>`
+    : `<button class="button sm ghost" title="归档：从最近会话隐藏。会话与记录一字不动，之后再有新活动会自动回来" aria-label="归档" onclick="event.stopPropagation();rcArchive('${jsq(id)}',false)">归档</button>`;
+}
+async function rcArchive(id, restore) {
+  const res = await post("/api/sessions/archive", { id, restore: !!restore });
+  toast(res.msg || "OK");
+  await loadTasksAux();
+  renderTaskList();
+}
+function rcToggleArchived() {
+  Tasks.showArchived = !Tasks.showArchived;
+  renderTaskList();
+}
+/** 当前列表的数据源：「最近」或「已归档」 */
+function rcSource() { return Tasks.showArchived ? Tasks.archivedList : Tasks.recent; }
+/** 计数条右侧的归档入口（一条都没归档过就不占地方） */
+function rcArchivedToggleHtml() {
+  if (!Tasks.showArchived && !Tasks.archivedList.length) return "";
+  return `<button class="button ghost sm" onclick="rcToggleArchived()">${Tasks.showArchived ? "← 返回最近" : `已归档 ${Tasks.archivedList.length}`}</button>`;
 }
 /** 当前筛选词对应的全文命中（没查到或词已变就是 null） */
 function rcHits() { const q = Tasks.rq.trim().toLowerCase(); return q && Tasks.rqHits?.q === q ? Tasks.rqHits.byTask : null; }
 function rcFiltered() {
-  const q = Tasks.rq.trim().toLowerCase(), hits = rcHits();
-  return q ? Tasks.recent.filter((s) => `${s.project}\n${s.title}\n${s.last}`.toLowerCase().includes(q) || !!hits?.has(s.id)) : Tasks.recent;
+  const q = Tasks.rq.trim().toLowerCase(), hits = rcHits(), src = rcSource();
+  return q ? src.filter((s) => `${s.project}\n${s.title}\n${s.last}`.toLowerCase().includes(q) || !!hits?.has(s.id)) : src;
 }
 /** 全文命中但已经滚出「最近」列表（归档 / 更早）的会话：单独列成简卡，点了照样能打开 */
 function rcExtraHitsHtml() {
-  const hits = rcHits(); if (!hits) return "";
+  const hits = rcHits(); if (!hits || Tasks.showArchived) return "";
   const known = new Set(Tasks.recent.map((s) => s.id));
+  // 归档会话照样搜得到（归档只改列表可见性，不碰索引）——但简卡上要说清它为什么不在列表里，
+  // 否则看着像「搜得到却找不到」。顺手给个就地恢复，不用先切到归档视图。
+  const archived = new Set(Tasks.archivedList.map((s) => s.id));
   return [...hits.entries()].filter(([id]) => !known.has(id)).map(([id, h]) => `
     <div class="card clickable" data-selected="${Tasks.sel === id}" onclick="Tasks.select('${jsq(id)}')">
-      <div class="top"><span class="task-project">${esc(h.project || "?")}</span><span class="tag">${esc(engineTag(h.mode, h.providerId, ""))}</span><span class="right mono">${h.lastAt ? ageText(new Date(h.lastAt).toISOString()) : "更早"}</span></div>
+      <div class="top"><span class="task-project">${esc(h.project || "?")}</span><span class="tag">${esc(engineTag(h.mode, h.providerId, ""))}</span>${archived.has(id) ? `<span class="tag" data-tone="warn" title="已归档：不在最近列表里，但搜索照样能找到">已归档</span>` : ""}<span class="right mono">${h.lastAt ? ageText(new Date(h.lastAt).toISOString()) : "更早"}</span></div>
       <div class="body task-card-title">${esc(h.title || id)}</div>
       <div class="body" style="color:var(--text-tertiary);-webkit-line-clamp:2;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">🔍 ${esc(h.snippet)}</div>
+      ${archived.has(id) ? `<div class="foot"><span style="flex:1"></span><button class="button sm ghost" onclick="event.stopPropagation();rcArchive('${jsq(id)}',true)">恢复</button></div>` : ""}
     </div>`).join("");
 }
 function rcCardsHtml() {
   const list = rcFiltered(), extra = rcExtraHitsHtml();
   return (list.map(rcCardHtml).join("") + extra)
-    || stateBox(Tasks.rq.trim() ? "没有匹配的会话" : "还没有 Ownward 会话，点右上「派新任务」开始");
+    || stateBox(Tasks.rq.trim() ? "没有匹配的会话" : Tasks.showArchived ? "没有已归档的会话" : "还没有 Ownward 会话，点右上「派新任务」开始");
 }
 /** 全文搜索：≥2 字就问派生索引（读库，不打开会话）；回来后按命中刷卡片 */
 function rcSearch(q) {
@@ -250,7 +281,7 @@ function rcFilter(v) {
   const q = v.trim().toLowerCase();
   if (q.length >= 2 && Tasks.rqHits?.q !== q) rcSearch(q);
   const box = $("#tk-rc-cards"); if (box) box.innerHTML = rcCardsHtml();
-  const meta = $("#tk-rc-meta"); if (meta) meta.textContent = `${rcFiltered().length} / ${Tasks.recent.length}`;
+  const meta = $("#tk-rc-meta"); if (meta) meta.textContent = `${rcFiltered().length} / ${rcSource().length}`;
 }
 
 function renderTaskList() {
@@ -264,8 +295,9 @@ function renderTaskList() {
     el.innerHTML = `
       ${Tasks.tasksError ? `<div class="tasks-inline-state">${stateBox(Tasks.tasksError, "error")}</div>` : ""}
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
-        <input type="text" id="tk-rq" placeholder="筛选：项目 / 标题 / 内容…" value="${esc(Tasks.rq)}" oninput="rcFilter(this.value)" style="flex:1;font-size:12px">
-        <span class="mono" id="tk-rc-meta" style="font-size:11px;color:var(--text-tertiary)">${rcFiltered().length} / ${Tasks.recent.length}</span>
+        <input type="text" id="tk-rq" placeholder="${Tasks.showArchived ? "在已归档里筛选…" : "筛选：项目 / 标题 / 内容…"}" value="${esc(Tasks.rq)}" oninput="rcFilter(this.value)" style="flex:1;font-size:12px">
+        <span class="mono" id="tk-rc-meta" style="font-size:11px;color:var(--text-tertiary)">${rcFiltered().length} / ${rcSource().length}</span>
+        ${rcArchivedToggleHtml()}
       </div>
       <div id="tk-rc-cards" class="glist">${rcCardsHtml()}</div>`;
     if (rqHadFocus) { const ni = $("#tk-rq"); ni.focus(); ni.setSelectionRange(ni.value.length, ni.value.length); }
@@ -956,11 +988,13 @@ function renderSession(t, dev) {
     <div class="composer">
       <div class="composer-box" data-disabled="${!canInput}">
         <div class="composer-imgs" id="tk-imgs"></div>
+        <div class="composer-files" id="tk-files"></div>
         <textarea id="tk-input" rows="1" placeholder="${!canInput ? "只旁观（输入权在其他端，点「接管输入」）"
           : running ? "agent 正在工作…输入会排队，本轮结束自动发出" : "追问 / 指示（Enter 发送，Shift+Enter 换行；输入 / 看命令，↑ 翻历史）"}" ${canInput ? "" : "disabled"}></textarea>
         <div class="composer-bar">
           <button class="icon-btn" id="tk-attach" title="添加图片" ${canInput ? "" : "disabled"}>🖼</button>
-          <span class="hint">${running ? "Enter 排队追问 · ■ 中断本轮" : "Enter 发送 · ↑ 历史 · / 命令 · 可粘贴图片"}</span>
+          <button class="icon-btn" id="tk-attach-file" title="添加文件（任意类型）" ${canInput ? "" : "disabled"}>📎</button>
+          <span class="hint">${running ? "Enter 排队追问 · ■ 中断本轮" : "Enter 发送 · ↑ 历史 · / 命令 · 可粘贴图片或文件"}</span>
           <span class="spacer"></span>
           ${running
             ? `<button class="button stop" id="tk-stop" title="中断本轮（正在生成的这轮停下，会话不结束）">■</button>`
@@ -969,7 +1003,8 @@ function renderSession(t, dev) {
         </div>
       </div>
       ${sessionMetaHtml(t, dev)}
-      <input type="file" id="tk-file" accept="image/*" multiple hidden>
+      <input type="file" id="tk-file" accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif" multiple hidden>
+      <input type="file" id="tk-file-any" multiple hidden>
     </div>`;
 
   const input = $("#tk-input");
@@ -981,22 +1016,36 @@ function renderSession(t, dev) {
     // Enter 发送 / ↑↓ 翻本会话输入历史 / 输入 "/" 弹命令补全（命令表来自 CC init 帧回报）
     bindComposer(input, { key: `task:${t.id}`, send: () => devSend(t.id), commands: dev.backend === "claude" ? (dev.commands || []) : [] /* codex/codebuddy 没有 CLI 命令表，但 /new /model /effort 这些 Ownward 自己的命令照样要能补全 */ });
     input.addEventListener("paste", (e) => {
-      const imgs = [...(e.clipboardData?.items || [])].filter((it) => it.type.startsWith("image/"));
-      if (!imgs.length) return;
+      const items = [...(e.clipboardData?.items || [])];
+      const imgs = items.filter((it) => it.type.startsWith("image/"));
+      // 非图片文件（Finder 里 ⌘C 一个 pdf）也收：纯文本粘贴 kind 是 "string"，不受影响
+      const files = items.filter((it) => it.kind === "file" && !it.type.startsWith("image/")).map((it) => it.getAsFile()).filter(Boolean);
+      if (!imgs.length && !files.length) return;
       e.preventDefault();
       imgs.forEach((it) => addImage(it.getAsFile()));
+      if (files.length) void ComposerFiles.add(`task:${t.id}`, files, renderTaskFiles);
     });
-    // 拖入图片
+    // 拖入：图片走图片流水线，其余当文件传（两者互斥，别让同一张图两条路都走）
     const box = input.closest(".composer-box");
     box.addEventListener("dragover", (e) => { e.preventDefault(); box.style.borderColor = "var(--accent)"; });
     box.addEventListener("dragleave", () => { box.style.borderColor = ""; });
     box.addEventListener("drop", (e) => {
       e.preventDefault(); box.style.borderColor = "";
-      [...(e.dataTransfer?.files || [])].forEach((f) => f.type.startsWith("image/") && addImage(f));
+      const all = [...(e.dataTransfer?.files || [])];
+      const imgs = all.filter((f) => f.type.startsWith("image/"));
+      imgs.forEach((f) => addImage(f));
+      const rest = all.filter((f) => !imgs.includes(f));
+      if (rest.length) void ComposerFiles.add(`task:${t.id}`, rest, renderTaskFiles);
     });
   }
   $("#tk-attach")?.addEventListener("click", () => $("#tk-file").click());
   $("#tk-file")?.addEventListener("change", (e) => { [...e.target.files].forEach(addImage); e.target.value = ""; });
+  // 文件附件每条消息一个草稿 scope（发送时服务端搬进 uploads/<taskId>/ 并授权给 agent）。
+  // 文件在服务端盘上，所以每次进会话都从服务端重拉一次——刷新页面、切走再回来都不该丢。
+  renderTaskFiles();
+  void ComposerFiles.refresh(`task:${t.id}`, () => { if (Tasks.sel === t.id) renderTaskFiles(); });
+  $("#tk-attach-file")?.addEventListener("click", () => $("#tk-file-any").click());
+  $("#tk-file-any")?.addEventListener("change", async (e) => { const files = [...e.target.files]; e.target.value = ""; await ComposerFiles.add(`task:${t.id}`, files, renderTaskFiles); });
   $("#tk-send")?.addEventListener("click", () => devSend(t.id));
   $("#tk-stop")?.addEventListener("click", () => devInterrupt(t.id));
   renderThumbs();
@@ -1006,19 +1055,28 @@ function renderSession(t, dev) {
 
 function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 200) + "px"; }
 
-/** 读一个图片 File → base64 存入 Tasks.images，重渲缩略图 */
-function addImage(f) {
-  if (!f || !f.type?.startsWith("image/")) return;
+/** 挑一张图 → 共用流水线收（类型判 / HEIC 转码 / 超限压缩）→ 进 Tasks.images，重渲缩略图。
+ *  压缩这一步不能省：截图原样发出去会撞 Runner 8MiB blob 上限，白等一次上传才被拒。 */
+async function addImage(f) {
   const key = Tasks.sel ? `task:${Tasks.sel}` : "";
-  const rd = new FileReader();
-  rd.onload = () => {
-    const images = ComposerDrafts.getAttachments(key);
-    images.push({ media_type: f.type, data: String(rd.result).split(",")[1], size: f.size });
-    ComposerDrafts.setAttachments(key, images);
-    if (Tasks.sel && `task:${Tasks.sel}` === key) { Tasks.images = images; renderThumbs(); }
-  };
-  rd.onerror = () => toast("读取图片失败");
-  rd.readAsDataURL(f);
+  if (ComposerDrafts.getAttachments(key).length >= COMPOSER_IMG_MAX) { toast(`一条消息最多 ${COMPOSER_IMG_MAX} 张图`); return; }
+  const image = await prepareComposerImage(f);
+  if (!image) return;
+  // 列表在 await 之后才读写：同时粘几张时每张都看得到前一张的结果（并发下不会互相覆盖/越界）
+  const images = ComposerDrafts.getAttachments(key);
+  if (!composerImageFits(images, image.size)) return;
+  images.push({ media_type: image.media_type, data: image.data, size: image.size });
+  ComposerDrafts.setAttachments(key, images);
+  if (Tasks.sel && `task:${Tasks.sel}` === key) { Tasks.images = images; renderThumbs(); }
+}
+
+/** 文件附件（任意类型）：与图片分开渲染——它们走的不是同一条链路，
+ *  图片在本地内存里等发送，文件一上传就在服务端盘上（刷新页面也还在）。 */
+function renderTaskFiles() {
+  const box = $("#tk-files"); if (!box) return;
+  const key = `task:${Tasks.sel}`;
+  box.innerHTML = ComposerFiles.chipsHtml(key);
+  bindComposerFileChips(box, key, renderTaskFiles);
 }
 
 function renderThumbs() {
@@ -1034,12 +1092,12 @@ async function devSend(id) {
   const input = $("#tk-input");
   const draftSnapshot = input.value;
   const text = draftSnapshot.trim();
-  if (!text && !Tasks.images.length) return;
   const key = `task:${id}`;
+  if (!text && !Tasks.images.length && !ComposerFiles.has(key)) return;
   // /model <名> 与 /effort <档>：Ownward 自己的命令，同引擎就地切换（不接力）。两家 CLI 的 headless 通道都没有这两条，
   // 所以在这里拦下来打 reconfigure，不发给 agent。只打命令名不带参数 = 看当前值和可选项。
   const local = text.match(/^\/(model|effort)(?:\s+(\S+))?$/);
-  if (local && !Tasks.images.length) {
+  if (local && !Tasks.images.length && !ComposerFiles.has(key)) {
     const field = local[1], value = local[2] || "", dev = Tasks.dev || {}, providerId = dev.backend || dev.providerId || "claude";
     const options = field === "model" ? workProviderCapability(providerId).models : workProviderEfforts(providerId, dev.model || "");
     if (!value) { toast(`${field === "model" ? "当前模型" : "当前思考深度"}：${(field === "model" ? dev.model : dev.effort) || "Provider 默认"}；可选：${options.join(" / ")}`); return; }
@@ -1057,10 +1115,14 @@ async function devSend(id) {
   Tasks.images = [];
   ComposerDrafts.setAttachments(key, []);
   renderThumbs();
-  const res = await post("/api/dev/send", { id, text, images: images.length ? images : undefined, clientMutationId: crypto.randomUUID() });
+  const uploadScope = ComposerFiles.payloadScope(key);
+  if (uploadScope) { ComposerFiles.clear(key); renderTaskFiles(); }   // 乐观清空：失败下面会把 scope 还回去
+  const res = await post("/api/dev/send", { id, text, images: images.length ? images : undefined, ...(uploadScope ? { uploadScope } : {}), clientMutationId: crypto.randomUUID() });
   if (!res.ok) {
     if (!ComposerDrafts.getText(key)) ComposerDrafts.setText(key, draftSnapshot);
     ComposerDrafts.setAttachments(key, [...pics, ...ComposerDrafts.getAttachments(key)]);
+    // 发送失败时服务端没落定草稿目录，文件还在——把 scope 还回去，别让用户重传一遍
+    if (uploadScope) { try { localStorage.setItem(`ownward-upload-scope:${key}`, uploadScope); } catch { /* 存不住就只能重传 */ } void ComposerFiles.refresh(key, () => { if (Tasks.sel === id) renderTaskFiles(); }); }
     if (Tasks.sel === id) {
       const liveInput = $("#tk-input");
       if (liveInput && !liveInput.value) { liveInput.value = ComposerDrafts.getText(key); autoGrow(liveInput); }

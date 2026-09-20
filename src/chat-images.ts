@@ -11,89 +11,30 @@
 //   - 取图前先在**这个对话的消息**里查 id 白名单：磁盘上有的文件≠这个对话能读的文件。
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve, sep } from "path";
-import type { Fail } from "./roles.ts";
 import { DATA, log } from "./util.ts";
 
 export const CHATS_DIR = join(DATA, "chats");
 export const ATTACH_ROOT = join(CHATS_DIR, "attachments");
 
-/** 支持的图片类型：Claude 多模态吃这四种，codex --image 同样认。HEIC 不入库——
- *  前端先经 /api/chat/convert-heic（macOS sips）转成 jpeg 再上传，存储白名单不放宽。 */
-export const IMAGE_TYPES: Record<string, string> = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/webp": "webp",
-  "image/gif": "gif",
-};
+/** 类型白名单 / 上限 / 魔数嗅探 / base64 校验都在 image-input.ts：
+ *  对话附件与引擎会话附件共用同一份判据（见那个文件开头）。这里只留对话侧的落盘逻辑。 */
+export {
+  IMAGE_TYPES, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES,
+  type PreparedImage, type ImageInput as ChatImageInput,
+} from "./image-input.ts";  // 老调用方按 chat-images 引这些名字，位置搬了、名字不动
+import { IMAGE_TYPES, MAX_IMAGE_BODY_BYTES, validateImageInputs, type PreparedImage } from "./image-input.ts";
 
-export const MAX_IMAGES = 6;                       // 每条消息张数
-export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;    // 每张（解码后）
-export const MAX_TOTAL_BYTES = 12 * 1024 * 1024;   // 每条消息合计
-/** /api/chat/send 的请求体上限：图片 base64 膨胀 4/3，再给文本/JSON 包装留一倍余量。
- *  超了直接 413——别等 JSON.parse 把几十 MB 拉进内存才发现（守则 9：丢弃要可观测）。 */
-export const MAX_SEND_BODY_BYTES = Math.round(MAX_TOTAL_BYTES * 4 / 3) + 2 * 1024 * 1024;
-
-const CHAT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-const IMAGE_ID_RE = /^[a-z0-9]{12,40}$/;
-const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
-
-/** 客户端来的原始入参，一律当不可信处理 */
-export interface ChatImageInput { media_type?: unknown; data?: unknown }
-/** 校验通过、还没落盘的一张图（字节留在内存：claude 直接编进 stream-json 帧） */
-export interface PreparedImage { mediaType: string; ext: string; bin: Buffer }
 /** 落进 AiMessage 的元数据：只有受控 id 与展示需要的信息，没有字节 */
 export interface ChatImageMeta { id: string; mediaType: string; bytes: number }
 
-const fail = (msg: string): Fail => ({ ok: false, code: "invalid", msg });
+/** 校验一组对话图片入参（与会话附件同一套判据）。 */
+export const validateChatImages = validateImageInputs;
 
-/** 魔数嗅探：声明的 media type 必须与真实字节一致。
- *  只认这四种容器头——伪装成图片的 HTML/SVG/脚本在这里就被挡住，不会存进磁盘再被回吐。 */
-function sniff(bin: Buffer): string {
-  if (bin.length >= 8 && bin.toString("latin1", 0, 8) === "\x89PNG\r\n\x1a\n") return "image/png";
-  if (bin.length >= 3 && bin[0] === 0xff && bin[1] === 0xd8 && bin[2] === 0xff) return "image/jpeg";
-  if (bin.length >= 12 && bin.toString("latin1", 0, 4) === "RIFF" && bin.toString("latin1", 8, 12) === "WEBP") return "image/webp";
-  if (bin.length >= 6 && /^GIF8[79]a$/.test(bin.toString("latin1", 0, 6))) return "image/gif";
-  return "";
-}
+const CHAT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const IMAGE_ID_RE = /^[a-z0-9]{12,40}$/;
 
-const mb = (n: number) => `${(n / 1048576).toFixed(1)}MB`;
-
-/** 校验一组图片入参。失败一律带原话（哪张、为什么），绝不悄悄丢掉其中几张。 */
-export function validateChatImages(raw: unknown): { ok: true; images: PreparedImage[] } | Fail {
-  if (raw === undefined || raw === null) return { ok: true, images: [] };
-  if (!Array.isArray(raw)) return fail("images 必须是数组");
-  if (raw.length > MAX_IMAGES) return fail(`一条消息最多 ${MAX_IMAGES} 张图（收到 ${raw.length} 张）`);
-
-  const images: PreparedImage[] = [];
-  let total = 0;
-  for (let i = 0; i < raw.length; i++) {
-    const at = `第 ${i + 1} 张图`;
-    const item = raw[i] as ChatImageInput;
-    if (!item || typeof item !== "object") return fail(`${at}格式不对（要 {media_type, data}）`);
-    const mediaType = String(item.media_type ?? "").trim().toLowerCase();
-    const ext = IMAGE_TYPES[mediaType];
-    if (!ext) return fail(`${at}类型不支持：${mediaType.slice(0, 40) || "(空)"}（只收 png/jpeg/webp/gif）`);
-    const data = String(item.data ?? "");
-    if (!data) return fail(`${at}没有数据`);
-    // 先按 base64 的字符规则与长度粗筛，别把几十 MB 垃圾串扔给解码器
-    if (data.length % 4 !== 0 || !B64_RE.test(data)) return fail(`${at}的 base64 不合法（只收裸 base64，不要 data: 前缀）`);
-    if (data.length / 4 * 3 > MAX_IMAGE_BYTES + 8) return fail(`${at}超限（>${mb(MAX_IMAGE_BYTES)}）`);
-    const bin = Buffer.from(data, "base64");
-    // Buffer.from 对坏字符是静默跳过：重编码逐字比对才能真的拒绝截断/掺假的数据
-    if (!bin.length || bin.toString("base64") !== data) return fail(`${at}的 base64 数据损坏`);
-    if (bin.length > MAX_IMAGE_BYTES) return fail(`${at}超限（${mb(bin.length)} > ${mb(MAX_IMAGE_BYTES)}）`);
-    const real = sniff(bin);
-    if (real !== mediaType) {
-      return fail(real
-        ? `${at}声明 ${mediaType}，实际是 ${real}——按真实类型重新选一次`
-        : `${at}不是有效的 png/jpeg/webp/gif 图片`);
-    }
-    total += bin.length;
-    if (total > MAX_TOTAL_BYTES) return fail(`图片合计超限（>${mb(MAX_TOTAL_BYTES)}），少发几张或先压缩`);
-    images.push({ mediaType, ext, bin });
-  }
-  return { ok: true, images };
-}
+/** /api/chat/send 的请求体上限（与会话附件同一个数：image-input.ts） */
+export const MAX_SEND_BODY_BYTES = MAX_IMAGE_BODY_BYTES;
 
 /** 附件目录（chatId 非法返回 null——调用方必须显式处理，不许拼出目录外的路径） */
 export function chatAttachDir(chatId: string): string | null {

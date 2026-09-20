@@ -6,7 +6,7 @@ import { llmJson } from "./llm.ts";
 import { notify, recentNotifications } from "./notify.ts";
 import { appendNotification } from "./obsidian.ts";
 import { queueSize } from "./spool.ts";
-import { ROOT, cfg, fmt, inQuietHours, loadState, log, run, saveState } from "./util.ts";
+import { ROOT, cfg, fmt, inQuietHours, loadState, log, run, saveState, workbenchUrl } from "./util.ts";
 
 export async function runHeartbeat(): Promise<void> {
   if (!cfg.heartbeat?.enabled) return;
@@ -31,7 +31,8 @@ export async function runHeartbeat(): Promise<void> {
 
   const res = await llmJson(prompt);
   if (res?.message) {
-    if (await notify(`💓 ${res.message}`, { source: "heartbeat" })) appendNotification(res.message);
+    await notify(`💓 ${res.message}`, { source: "heartbeat", level: "act", actions: [{ text: "打开工作台", url: workbenchUrl("/?tab=today"), primary: true }] });
+    appendNotification(res.message);   // 归档与推送解耦：被前台/冷却压住的提醒也要留在笔记里
   } else {
     log("heartbeat: OK, nothing to report");
   }

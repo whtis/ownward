@@ -2,6 +2,47 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.4.0] - 2026-09-20
+
+### Added
+
+- Notifications are graded by whether they need you to act. Only the ones that do reach Lark, and they arrive as a card that states what happened, the context behind it (project, reason, exit code) and a button that opens the right page. Everything else stays in the feed and the desktop banner. Previously every task that finished was pushed to Lark, so the pushes that mattered were buried.
+- Notifications are suppressed while the workbench window is focused and you are actually working in it, because the feed in front of you already shows them. The window reports its focus every 30 seconds and stops reporting once it loses focus or sits idle, so the Lark fallback still fires when you walk away.
+- Repeated notifications about the same thing are collapsed for 30 minutes. A relayed session reaps a run at the end of every turn, which used to announce "task finished" each time.
+- Time-critical notifications (meeting reminders, stop-loss alerts) are exempt from quiet hours, and manually triggered test notifications bypass every suppression rule and report honestly whether a channel accepted them.
+- Isolated worktrees for coding tasks are cleaned up by whether deleting them would lose anything, and the daemon reclaims the landed ones daily. Deleting a worktree collapses its group in the workbench and archives the tasks inside it.
+- Routine drafts (daily and weekly reports) first read back what you previously wrote by hand in the target document, so a draft reconciles against last period's plan instead of restating the raw work log.
+
+### Fixed
+
+- A vault sync that cannot reach its Git remote is no longer reported as a conflict with another machine. Transport failures (SSH, DNS, proxy drops, timeouts) retry silently; only a real rebase conflict raises a notification, and it names the repository and the exact steps to resolve it.
+- Meeting reminders reach Lark. They were tagged with the `lark` source, which the "do not echo Lark events back to Lark" rule skipped, so the one notification type with a join button never arrived.
+- Bare URLs in session and chat bubbles are clickable. Only `[text](url)` markdown links were rendered, so a pasted link had to be copied by hand.
+- Session history projection is no longer truncated at 200 messages or 128K, so a relayed session keeps its full history.
+
+## [1.3.0] - 2026-09-17
+
+### Added
+
+- Task and session composers accept arbitrary file attachments, not just images. Files are stored on the server and their absolute paths are appended to the message, and the directory holding them is granted to the agent so it can read them with its own tools. Images keep travelling inline as before.
+- The Today page has a multi-select mode that completes, dismisses, or snoozes many action items at once, so a queue of items that need no individual judgement can be cleared in one pass.
+- Recent sessions can be archived from the list. Archiving hides a session without touching anything on disk, and a session that sees new activity afterwards returns to the list on its own. Archived sessions remain fully searchable.
+- CodeBuddy can serve as the decision engine and as the failover engine, alongside Claude and Codex.
+- Two built-in "Ink" appearance skins (dark and light).
+
+### Fixed
+
+- Approvals raised by CodeBuddy sessions can now be answered. The CLI has no `--permission-prompt-tool` flag, which had been read as "no approval bridge"; the bridge is actually the stream-json control channel, which CodeBuddy speaks. Previously the approval card appeared but could not be answered, and the turn hung until the Runner restarted.
+- Engines disabled through `providers.<id>.enabled` no longer appear in the dispatch dialog, where selecting one could only fail.
+
+## [1.2.8] - 2026-09-17
+
+### Fixed
+
+- Image attachments in the task composer and the dispatch dialog are now type-checked, HEIC-converted, and downscaled locally before upload, so a phone screenshot no longer fails after the upload with an attachment size error. Pasting several images at once no longer drops all but one.
+- Incoming image attachments are validated server-side on the session paths as well (type allowlist, magic-byte sniffing, canonical base64, per-image and per-message size caps), matching what the AI chat path already enforced.
+- Releasing and re-acquiring session input control is reflected in the session state immediately, so the "take over input" button reappears after a release instead of leaving the session unreachable.
+
 ## [1.2.7] - 2026-09-15
 
 ### Fixed

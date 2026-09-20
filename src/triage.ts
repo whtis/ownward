@@ -64,9 +64,8 @@ export async function runTriage(): Promise<void> {
         appendDaily("静默时段拦截的通知", [{ source: "triage", summary: n.text }]);
         appendFeed({ ts: new Date().toISOString(), kind: "log", source: n.source || "system", text: `(静默拦截) ${n.text}` });
       } else {
-        if (await notify(n.text, { source: n.source, link: n.link, chatId: n.chat_id, mailId: n.mail_id })) {
-          appendNotification(n.text);
-        }
+        await notify(n.text, { source: n.source, level: "act", link: n.link, chatId: n.chat_id, mailId: n.mail_id });
+        appendNotification(n.text);   // 同上：推送被压住不代表这条不该留档
       }
     }
     if (res.log?.length) {

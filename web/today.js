@@ -1,7 +1,7 @@
 "use strict";
 /* 今日 tab：Action 行动队列（一等对象）+ 注意力收件箱 + routine 职责卡 + 今日会议 */
 
-const Today = { actions: [], attention: [], routines: [], meetings: [], timer: null, draftCtx: null, loading: true, meetingsLoading: true, errors: {} };
+const Today = { actions: [], attention: [], routines: [], meetings: [], timer: null, draftCtx: null, loading: true, meetingsLoading: true, errors: {}, multi: false, picked: new Set() };
 
 TABS.today = {
   init(root) {
@@ -22,6 +22,7 @@ TABS.today = {
           <section class="today-focus" aria-labelledby="td-focus-title">
             <div class="section-head">
               <div><h2 id="td-focus-title">今日焦点</h2><p>需要你亲自判断或推进</p></div>
+              <button class="button ghost sm" id="td-multi" title="批量完成/忽略/暂缓不需要你亲自处理的行动项">多选</button>
             </div>
             <div id="td-actions"></div>
           </section>
@@ -43,6 +44,7 @@ TABS.today = {
       </div>
       `;
     $("#td-refresh").addEventListener("click", () => loadToday());
+    $("#td-multi").addEventListener("click", tdToggleMulti);
     // 随手记：写今天的 Ownward 流水（vault 的 ownward/<日期>.md），跟当前在看什么无关。
     // 原先摆在笔记编辑器的「保存」旁边，看着像「把这篇笔记追加到今日」——它从来不碰当前文件
     $("#td-quick-note").addEventListener("click", async () => {
@@ -112,8 +114,52 @@ function renderBrief(open) {
 }
 function tdJump(id) { document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }); }
 
+/** 今日焦点里「还要你处理」的那些——多选的全集与计数都以它为准 */
+function tdOpenActions() { return Today.actions.filter((a) => a.state === "open" || a.state === "snoozed"); }
+
+function tdPickBarHtml() {
+  if (!Today.multi) return "";
+  const total = tdOpenActions().length, n = Today.picked.size, off = n ? "" : "disabled";
+  return `<div class="proposal-bar" id="td-pickbar">
+    <span class="count">已选 ${n} / 共 ${total}</span>
+    <button class="button ghost sm" onclick="tdSelectAll()" ${total ? "" : "disabled"}>全选</button>
+    <button class="button ghost sm" onclick="tdClearPick()" ${off}>清空</button>
+    <span style="flex:1"></span>
+    <button class="button primary sm" onclick="tdBatch('resolved')" ${off}>完成</button>
+    <button class="button secondary sm" onclick="tdBatch('dismissed')" ${off}>忽略</button>
+    <button class="button ghost sm" onclick="tdBatch('snoozed')" ${off}>暂缓 2h</button>
+  </div>`;
+}
+/** 勾选只刷批处理条：整段重渲会把用户刚点的复选框连同滚动位置一起推倒重来 */
+function tdRenderPickBar() { const bar = $("#td-pickbar"); if (bar) bar.outerHTML = tdPickBarHtml(); }
+function tdToggleMulti() { Today.multi = !Today.multi; Today.picked.clear(); renderToday(); }
+function tdPick(id, on) { if (on) Today.picked.add(id); else Today.picked.delete(id); tdRenderPickBar(); }
+function tdSelectAll() {
+  for (const a of tdOpenActions()) Today.picked.add(a.id);
+  for (const el of document.querySelectorAll("#td-actions .td-pick")) el.checked = true;
+  tdRenderPickBar();
+}
+function tdClearPick() {
+  Today.picked.clear();
+  for (const el of document.querySelectorAll("#td-actions .td-pick")) el.checked = false;
+  tdRenderPickBar();
+}
+async function tdBatch(state) {
+  const ids = [...Today.picked];
+  if (!ids.length) return;
+  if (state === "dismissed" && !confirm(`忽略选中的 ${ids.length} 件？忽略后它们不再出现在今天`)) return;
+  const res = await post("/api/actions/state", { ids, state, snoozeMin: 120 });
+  toast(res.msg || "OK");
+  Today.picked.clear();
+  await loadToday();
+}
+
 function renderToday() {
   const open = Today.actions.filter((a) => a.state === "open" || a.state === "snoozed");
+  // 列表每 60s 自刷：勾完之后被别处收掉的行动项要从选中集合里剔掉，否则计数和实际提交对不上
+  if (Today.picked.size) { const live = new Set(open.map((a) => a.id)); for (const id of [...Today.picked]) if (!live.has(id)) Today.picked.delete(id); }
+  const multiBtn = $("#td-multi");
+  if (multiBtn) { multiBtn.textContent = Today.multi ? "退出多选" : "多选"; multiBtn.disabled = !open.length && !Today.multi; }
   $(".today-grid")?.setAttribute("data-focus-empty", String(!Today.loading && !Today.errors.actions && open.length === 0));
   $("#b-today").textContent = Today.errors.actions ? "" : (open.length || "");
   $("#b-today").dataset.warn = open.length > 5;
@@ -122,7 +168,7 @@ function renderToday() {
 
   // Action 卡
   const KIND = { reply: "回复", review: "Review", approve: "审批", follow_up: "跟进", decide: "决定" };
-  $("#td-actions").innerHTML = Today.loading ? stateBox("正在整理今日焦点…", "loading") : Today.errors.actions ? stateBox("行动项加载失败，请稍后刷新", "error") : open.length ? open.map((a) => {
+  $("#td-actions").innerHTML = Today.loading ? stateBox("正在整理今日焦点…", "loading") : Today.errors.actions ? stateBox("行动项加载失败，请稍后刷新", "error") : open.length ? tdPickBarHtml() + open.map((a) => {
     const refBtns = [];
     // routine 草稿行动：id 形如 routine:<id>:<date>，直接在卡上给「审草稿」入口，不用去周期职责区找
     const rm = a.id.match(/^routine:(.+):(\d{4}-\d{2}-\d{2})$/);
@@ -133,7 +179,7 @@ function renderToday() {
     const approve = a.id.startsWith("evolve:") && a.kind === "approve"
       ? `<button class="button sm primary" onclick="applyEvolveAction('${jsq(a.ref?.task_id || "")}', '${jsq(a.id)}')">批准上线</button>` : "";
     return `<div class="card" ${a.kind === "approve" ? `data-tone="warn"` : ""}>
-      <div class="top"><span class="tag" data-tone="accent">${KIND[a.kind] || a.kind}</span>
+      <div class="top">${Today.multi ? `<input type="checkbox" class="td-pick" aria-label="选择这件行动项" ${Today.picked.has(a.id) ? "checked" : ""} onchange="tdPick('${jsq(a.id)}', this.checked)">` : ""}<span class="tag" data-tone="accent">${KIND[a.kind] || a.kind}</span>
         <span class="title">${esc(a.title)}</span>
         <span class="right">${esc(a.source)} · ${ageText(a.createdAt)}${a.state === "snoozed" ? " · ⏰ 已暂缓" : ""}</span></div>
       <div class="body">${esc(a.reason)}</div>

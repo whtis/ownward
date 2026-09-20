@@ -63,8 +63,13 @@ function applyProviderCatalog(catalog) {
   WORK_CODEX_MODEL_EFFORTS = Object.freeze(Object.fromEntries(models.map((m) => [m.slug, Object.freeze([...m.efforts])])));
   WORK_CODEX_MODEL_INFO = Object.freeze(Object.fromEntries(models.map((m) => [m.slug, Object.freeze({ displayName: m.displayName || m.slug, defaultEffort: m.defaultEffort || "", fast: m.fast || null })])));
   WORK_PROVIDER_CATALOG_SOURCE = catalog.codex.source || "server";
+  // 被关掉的引擎从下拉里摘掉：留着只会让人选中后拿到 PROVIDER_MISSING
+  if (catalog.enabled && typeof catalog.enabled === "object") WORK_PROVIDER_ENABLED = Object.freeze({ ...catalog.enabled });
   return true;
 }
+/** 默认全开：catalog 还没回来之前不该先把引擎藏掉（宁可多列，也别让人以为引擎没了） */
+let WORK_PROVIDER_ENABLED = Object.freeze({ claude: true, codex: true, codebuddy: true });
+function workProviderEnabled(providerId) { return WORK_PROVIDER_ENABLED[providerId] !== false; }
 async function refreshProviderCatalog() {
   const catalog = await getJSON("/api/providers/catalog").catch(() => null);
   return applyProviderCatalog(catalog);
@@ -102,7 +107,15 @@ function mdHtml(src) {
     s = s.replace(/`([^`\n]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);  // 护住 code span 不被其他规则改写
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-    s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`);
+    const links = [];  // 护住已组装的 <a>，免得裸链接规则再把 href 里的 URL 包一层
+    s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (_, t, u) => `\u0001${links.push(`<a href="${u}" target="_blank" rel="noopener">${t}</a>`) - 1}\u0001`);
+    // 裸链接：中文里 URL 常紧跟全角标点，遇到全角字符或转义后的 <>" 就截断；句尾的半角标点不算进链接
+    s = s.replace(/https?:\/\/(?:(?!&(?:lt|gt|quot);)[^\s<>\u0000\u0001\u3000-\u303f\uff00-\uffef])+/g, (u) => {
+      const tail = u.match(/[.,;:!?)\]'*]+$/)?.[0] || "";
+      u = u.slice(0, u.length - tail.length);
+      return `\u0001${links.push(`<a href="${u}" target="_blank" rel="noopener">${u}</a>`) - 1}\u0001${tail}`;
+    });
+    s = s.replace(/\u0001(\d+)\u0001/g, (_, n) => links[+n]);
     return s.replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[+n]}</code>`);
   };
   const lines = String(src ?? "").replace(/\r\n?/g, "\n").split("\n");
@@ -509,6 +522,22 @@ function pushFeed(entry) {
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "Ownward"; });
 
+/* 人正盯着工作台时，横幅和飞书都是重复打扰：聚焦状态下每 30s 上报一次，
+   daemon 据此把通知降级成只进 feed（src/presence.ts）。失焦就不报，到点自然过期。
+   还要真有人在操作：窗口开着没人管（锁屏、去开会）不算在场，否则「人不在电脑前」的飞书兜底就失效了。 */
+const PRESENCE_IDLE_MS = 10 * 60 * 1000;
+let lastInteractionAt = Date.now();
+for (const ev of ["pointerdown", "keydown", "wheel", "pointermove"])
+  addEventListener(ev, () => (lastInteractionAt = Date.now()), { passive: true });
+function pingPresence() {
+  if (document.hasFocus() && !document.hidden && Date.now() - lastInteractionAt < PRESENCE_IDLE_MS)
+    post("/api/presence", { client: "web" });
+}
+pingPresence();
+setInterval(pingPresence, 30000);
+addEventListener("focus", pingPresence);
+document.addEventListener("visibilitychange", pingPresence);
+
 /* ============ SSE ============ */
 /** 顶栏状态：渐进披露——一切正常只有一个安静的点，异常才说人话（离线/待分流堆积） */
 function setLive(ok, txt) {
@@ -634,7 +663,15 @@ function bindTopbar() {
     if (!enabled && workExtraDirs.length) { workExtraDirs = []; renderWorkExtraDirs(); toast("terminal 模式已清除附加目录"); }
   };
   const fillWorkProviderOptions = (selection = {}) => {
-    const providerId = $("#w-engine").value;
+    // 先按 catalog 的 enabled 收拾下拉本身，再谈型号：被关掉的引擎不列，
+    // 当前选中的那个若正好被关掉，落回第一个还开着的（否则停在一个必然报错的选项上）
+    const engineSelect = $("#w-engine");
+    for (const option of engineSelect.options) option.hidden = !workProviderEnabled(option.value);
+    if (!workProviderEnabled(engineSelect.value)) {
+      const first = [...engineSelect.options].find((o) => !o.hidden);
+      if (first) engineSelect.value = first.value;
+    }
+    const providerId = engineSelect.value;
     const capability = workProviderCapability(providerId);
     const requestedModel = selection.model ?? $("#w-model").value;
     const explicitModel = Object.prototype.hasOwnProperty.call(selection, "model") && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(requestedModel);
@@ -739,7 +776,7 @@ function bindTopbar() {
   fillWorkProviderOptions();
 
   // 派发附图：粘贴/拖入/选文件 → base64 暂存，随 /api/work 发出（派发成功才清，失败留着重试）
-  let workImgs = [];   // [{media_type, data(base64)}]
+  let workImgs = [];   // [{media_type, data(base64), size}]
   const renderWorkImgs = () => {
     $("#w-imgs").innerHTML = workImgs.map((im, i) =>
       `<div class="thumb"><img src="data:${esc(im.media_type)};base64,${im.data}" alt="">
@@ -747,25 +784,36 @@ function bindTopbar() {
     $$("#w-imgs .thumb button").forEach((b) =>
       b.addEventListener("click", () => { workImgs.splice(+b.dataset.i, 1); renderWorkImgs(); }));
   };
-  const addWorkImg = (f) => {
-    if (!f || !f.type?.startsWith("image/")) return;
-    const rd = new FileReader();
-    rd.onload = () => { workImgs.push({ media_type: f.type, data: String(rd.result).split(",")[1] }); renderWorkImgs(); };
-    rd.readAsDataURL(f);
+  // 走共用流水线（类型判 / HEIC 转码 / 超限压缩）：原图直发会撞 Runner 8MiB blob 上限
+  const addWorkImg = async (f) => {
+    if (workImgs.length >= COMPOSER_IMG_MAX) { toast(`一条消息最多 ${COMPOSER_IMG_MAX} 张图`); return; }
+    const image = await prepareComposerImage(f);
+    if (!image) return;
+    if (!composerImageFits(workImgs, image.size)) return;   // 张数/合计在 await 之后再判，并发粘贴也不越界
+    workImgs.push({ media_type: image.media_type, data: image.data, size: image.size });
+    renderWorkImgs();
+  };
+  // 文件附件（任意类型）：与图片是两条路——图片进消息，文件落盘后由服务端把路径拼进任务正文
+  const renderWorkFiles = () => {
+    const box = $("#w-files"); if (!box) return;
+    box.innerHTML = ComposerFiles.chipsHtml("work");
+    bindComposerFileChips(box, "work", renderWorkFiles);
   };
   $("#w-attach").addEventListener("click", () => $("#w-file").click());
   $("#w-file").addEventListener("change", (e) => { [...e.target.files].forEach(addWorkImg); e.target.value = ""; });
+  $("#w-attach-file").addEventListener("click", () => $("#w-file-any").click());
+  $("#w-file-any").addEventListener("change", async (e) => { const files = [...e.target.files]; e.target.value = ""; await ComposerFiles.add("work", files, renderWorkFiles); });
   $("#w-task").addEventListener("paste", (e) => {
-    const imgs = [...(e.clipboardData?.items || [])].filter((it) => it.type.startsWith("image/"));
-    if (!imgs.length) return;
+    const items = [...(e.clipboardData?.items || [])];
+    const imgs = items.filter((it) => it.type.startsWith("image/"));
+    // 粘贴非图片文件（Finder 里 ⌘C 一个 pdf 再粘进来）也收下；纯文本粘贴不受影响
+    const files = items.filter((it) => it.kind === "file" && !it.type.startsWith("image/")).map((it) => it.getAsFile()).filter(Boolean);
+    if (!imgs.length && !files.length) return;
     e.preventDefault();
     imgs.forEach((it) => addWorkImg(it.getAsFile()));
+    if (files.length) void ComposerFiles.add("work", files, renderWorkFiles);
   });
-  $("#w-task").addEventListener("dragover", (e) => e.preventDefault());
-  $("#w-task").addEventListener("drop", (e) => {
-    e.preventDefault();
-    [...(e.dataTransfer?.files || [])].forEach(addWorkImg);
-  });
+  bindComposerDrop($("#w-task"), { key: "work", onChange: renderWorkFiles, onImage: addWorkImg });
 
   $("#w-submit").addEventListener("click", async () => {
     const dir = $("#w-dir").value.trim();
@@ -788,12 +836,14 @@ function bindTopbar() {
       bg: $("#w-bg").checked, provider: $("#w-engine").value || undefined, worktree: $("#w-worktree").checked,
       model: $("#w-model").value || undefined, effort: $("#w-effort").value || undefined, permission: $("#w-perm").value || undefined,
       extraDirs: submitExtraDirs.length ? submitExtraDirs : undefined,
-      images: workImgs.length ? workImgs : undefined,
+      images: workImgs.length ? workImgs.map(({ media_type, data }) => ({ media_type, data })) : undefined,
+      uploadScope: ComposerFiles.payloadScope("work"),
     });
     $("#w-submit").disabled = false;
     toast(res.msg);
     if (res.ok) {
       closeWork(); $("#w-task").value = ""; workImgs = []; renderWorkImgs();
+      ComposerFiles.clear("work"); renderWorkFiles();   // scope 已交给服务端，本地忘掉，免得下一次派发重复带上
       await refreshProjectCandidates();
       await Promise.all([refreshTasks(), typeof loadTasksAux === "function" ? loadTasksAux() : Promise.resolve()]);
       switchTab("tasks");

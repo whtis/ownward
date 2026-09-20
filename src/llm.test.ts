@@ -82,3 +82,25 @@ describe("background LLM failover", () => {
     expect(text).toContain("额度已耗尽");
   });
 });
+
+test("codebuddy 可以当备用引擎：失败判定与降级路由都认它", async () => {
+  // codex 订阅没了之后 codebuddy 要能接班——这里钉的是「引擎名被路由认得」，
+  // 不是 CLI 真跑得起来（那是 provider canary 的事）。
+  const seen: string[] = [];
+  const value = await runWithFailover("claude", "codebuddy", async (engine) => {
+    seen.push(engine);
+    return engine === "claude" ? { value: null, error: "usage limit reached" } : { value: { ok: engine } };
+  }, async () => {});
+  expect(seen).toEqual(["claude", "codebuddy"]);
+  expect(value).toEqual({ ok: "codebuddy" });
+});
+
+test("codebuddy 作主引擎时同样能降级回 claude", async () => {
+  const seen: string[] = [];
+  const value = await runWithFailover("codebuddy", "claude", async (engine) => {
+    seen.push(engine);
+    return engine === "codebuddy" ? { value: null, error: "401 unauthorized" } : { value: { ok: engine } };
+  }, async () => {});
+  expect(seen).toEqual(["codebuddy", "claude"]);
+  expect(value).toEqual({ ok: "claude" });
+});

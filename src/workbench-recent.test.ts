@@ -100,4 +100,38 @@ describe("recent Ownward sessions", () => {
       expect(code,err).toBe(0);const result=JSON.parse(out.trim().split("\n").at(-1)!);expect(result.status).toBe(200);expect(result.body).toContainEqual(expect.objectContaining({id:"legacy",msgs:2,last:"旧回答",runnerState:{pending:[{toolName:"AskUserQuestion",brief:"请选择"}],turn:""}}));
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+
+  test("归档切分：已归档的从最近消失、archived=1 取到，归档后又有活动的自动回来", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ownward-recent-archived-")), data = join(root, "data"), cwd = join(root, "project");
+    try {
+      mkdirSync(cwd); mkdirSync(join(data, "tasks"), { recursive: true }); mkdirSync(join(data, "runner"));
+      writeFileSync(join(data, "tasks.json"), JSON.stringify([
+        { id: "gone", project: "project", cwd, task: "失败的那条", mode: "claude-bg", engine: true, startedAt: "2026-08-18T08:00:00.000Z", status: "exited", exitCode: 1 },
+        { id: "back", project: "project", cwd, task: "归档后又聊了", mode: "claude-bg", engine: true, startedAt: "2026-08-18T08:10:00.000Z", status: "exited", exitCode: 0 },
+        { id: "live", project: "project", cwd, task: "没归档过", mode: "claude-bg", engine: true, startedAt: "2026-08-18T08:20:00.000Z", status: "exited", exitCode: 0 },
+      ]));
+      for (const id of ["gone", "back", "live"]) {
+        writeFileSync(join(data, `tasks/${id}.session.json`), JSON.stringify({ messages: [{ role: "user", text: `问 ${id}` }, { role: "assistant", text: `答 ${id}` }], lastActivityAt: 1787040000000 }));
+      }
+      // gone：归档时刻远在活动之后 → 仍归档；back：归档时刻早于活动 → 自动解除
+      writeFileSync(join(data, "archived-sessions.json"), JSON.stringify({ gone: 4102444800000, back: 1 }));
+      const call = (path: string) => `(async()=>{const u=new URL("http://localhost${path}");const r=await handleWorkbench(new Request(u),u);return await r.json()})()`;
+      const script = `const{handleWorkbench}=await import(${JSON.stringify(join(import.meta.dir, "workbench.ts"))});` +
+        `console.log(JSON.stringify({recent:await ${call("/api/dev/recent")},archived:await ${call("/api/dev/recent?archived=1")},` +
+        `search:await ${call("/api/search?q=" + encodeURIComponent("答 gone"))}}));`;
+      const proc = Bun.spawn([process.execPath, "--eval", script], { cwd: import.meta.dir, env: { ...process.env, OWNWARD_DATA_ROOT: data }, stdout: "pipe", stderr: "pipe" });
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(code, err).toBe(0);
+      const { recent, archived, search } = JSON.parse(out.trim().split("\n").at(-1)!);
+      const ids = (rows: any[]) => rows.map((r) => r.id).sort();
+      expect(ids(recent)).toEqual(["back", "live"]);   // back 因为有更新的活动自己回来了
+      expect(ids(archived)).toEqual(["gone"]);
+      // 两个视图必须互补：同一条不能同时出现在两边
+      expect(recent.some((r: any) => archived.some((a: any) => a.id === r.id))).toBeFalse();
+      // 归档的行还是完整的会话行，不是残缺骨架——点进去要能打开
+      expect(archived[0]).toMatchObject({ id: "gone", msgs: 2, last: "答 gone", project: "project" });
+      // 归档只改「最近」列表的可见性，全文搜索必须照样搜得到：归档不是删除
+      expect(search.hits.some((h: any) => h.taskId === "gone")).toBeTrue();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 });

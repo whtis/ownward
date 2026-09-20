@@ -1,5 +1,7 @@
 // 决策引擎封装：一次推理 → 严格 JSON。
-// engine=claude（默认）：claude -p，吃 Claude 订阅；engine=codex：codex exec，吃 ChatGPT 订阅。
+// engine=claude（默认）：claude -p，吃 Claude 订阅；engine=codex：codex exec，吃 ChatGPT 订阅；
+// engine=codebuddy：CodeBuddy Code（Claude Code 协议克隆，旗标同款），吃腾讯网关额度。
+// 备用引擎由 llm.fallbackEngine 指定（false/"off" = 不降级）；没配时 claude 默认降级到 codex。
 // 规则上下文（prompts/）通过 system prompt 显式注入，不依赖 CLI 的文件发现：
 //   prompts/owner.md（gitignored，install.sh 生成的个人画像）+ prompts/decision-rules.md（通用规则）。
 import { mkdtempSync, readFileSync, rmSync } from "fs";
@@ -8,7 +10,7 @@ import { join } from "path";
 import { notify } from "./notify.ts";
 import { CONFIG_ROOT, ROOT, cfg, log, run, updateState } from "./util.ts";
 
-type LlmEngine = "claude" | "codex";
+type LlmEngine = "claude" | "codex" | "codebuddy";
 interface ProviderResult { value: any | null; error?: string }
 const FAILOVER_NOTICE_COOLDOWN_MS = 6 * 3600_000;
 
@@ -90,7 +92,7 @@ export async function llmJson(prompt: string, opts: { timeoutMs?: number; quiet?
   const fallback = configured === false || configured === "off" ? null
     : (configured || (engine === "claude" ? "codex" : null)) as LlmEngine | null;
   const timeoutMs = opts.timeoutMs ?? 180_000;
-  return runWithFailover(engine, fallback, (provider) => provider === "codex" ? viaCodex(prompt, timeoutMs) : viaClaude(prompt, timeoutMs),
+  return runWithFailover(engine, fallback, (provider) => provider === "codex" ? viaCodex(prompt, timeoutMs) : provider === "codebuddy" ? viaCodebuddy(prompt, timeoutMs) : viaClaude(prompt, timeoutMs),
     opts.quiet ? async () => {} : reportFailover, opts.quiet ? () => {} : clearFailoverNotice);
 }
 
@@ -117,6 +119,33 @@ async function viaClaude(prompt: string, timeoutMs: number): Promise<ProviderRes
   if (r.code !== 0) {
     const error = providerError(r);
     log(`claude -p failed (${r.code}): ${error}`);
+    return { value: null, error };
+  }
+  return { value: parseJson(r.stdout) };
+}
+
+/** CodeBuddy 的 CLI 是 Claude Code 克隆，-p/--model/--disallowedTools/--output-format/--append-system-prompt
+ *  全部同款，所以参数照搬 viaClaude。唯一不能共用的是型号名——两家型号体系完全不同
+ *  （codebuddy 是 glm/kimi/hunyuan 那一套），所以 claudeModel 绝不能顺手复用：没配 codebuddyModel
+ *  就不给 --model，让 CLI 用它自己的默认，比传一个它不认识的名字直接报错强。 */
+async function viaCodebuddy(prompt: string, timeoutMs: number): Promise<ProviderResult> {
+  const args = ["-p", prompt];
+  if (cfg.llm?.codebuddyModel) args.push("--model", cfg.llm.codebuddyModel);
+  args.push(
+    "--max-turns", "3",
+    "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "TodoWrite", "NotebookEdit",
+    "--output-format", "text",
+    "--append-system-prompt",
+    rules() + "\n\n不要使用任何工具。最终回复必须是且只能是一个 JSON 对象，不要 markdown 代码块，不要任何解释文字。",
+  );
+  const r = await run([cfg.llm?.codebuddyBin || "codebuddy", ...args], {
+    timeoutMs,
+    cwd: ROOT,
+    env: { DISABLE_OMC: "1" },
+  });
+  if (r.code !== 0) {
+    const error = providerError(r);
+    log(`codebuddy -p failed (${r.code}): ${error}`);
     return { value: null, error };
   }
   return { value: parseJson(r.stdout) };

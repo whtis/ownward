@@ -14,7 +14,11 @@
     "larkUserId": "",
     "larkSkipSources": [
       "lark"
-    ]
+    ],
+    "suppressWhenActive": true,
+    "activeWindowSec": 90,
+    "cooldownMin": 30,
+    "workbenchUrl": ""
   },
   "dashboard": {
     "port": 4517,
@@ -63,10 +67,12 @@
     "skillAnalysisModel": "haiku",
     "codexBin": "codex",
     "codexModel": "gpt-5.6-sol",
-    "codebuddyBin": "codebuddy"
+    "codebuddyBin": "codebuddy",
+    "codebuddyModel": ""
   },
   "dispatch": {
     "worktreeRoot": "~/.ownward-worktrees",
+    "worktreeRetentionDays": 0,
     "watchSec": 60,
     "defaults": {
       "dir": "",

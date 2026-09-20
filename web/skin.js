@@ -19,6 +19,8 @@ const SKIN_GRADIENTS = {
 const BUILTIN_SKINS = [
   { id: "native-dark", name: "原生 · 暗", mode: "dark", accent: "#63a8ff", accent2: "#47c7f4" },
   { id: "native-light", name: "原生 · 亮", mode: "light", accent: "#176fc1", accent2: "#0d8ebf" },
+  { id: "ink-dark", name: "墨 · 暗", mode: "dark", accent: "#5cd5e8", accent2: "#92c8d8", look: "ink" },
+  { id: "ink-light", name: "墨 · 亮", mode: "light", accent: "#0e7f95", accent2: "#3ec1d6", look: "ink" },
   { id: "aurora", name: "极光", mode: "dark", accent: "#5fd0a7", accent2: "#63a8ff", gradient: "aurora" },
   { id: "nebula", name: "星云", mode: "dark", accent: "#b58cff", accent2: "#e08bb1", gradient: "nebula" },
   { id: "ember", name: "余烬", mode: "dark", accent: "#f09c5c", accent2: "#e0725c", gradient: "ember" },
@@ -26,7 +28,7 @@ const BUILTIN_SKINS = [
   { id: "pixel", name: "像素夜 ▓", mode: "dark", accent: "#5dd35d", accent2: "#f7d354", gradient: "pixelnight", look: "pixel" },
   { id: "win98", name: "Win98", mode: "light", accent: "#000080", accent2: "#008080", gradient: "teal", look: "win98" },
 ];
-const LOOKS = ["pixel", "win98"];
+const LOOKS = ["pixel", "win98", "ink"];
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const ASSET_RE = /^[a-f0-9]{16,64}\.(webp|jpe?g|png)$/;
 
@@ -60,7 +62,7 @@ function applySkin(s, intensity) {
     d.style.removeProperty("--wp-image");
   }
   // 系统 UI 跟随：theme-color 取 subtle 底色两轨的实色
-  const themeColor = mode === "light" ? "#e9eef3" : "#0c1118";
+  const themeColor = s.look === "ink" ? (mode === "light" ? "#ffffff" : "#0a0a0a") : mode === "light" ? "#e9eef3" : "#0c1118";
   $("#meta-theme")?.setAttribute("content", themeColor);
   Skin.activeId = s.id;
   Skin.intensity = iv;
@@ -80,8 +82,9 @@ async function loadCustomSkins() {
 /* ---- 选择器 UI ---- */
 function skinCardHtml(s) {
   const wp = wpImage(s);
-  const canvas = s.mode === "light" ? "#f1f4f7" : "#090c10";
-  const surface = s.mode === "light" ? "#ffffffd8" : "#111720d8";
+  const ink = s.look === "ink";
+  const canvas = ink ? (s.mode === "light" ? "#ffffff" : "#0a0a0a") : s.mode === "light" ? "#f1f4f7" : "#090c10";
+  const surface = ink ? (s.mode === "light" ? "#f1f4f5" : "#15191b") : s.mode === "light" ? "#ffffffd8" : "#111720d8";
   return `<div class="skin-card" data-on="${Skin.activeId === s.id}" onclick="pickSkin('${jsq(s.id)}')">
     <div class="prev" style="background:${wp ? `linear-gradient(#00000014,#00000014),${wp.replace(/"/g, "&quot;")},` : ""}${canvas}">
       <div class="mock" style="background:${surface}"></div>

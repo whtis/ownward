@@ -130,12 +130,12 @@ export async function runDailyDigest(force = false, dateOverride?: string): Prom
   ].join("\n");
   writeFileSync(file, md);
   if (!force) markDone();
-  await notify(`📋 今日日报已生成\n${String(res.summary).slice(0, 120)}`, { source: "heartbeat" });
+  await notify(`📋 今日日报已生成\n${String(res.summary).slice(0, 120)}`, { source: "heartbeat", level: "fyi", key: "daily-digest" });
   log(`digest → ${file}`);
 
   // 顺带提取候选记忆（只进 _candidates/，人工确认后合并进正式记忆）
   extractCandidates(prompt).then((f) => {
-    if (f) notify("🧠 今日记忆候选已生成，笔记 tab → memory/_candidates 确认", { source: "heartbeat", noLark: true });
+    if (f) notify("🧠 今日记忆候选已生成，笔记 tab → memory/_candidates 确认", { source: "heartbeat", level: "fyi", key: "memory-candidates" });
   }).catch((e) => log(`memory candidates failed: ${e}`));
   return file;
 }

@@ -581,8 +581,8 @@ function handleControlRequest(s: EngineSession, e: any) {
     reason: brief,
     ref: { task_id: s.taskId },
   });
-  // 横幅+feed 留着（noLark），飞书改发可直接点的互动卡片（离开电脑也能批）
-  notify(`🔐 任务 [${s.taskId}] ${isQuestion ? "提问" : "等待审批"}\n${brief}`, { source: "dispatch", noLark: true }).catch(() => {});
+  // 横幅+feed 留着（level fyi），飞书改发可直接点的互动卡片（离开电脑也能批）
+  notify(`🔐 任务 [${s.taskId}] ${isQuestion ? "提问" : "等待审批"}\n${brief}`, { source: "dispatch", level: "fyi", key: `approval:${s.taskId}:${requestId}` }).catch(() => {});
   import("./lark-cards.ts").then((m) =>
     isQuestion
       ? m.sendQuestionCard(s.taskId, requestId, input.questions?.[0]?.question || brief, opts)

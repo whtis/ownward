@@ -460,7 +460,11 @@ export function startServer() {
         const { action } = await req.json() as { action: string };
         if (action === "triage") { runTriage().then(() => broadcast("state", stateSnapshot())); return json({ ok: true, msg: "triage 已触发" }); }
         if (action === "heartbeat") { runHeartbeat().then(() => broadcast("state", stateSnapshot())); return json({ ok: true, msg: "heartbeat 已触发" }); }
-        if (action === "test-notify") { notify("✅ dashboard 测试通知", { source: "system" }); return json({ ok: true, msg: "已发送" }); }
+        if (action === "test-notify") {
+          // force：自测就是要验通道，前台/静默/冷却都不该把它吞掉；结果如实回报，别报「已发送」骗人
+          const pushed = await notify("✅ dashboard 测试通知", { source: "system", level: "act", force: true });
+          return json({ ok: true, msg: pushed ? "已发送" : "通道都没发出去，看设置里的通知开关" });
+        }
         if (action === "open-vault") {
           // 走本机 open 命令：webview 里自定义协议跳转会被 WKWebView 拦截。
           // 打开器按平台分：Windows 上没有 `open`，硬调会抛 ENOENT 并把整个请求

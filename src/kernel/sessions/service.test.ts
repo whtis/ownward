@@ -6,10 +6,11 @@ import { readRunJournalStrict, RunRepository } from "../../runs/repository.ts";
 import { migrateLegacySessions, SessionRepository } from "../../sessions/repository.ts";
 import type { RunnerEventRecord } from "../../runner/journals.ts";
 import { archiveRunnerEvents, RunnerCommandJournal, RunnerEventJournal } from "../../runner/journals.ts";
-import { KernelSessionService, readStableRunnerSnapshot, shellQuote, SESSION_STATE_CACHE_LIMIT } from "./service.ts";
+import { KernelSessionService, onRunnerApprovalRequested, readStableRunnerSnapshot, shellQuote, SESSION_STATE_CACHE_LIMIT } from "./service.ts";
 import { effectiveSessionMigrationMode } from "./contracts.ts";
 import { cfg } from "../../util.ts";
-import { KernelSessionPolicyError, projectRunnerEvent, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant } from "./runner-consumer.ts";
+import { KernelSessionPolicyError, projectRunnerEvent, PROVIDER_CAPABILITIES, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant } from "./runner-consumer.ts";
+import { CLAUDE_PROVIDER_CAPABILITIES } from "../../providers/claude-code/protocol.ts";
 import { RunnerServer, type RunnerProvider } from "../../runner/server.ts";
 import { pruneBridgeCommands, SessionRunnerBridgeStore } from "./bridge-store.ts";
 import { createSessionService, SESSION_SERVICE_CACHE_LIMIT } from "../../session-service.ts";
@@ -18,7 +19,7 @@ import { readInitialHistorySnapshot, writeInitialHistory } from "./initial-histo
 const roots: string[] = [];
 const fresh = () => { const root = mkdtempSync(join(tmpdir(), "ownward-kernel-session-")); roots.push(root); return root; };
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
-function seed(root: string, providerId: "claude" | "codex" = "claude") {
+function seed(root: string, providerId: "claude" | "codex" | "codebuddy" = "claude") {
   const cwd = join(root, "repo"); mkdirSync(cwd);
   const session = new SessionRepository(root).reserve({ taskId: "task", providerId, cwd });
   return { cwd, session };
@@ -190,11 +191,12 @@ describe("Kernel SessionService migration modes", () => {
     const command=new SessionRunnerBridgeStore(root).list().find(item=>item.errorCode==="RUNNER_COMMAND_CONFLICT")!;expect(command).toMatchObject({terminal:true,errorCode:"RUNNER_COMMAND_CONFLICT"});expect(new SessionRepository(root).getByTaskId("task")?.id).toBe(original.id);expect((new KernelSessionService(root,{mode:"off"}) as any).pendingLegacyRunner(undefined,"task")).toBeFalse();expect(repo.setControl("task","observing").control).toBe("observing");expect(repo.setControl("task","ownward").control).toBe("ownward");
   });
 
-  test("handoff projection traverses more than 15 predecessors and marks message-budget truncation",async()=>{
+  test("handoff projection preserves complete chronological history",async()=>{
     const root=fresh(),cwd=join(root,"repo"),repo=new SessionRepository(root);mkdirSync(cwd);let current=repo.reserve({taskId:"task",providerId:"claude",cwd});writeInitialHistory(root,{sessionId:current.id,providerId:current.providerId,nativeRef:"history-0",messages:[{role:"user",text:"origin-message",ts:"2026-08-01T00:00:00.000Z"}]});
     const providers=["codex","codebuddy","claude"] as const;for(let i=1;i<=18;i++){const next=providers[(i-1)%providers.length]!;current=repo.handoff({taskId:"task",expectedSessionId:current.id,providerId:next,reason:`hop-${i}`}).current;writeInitialHistory(root,{sessionId:current.id,providerId:current.providerId,nativeRef:`history-${i}`,messages:[{role:"assistant",text:`message-${i}`,ts:`2026-08-01T00:${String(i).padStart(2,"0")}:00.000Z`}]});}
     const service=new KernelSessionService(root,{mode:"runner"}),states=[await service.state("task"),(await service.states(["task"])).get("task")!,await new KernelSessionService(root,{mode:"runner"}).state("task")];for(const state of states){expect(state.messages.some(message=>message.text==="origin-message")).toBeTrue();expect(state.messages.filter(message=>message.name==="handoff")).toHaveLength(18);expect(state.messages.some(message=>message.name==="history")).toBeFalse();}
-    const bounded=repo.reserve({taskId:"bounded",providerId:"claude",cwd});writeInitialHistory(root,{sessionId:bounded.id,providerId:"claude",nativeRef:"bounded-history",messages:Array.from({length:250},(_,index)=>({role:"assistant" as const,text:`bounded-${index}-${"x".repeat(600)}`,ts:new Date(1700000000000+index).toISOString()}))});const state=await new KernelSessionService(root,{mode:"runner"}).state("bounded");expect(state.messages[0]).toMatchObject({role:"system",name:"history"});expect(state.messages[0].text).toContain("较早消息已省略");expect(state.messages.at(-1)?.text).toContain("bounded-249-");expect(state.messages.length).toBeLessThanOrEqual(201);
+    const bounded=repo.reserve({taskId:"bounded",providerId:"claude",cwd});writeInitialHistory(root,{sessionId:bounded.id,providerId:"claude",nativeRef:"bounded-history",messages:Array.from({length:250},(_,index)=>({role:"assistant" as const,text:`bounded-${index}-${"x".repeat(600)}`,ts:new Date(1700000000000+index).toISOString()}))});const state=await new KernelSessionService(root,{mode:"runner"}).state("bounded");expect(state.messages).toHaveLength(250);expect(state.messages[0].text).toContain("bounded-0-");expect(state.messages.at(-1)?.text).toContain("bounded-249-");
+    const large=repo.reserve({taskId:"large",providerId:"claude",cwd});const huge="y".repeat(130_000);writeInitialHistory(root,{sessionId:large.id,providerId:"claude",nativeRef:"large-history",messages:[{role:"user",text:huge,ts:"2026-08-02T00:00:00.000Z"}]});expect((await new KernelSessionService(root,{mode:"runner"}).state("large")).messages[0].text).toBe(huge);
   });
   test("legacy non-UUID Codex row stays visible/read-only and survives legal copy-forward",async()=>{const root=fresh(),cwd=join(root,"repo"),stamp=new Date().toISOString(),alias="bad-alias",oldValid="00000000-0000-4000-8000-000000000077",bad={id:"bad",providerId:"codex",nativeRef:"not-a-uuid",previousRefs:[oldValid],cwd,control:"ownward",taskIds:["bad",alias],recoverable:true,source:"legacy",createdAt:stamp,updatedAt:stamp};mkdirSync(cwd);writeFileSync(join(root,"sessions.json"),JSON.stringify({schemaVersion:1,sessions:[bad,{id:"healthy",providerId:"claude",nativeRef:"healthy-ref",previousRefs:[],cwd,control:"ownward",taskIds:["healthy"],recoverable:true,source:"legacy",createdAt:stamp,updatedAt:stamp}]}));writeInitialHistory(root,{sessionId:"bad",providerId:"codex",nativeRef:"not-a-uuid",messages:[{role:"assistant",text:"local history",ts:stamp}]});const repo=new SessionRepository(root);expect(repo.list().map(s=>s.id).sort()).toEqual(["bad","healthy"]);expect(repo.getByTaskId(alias)).toMatchObject({id:"bad",nativeRef:null,isolated:"invalid-codex-native-ref"});expect((await new KernelSessionService(root,{mode:"runner"}).state(alias))).toMatchObject({messages:[{text:"local history"}],operability:"read-only",errorCode:"SESSION_RECORD_UNOPERABLE"});repo.setControl("healthy","observing");repo.bind({taskId:"healthy",providerId:"claude",nativeRef:"healthy-new",cwd});repo.reserve({taskId:"new",providerId:"claude",cwd});for(const call of[()=>repo.reserve({taskId:alias,providerId:"codex" as const,cwd}),()=>repo.bind({taskId:"other",providerId:"codex" as const,nativeRef:oldValid,cwd}),()=>repo.clearNativeRef("bad")])expect(call).toThrow("SESSION_RECORD_UNOPERABLE");const report=repo.reconcile();expect(report.conflicts).toContainEqual({key:"bad",reason:"legacy-codex-native-ref-invalid-read-only-skipped"});const rows=JSON.parse(readFileSync(join(root,"kernel/sessions.json"),"utf8")).sessions;expect(rows.find((row:any)=>row.id==="bad")).toEqual(bad);expect(new SessionRepository(root).getByTaskId("healthy")).toMatchObject({control:"observing",nativeRef:"healthy-new"});expect(new SessionRepository(root).getDiagnostics()).toEqual([{key:"bad",reason:"legacy-codex-native-ref-invalid-read-only-skipped"}]);});
 
@@ -342,6 +344,21 @@ describe("Kernel SessionService migration modes", () => {
     expect(clients).toBe(0);
   });
 
+  test("CodeBuddy 声明 approval：能力表不得与 Runner 侧 Provider 声明分叉", async () => {
+    // 回归 2026-09-16：CLI 无 --permission-prompt-tool 曾被误当成「没有审批桥」而抽掉 approval。
+    // 旗标只是真 CC 的启动开关，桥是 stream-json 的 control_request/can_use_tool ↔ control_response，克隆 CLI 照发；
+    // 漏声明的后果是审批卡弹得出、答不了，turn 挂到 runner 重启才收敛成 unknown-outcome。
+    expect(PROVIDER_CAPABILITIES.codebuddy.has("approval")).toBe(true);
+    expect([...PROVIDER_CAPABILITIES.codebuddy].sort()).toEqual([...PROVIDER_CAPABILITIES.claude].sort());
+    // 两处能力表同源约束：kernel 白名单必须是 Runner 侧 Provider 声明的子集，否则又会一处放行一处拒
+    for (const capability of PROVIDER_CAPABILITIES.codebuddy) expect(CLAUDE_PROVIDER_CAPABILITIES.has(capability as never)).toBe(true);
+    const root = fresh(); seed(root, "codebuddy");
+    const runner = new RunnerSessionConsumer(root, () => { throw new Error("unexpected"); });
+    const service = new KernelSessionService(root, { mode: "runner" }, runner);
+    const error = await service.respondApproval("task", "request", { allow: true }).then(() => null, (e) => e);
+    expect(error?.code).not.toBe("PROVIDER_CAPABILITY_UNSUPPORTED");
+  });
+
   test("control uncertainty preserves receipt, does not drift grants, and approval forwards remember", async () => {
     const root = fresh(), { cwd, session } = seed(root); const extra = join(root, "extra"); mkdirSync(extra); const bodies: any[] = [];
     const unavailable: any = { request: async () => { throw Object.assign(new Error("lost"), { code: "RUNNER_REQUEST_OUTCOME_UNKNOWN" }); }, close() {} };
@@ -390,12 +407,58 @@ describe("Kernel SessionService migration modes", () => {
     await expect(service.acquireControl("task", "ownward")).rejects.toMatchObject({ code: "SESSION_CONTROL_BUSY" });
   });
 
+  test("释放/接管输入权在常驻投影器上立刻可见（增量投影不许吐旧租约）", async () => {
+    const root = fresh(); seed(root); const service = new KernelSessionService(root, { mode: "runner" });
+    expect((await service.state("task")).control).toBe("ownward");   // 先投影一次：投影器从此常驻复用
+    await service.acquireControl("task", "observing");
+    // 记录已经是 observing，投影再吐 ownward 的话：网页上「接管输入」按钮不回来，而写路径按记录判租约直接拒
+    expect((await service.state("task")).control).toBe("observing");
+    expect(service.projectForIndex("task")?.state.control).toBe("observing");
+    await service.acquireControl("task", "ownward");
+    expect((await service.state("task")).control).toBe("ownward");
+    expect((await service.states(["task"])).get("task")?.control).toBe("ownward");
+  });
+
   test("follow-up durable accept reopens an exited Task before any later sync",async()=>{const root=fresh(),cwd=join(root,"repo");mkdirSync(cwd);writeFileSync(join(root,"tasks.json"),JSON.stringify([{id:"task",project:"p",projectDir:cwd,cwd,task:"x",mode:"claude-bg",engine:true,startedAt:"2026-08-17T00:00:00.000Z",endedAt:"2026-08-17T00:01:00.000Z",status:"exited",exitCode:0,commandId:"old",runId:"old-run"}]));new SessionRepository(root).bind({taskId:"task",providerId:"claude",nativeRef:"native",cwd});const fake:any={require(){},submit:async(_task:any,_session:any,_kind:any,_input:any,identity:any)=>identity};const receipt=await new KernelSessionService(root,{mode:"runner"},fake).send("task",{text:"follow up"});const task=JSON.parse(readFileSync(join(root,"tasks.json"),"utf8"))[0];expect(task).toMatchObject({status:"running",launchState:"accepted",commandId:receipt.commandId,runId:receipt.runId,uncertain:false});expect(task.endedAt).toBeUndefined();expect(task.exitCode).toBeUndefined();});
   test("Task projection lock/corruption cannot turn durable accepted send into client failure",async()=>{for(const mode of["busy","corrupt"] as const){const root=fresh(),cwd=join(root,"repo");mkdirSync(cwd);new SessionRepository(root).bind({taskId:"task",providerId:"claude",nativeRef:"native",cwd});if(mode==="corrupt")writeFileSync(join(root,"tasks.json"),"{");else{writeFileSync(join(root,"tasks.json"),JSON.stringify([{id:"task",project:"p",projectDir:cwd,cwd,task:"x",mode:"claude-bg",engine:true,startedAt:"now",status:"exited"}]));const lock=join(root,".tasks.write.lock");mkdirSync(lock);writeFileSync(join(lock,"owner.json"),JSON.stringify({pid:process.pid,createdAt:Date.now(),token:"held"}));}let syncs=0,submits=0;const fake:any={require(){},submit:async(_task:any,_session:any,_kind:any,_input:any,identity:any)=>{submits++;return identity;},syncCommand:async()=>{syncs++;return[{sequence:1,type:"completed"}]}};const receipt=await new KernelSessionService(root,{mode:"runner"},fake).send("task",{text:"accepted"});expect(receipt).toMatchObject({commandId:expect.any(String),runId:expect.any(String)});await Bun.sleep(10);expect(submits).toBe(1);expect(syncs).toBeGreaterThan(0);expect(new SessionRunnerBridgeStore(root).list("task")).toHaveLength(1);}});
   test("turn idempotency only reuses an explicit client mutation id", () => {
     const root = fresh(), bridge = new SessionRunnerBridgeStore(root), base = { taskId: "task", sessionId: "task", providerId: "claude", kind: "start-run" as const, serializedInput: "same" };
     const a = bridge.reserve(base), b = bridge.reserve(base); expect(b.reused).toBe(false); expect(b.command.commandId).not.toBe(a.command.commandId);
     const c = bridge.reserve({ ...base, clientMutationId: "retry-key" }), d = bridge.reserve({ ...base, clientMutationId: "retry-key" }); expect(d.reused).toBe(true); expect(d.command.commandId).toBe(c.command.commandId);
+  });
+
+  // 接力后的 Session id 是 `task:handoff:uuid`、不在自己的 taskIds 里。审批投影按 Session id 自动放行时，
+  // taskId() 退回 session.id，finishControl 投影完成事件就抛 SESSION_PROVIDER_DRIFT：答复其实已送达 CLI，
+  // 却被当失败、又开 Action 弹审批——「总是批准」在接力会话里从没生效过（2026-09-15 本机实测）
+  test("handoff Session approval addressed by Session id resolves to its owning task", async () => {
+    const root = fresh(), cwd = join(root, "repo"), repo = new SessionRepository(root); mkdirSync(cwd);
+    const first = repo.reserve({ taskId: "task", providerId: "codex", cwd });
+    const current = repo.handoff({ taskId: "task", expectedSessionId: first.id, providerId: "claude", reason: "switch" }).current;
+    expect(current.taskIds).not.toContain(current.id);
+    const at = new Date().toISOString(), commands = new RunnerCommandJournal(root), events = new RunnerEventJournal(root), runs = new RunRepository(root);
+    const base = { schemaVersion: 1 as const, at, commandId: "turn", runId: "run", taskId: "task", sessionId: current.id, providerId: "claude" };
+    commands.accept({ commandId: "turn", kind: "send-input", runId: "run", sessionId: current.id, providerId: "claude", input: JSON.stringify({ text: "go" }) });
+    runs.append({ ...base, eventId: "accepted", type: "command-accepted" }); runs.append({ ...base, eventId: "started", type: "run-started" });
+    events.append({ eventId: "turn-started", type: "started", at, commandId: "turn", runId: "run", sessionId: current.id, providerId: "claude" });
+    events.append({ eventId: "asked", type: "approval-requested", at, commandId: "turn", runId: "run", sessionId: current.id, providerId: "claude", approvalRequestId: "request", payload: JSON.stringify({ toolName: "Bash", input: { command: "ls" } }) });
+    const client: any = {
+      request: async (kind: string, body: any) => { if (kind === "approval-response") { commands.accept({ commandId: body.commandId, kind: "approval-response", runId: body.runId, sessionId: body.sessionId, providerId: body.providerId, approvalRequestId: body.approvalRequestId, input: body.input }); events.append({ eventId: "answer-started", type: "started", at, commandId: body.commandId, runId: body.runId, sessionId: body.sessionId, providerId: "claude" }); events.append({ eventId: "answered", type: "completed", at, commandId: body.commandId, runId: body.runId, sessionId: body.sessionId, providerId: "claude" }); } return { kind: "accepted" }; },
+      queryCommand: async (commandId: string) => ({ body: { events: events.readStrict().filter((e) => e.commandId === commandId), truncated: false } }),
+      close() {},
+    };
+    const service = new KernelSessionService(root, { mode: "runner" }, new RunnerSessionConsumer(root, () => client));
+    await expect(service.respondApproval(current.id, "request", { allow: true })).resolves.toMatchObject({ queued: false });
+    expect(new SessionRunnerBridgeStore(root).list(current.id).find((c) => c.kind === "approval-response")?.taskId).toBe("task");
+  });
+
+  // 审批投影以前只挂 60s 定时器：「总是批准」规则命中也要等最多一分钟，人往往先看到审批卡片自己点了
+  test("sync notifies the approval listener as soon as an approval-requested event is pulled", async () => {
+    const root = fresh(); seed(root); const seen: string[] = []; let pulls = 0;
+    new SessionRunnerBridgeStore(root).reserve({ taskId: "task", sessionId: "task", providerId: "claude", kind: "start-run", serializedInput: "prompt", identity: { commandId: "turn", runId: "run" } });
+    const runner: any = { syncCommand: async () => ++pulls === 1 ? [{ sequence: 1, type: "approval-requested" }] : [{ sequence: 2, type: "completed" }] };
+    onRunnerApprovalRequested((dataRoot) => seen.push(dataRoot));
+    try { await new KernelSessionService(root, { mode: "runner" }, runner).resumePending(); } finally { onRunnerApprovalRequested(null); }
+    expect(seen).toEqual([root]);
   });
 });
 

@@ -21,6 +21,10 @@ type BtnType = "default" | "primary" | "danger";
 function button(text: string, value: object, type: BtnType = "default") {
   return { tag: "button", text: { tag: "plain_text", content: text.slice(0, 18) }, type, value };
 }
+/** 跳转按钮：点了直接开链接，不产生回调事件。 */
+function urlButton(text: string, url: string, type: BtnType = "default") {
+  return { tag: "button", text: { tag: "plain_text", content: text.slice(0, 18) }, type, url };
+}
 
 /** Card 1.0：标题栏 + 一段 markdown + 一行按钮 */
 function card(title: string, template: string, bodyMd: string, actions: object[]) {
@@ -29,7 +33,8 @@ function card(title: string, template: string, bodyMd: string, actions: object[]
     header: { title: { tag: "plain_text", content: title }, template },
     elements: [
       { tag: "div", text: { tag: "lark_md", content: bodyMd.slice(0, 1500) } },
-      { tag: "action", actions },
+      // 没有按钮时不能留一个空 action 元素——飞书会直接拒掉整张卡
+      ...(actions.length ? [{ tag: "action", actions }] : []),
     ],
   };
 }
@@ -49,6 +54,19 @@ export function sendQuestionCard(taskId: string, requestId: string, question: st
   const btns = options.slice(0, 4).map((o) => button(o, { t: "perm", taskId, requestId, answer: o }));
   btns.push(button("跳过", { t: "perm", taskId, requestId, answer: "" }));
   return sendCard(card("❓ 任务提问", "blue", question, btns));
+}
+
+/** 通知卡：把一条 act 级通知发成「出了什么事 + 当前状态 + 能做什么」。
+ *  正文分三段：首行标题进卡头，body 说清发生了什么，context 每行一个事实（项目/原因/退出码），
+ *  按钮是 url 直跳（打开工作台/入会/文档），不走回调——通知卡不该要求人先点一次再想去哪。 */
+export function sendNoticeCard(n: {
+  title: string; body: string; context: string[]; actions: { text: string; url: string; primary?: boolean }[]; source: string;
+}): Promise<string | null> {
+  const template = /失败|冲突|错误|⚠️|❌|🛑/.test(n.title) ? "red" : "blue";
+  const lines = [n.body.trim(), ...n.context.map((c) => `· ${c}`)].filter(Boolean);
+  const body = lines.join("\n") || n.title;
+  const btns = n.actions.slice(0, 3).map((a) => urlButton(a.text, a.url, a.primary ? "primary" : "default"));
+  return sendCard(card(n.title, template, body, btns));
 }
 
 /** 自测卡：点一下验证「发卡 → 点击 → 回调 → 回写卡片」整条链路是否通（尤其后台回调是否已在飞书启用） */

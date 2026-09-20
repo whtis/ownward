@@ -6,7 +6,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { appendEvent } from "../spool.ts";
 import { notify } from "../notify.ts";
-import { cfg, fmt, log, markHealth, run, updateState, loadState } from "../util.ts";
+import { cfg, fmt, log, markHealth, run, updateState, loadState, workbenchUrl } from "../util.ts";
 import {
   ScanFile, ScanResult, StockPos, loadScan, loadSnapshot, saveScan, stratCfg, toLbSymbol,
 } from "./engine.ts";
@@ -132,7 +132,9 @@ export async function monitorTick() {
     const key = `${pos.symbol}:${today}`;
     if (fired[key]) continue;             // 当日已叫过——止损是叫醒你，不是每 10 分钟锤你
     fired[key] = new Date().toISOString();
-    await notify(`🛑 ${pos.symbol} ${alerts.join("；")}\n按 STRATEGY.md 纪律执行——打开策略页处理`, { source: "stock" });
+    await notify(`🛑 ${pos.symbol} ${alerts.join("；")}`, { source: "stock", level: "act", quietExempt: true, key: `stock:${pos.symbol}:${today}`,
+    context: ["按 STRATEGY.md 纪律执行"],
+    actions: [{ text: "打开策略页", url: workbenchUrl("/strategy.html"), primary: true }] });
   }
   updateState((s) => {
     // 只保留今天的记录，历史键自然清退

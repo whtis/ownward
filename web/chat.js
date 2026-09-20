@@ -190,13 +190,9 @@ function renderChatMsgs(partial) {
 }
 
 /* ============ 图片附件（发送前预览 / 历史消息展示） ============ */
+// 类型/大小/张数与压缩都在 composer-images.js（对话、任务追问、派发弹窗共用一条流水线），
 // 限制与后端 chat-images.ts 逐条对应：前端先拦是体验（不让用户白等一次上传），
 // 后端那份才是保证——两边都得有，谁少一层都不算数
-const CH_IMG_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-const CH_IMG_MAX = 6;
-const CH_IMG_BYTES = 5 * 1024 * 1024;
-const CH_IMG_TOTAL = 12 * 1024 * 1024;
-const chMb = (n) => `${(n / 1048576).toFixed(1)}MB`;
 
 /** 历史消息里的图：走只读接口按 id 取（消息里只有元数据，没有 base64）；
  *  刚在本地挑好还没落盘的用 blob 预览 url。 */
@@ -226,79 +222,26 @@ function bindChatImages(input) {
   });
 }
 
-/** 挑一张图：类型/大小逐条判 → HEIC 先转码 → 超限先缩 → base64 进待发列表。
- *  每一条拒绝都给原话（哪张、为什么），不静默丢掉。 */
+/** 挑一张图：交给共用流水线收（类型判 → HEIC 转码 → 超限压缩），过了再进本对话的待发列表。
+ *  每一条拒绝都在流水线里给过原话（哪张、为什么），不静默丢掉。 */
 async function addChatImage(file) {
-  if (!file) return;
   const key = chatDraftKey();
+  if (ComposerDrafts.getAttachments(key).length >= COMPOSER_IMG_MAX) { toast(`一条消息最多 ${COMPOSER_IMG_MAX} 张图`); return; }
+  const image = await prepareComposerImage(file);
+  if (!image) return;
+  // 列表在 await 之后才读写：同时粘几张时每张都看得到前一张的结果（并发下不会互相覆盖/越界）
   const target = ComposerDrafts.getAttachments(key);
-  if (target.length >= CH_IMG_MAX) { toast(`一条消息最多 ${CH_IMG_MAX} 张图`); return; }
-  // HEIC 按 type + 扩展名双判：某些拖拽路径下 file.type 是空串（同 skin.js）
-  const isHeic = /^image\/hei[cf]/.test(file.type) || /\.hei[cf]$/i.test(file.name || "");
-  if (!isHeic && !CH_IMG_TYPES.includes(file.type)) { toast("只支持 PNG / JPEG / WebP / GIF / HEIC"); return; }
-  if (file.size > 20 * 1024 * 1024) { toast(`图片太大（${chMb(file.size)}），先压缩一下`); return; }
-  try {
-    let blob = file;
-    let type = file.type;
-    if (isHeic) {   // Chromium 解不了 HEIC：丢给 daemon 用 macOS sips 转 jpeg（与皮肤壁纸同一条实现）
-      toast("HEIC 转码中…");
-      const r = await fetch("/api/chat/convert-heic", { method: "POST", body: file });
-      if (!r.ok) { toast((await r.json().catch(() => null))?.msg || "HEIC 转换失败"); return; }
-      blob = await r.blob();
-      type = "image/jpeg";
-    }
-    if (blob.size > CH_IMG_BYTES) {
-      const small = await shrinkChatImage(blob, type);
-      if (!small) { toast(`单张不能超过 ${chMb(CH_IMG_BYTES)}（${chMb(blob.size)}），先压缩一下`); return; }
-      toast(`图片较大（${chMb(blob.size)}），已压缩后附上`);   // 改了内容就明说，不偷偷换掉用户的图
-      blob = small; type = "image/jpeg";
-    }
-    const total = target.reduce((n, i) => n + i.size, 0) + blob.size;
-    if (total > CH_IMG_TOTAL) { toast(`图片合计不能超过 ${chMb(CH_IMG_TOTAL)}，少发几张`); return; }
-    const data = await blobToBase64(blob);
-    target.push({ media_type: type, data, size: blob.size, url: URL.createObjectURL(blob) });
-    ComposerDrafts.setAttachments(key, target);
-    if (chatDraftKey() === key) { Chat.images = target; renderChatThumbs(); }
-  } catch (e) { toast(`读取图片失败：${String(e).slice(0, 80)}`); }
-}
-
-const blobToBase64 = (blob) => new Promise((res, rej) => {
-  const rd = new FileReader();
-  rd.onload = () => res(String(rd.result).split(",")[1] || "");
-  rd.onerror = () => rej(rd.error || new Error("读取失败"));
-  rd.readAsDataURL(blob);
-});
-
-/** 超限图片的兜底压缩：最长边 1920 的 jpeg。GIF 不碰——重编码会把动图拍成一张静图，
- *  那不是"压缩"，是换了张图（宁可让用户明确知道超限）。 */
-async function shrinkChatImage(blob, type) {
-  if (type === "image/gif") return null;
-  const url = URL.createObjectURL(blob);
-  try {
-    const img = await new Promise((res, rej) => {
-      const el = new Image();
-      el.onload = () => res(el);
-      el.onerror = () => rej(new Error("解码失败"));
-      el.src = url;
-    });
-    const scale = Math.min(1, 1920 / Math.max(img.naturalWidth, img.naturalHeight));
-    const c = document.createElement("canvas");
-    c.width = Math.max(1, Math.round(img.naturalWidth * scale));
-    c.height = Math.max(1, Math.round(img.naturalHeight * scale));
-    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-    for (const q of [0.85, 0.7]) {
-      const out = await new Promise((res) => c.toBlob(res, "image/jpeg", q));
-      if (out && out.size <= CH_IMG_BYTES) return out;
-    }
-    return null;
-  } catch { return null; } finally { URL.revokeObjectURL(url); }
+  if (!composerImageFits(target, image.size)) return;
+  target.push({ media_type: image.media_type, data: image.data, size: image.size, url: URL.createObjectURL(image.blob) });
+  ComposerDrafts.setAttachments(key, target);
+  if (chatDraftKey() === key) { Chat.images = target; renderChatThumbs(); }
 }
 
 function renderChatThumbs() {
   const box = $("#ch-imgs");
   if (!box) return;
   box.innerHTML = Chat.images.map((im, i) =>
-    `<div class="thumb" title="${chMb(im.size)}">
+    `<div class="thumb" title="${composerImgMb(im.size)}">
       <img src="${esc(im.url)}" alt="">
       <button title="移除" onclick="removeChatImage(${i})">✕</button>
     </div>`).join("");
@@ -575,7 +518,7 @@ async function sendChat() {
       // 用发送前记下的序号撤回，不能按文本找：相同问题可能在历史里出现多次。
       if (sendMsgs[pendingAt]?.role === "user") sendMsgs.splice(pendingAt, 1);
       if (!ComposerDrafts.getText(sendKey)) ComposerDrafts.setText(sendKey, draftSnapshot);
-      ComposerDrafts.setAttachments(sendKey, [...pics, ...ComposerDrafts.getAttachments(sendKey)].slice(0, CH_IMG_MAX));
+      ComposerDrafts.setAttachments(sendKey, [...pics, ...ComposerDrafts.getAttachments(sendKey)].slice(0, COMPOSER_IMG_MAX));
       if (chatDraftKey() === sendKey) restoreChatComposer();
       if (failMsg && chatSendOwnsView(sendKey, createdId)) toast(failMsg);
     }

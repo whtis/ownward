@@ -43,6 +43,9 @@ TABS.system = {
           <div class="section-title">运行状态</div>
           <div class="panel" id="sy-schedules" style="padding:6px"></div>
           <details class="sys-advanced"><summary>高级诊断 · 全部后台任务（含系统/第三方，只读）</summary><div class="panel" style="overflow-x:auto;margin-top:6px"><table class="table" id="sy-schedules-all"></table></div></details>
+          <div class="section-title">Worktree 清理（编码任务的隔离目录）</div>
+          <details class="sys-worktrees"><summary>展开清单（要算目录大小，稍慢）</summary>
+            <div class="panel" id="sy-worktrees" style="padding:10px 12px;margin-top:6px"></div></details>
           <div class="section-title">股票自选（watchlist）</div>
           <div class="panel" id="sy-stock" style="padding:10px 12px"></div>
           <div class="section-title">自动批准规则（「总是批准」的记忆）</div>
@@ -74,6 +77,8 @@ TABS.system = {
     $("#sy-autolog").addEventListener("change", (e) => (Sys.autoLog = e.target.checked));
     // 高级诊断（全机任务）只在展开时按需拉一次，避免默认就糊一脸
     root.querySelector(".sys-advanced")?.addEventListener("toggle", function () { if (this.open && !Sys.allLoaded) { Sys.allLoaded = true; loadAllSchedules(); } });
+    // worktree 清单要对每个目录跑 du，默认不拉——展开才算
+    root.querySelector(".sys-worktrees")?.addEventListener("toggle", function () { if (this.open) loadWorktrees(); });
     loadSystem();
   },
   show() {
@@ -336,4 +341,63 @@ function renderVerticals(diag) {
     toast(r.ok ? `已重载：${b.dataset.vreload} → ${r.status?.state}` : `重载失败：${r.msg || r.code || "未知错误"}`);
     loadSystem();
   }));
+}
+
+/* ---- Worktree 清理：bg 编码任务的隔离目录只增不减，这里看清单并批量删 ----
+   口径见 src/worktrees.ts：git worktree remove 不删分支，所以真正会丢的只有未提交改动
+   和被 .gitignore 忽略的本地文件（node_modules / 构建产物 / dev 用的 config.json）。
+   dispatch 自建的 ownward/* 分支落地后会跟目录一起收；人起名的分支一律保留。 */
+const WT_TONE = { busy: "accent", dirty: "bad", unmerged: "warn", orphan: "warn", clean: "" };
+const WT_LABEL = { busy: "运行中", dirty: "有未提交改动", unmerged: "未落地", orphan: "游离目录", clean: "可清理" };
+const gb = (kb) => kb >= 1024 * 1024 ? `${(kb / 1024 / 1024).toFixed(1)}G` : `${Math.round(kb / 1024)}M`;
+
+async function loadWorktrees() {
+  const el = $("#sy-worktrees"); if (!el) return;
+  el.innerHTML = stateBox("正在统计目录大小…", "loading");
+  const r = await getJSON("/api/worktrees").catch(() => null);
+  if (!r?.ok) { el.innerHTML = stateBox(r?.msg || "无法读取 worktree 清单", "error"); return; }
+  Sys.worktrees = r;
+  if (!r.entries.length) { el.innerHTML = stateBox(`${r.root} 下没有 worktree`); return; }
+  const clean = r.entries.filter((e) => e.state === "clean");
+  const cleanKb = clean.reduce((s, e) => s + e.sizeKb, 0);
+  el.innerHTML = `
+    <div class="kv"><span>目录</span><span class="v mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis">${esc(r.root)}</span></div>
+    <div class="kv"><span>合计</span><span class="v">${r.entries.length} 个 · ${gb(r.totalKb)}</span></div>
+    <div class="kv"><span>自动清理</span><span class="v">${r.retentionDays ? `${r.retentionDays} 天没动过就删（只删「可清理」）` : "关闭（config dispatch.worktreeRetentionDays）"}</span></div>
+    <div class="row" style="gap:6px;margin:8px 0">
+      <button class="button secondary sm" id="sy-wt-clean" ${clean.length ? "" : "disabled"}>一键清理 ${clean.length} 个可清理项（${gb(cleanKb)}）</button>
+      <button class="button ghost sm" id="sy-wt-reload">刷新</button>
+    </div>
+    <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px">删目录不删分支：已提交的东西都还在。会一起没的是未提交改动和被 gitignore 忽略的本地文件（node_modules、构建产物、dev config.json）。</div>
+    <div class="glist">${r.entries.map(wtRowHtml).join("")}</div>`;
+  $("#sy-wt-reload").addEventListener("click", loadWorktrees);
+  $("#sy-wt-clean").addEventListener("click", async () => {
+    if (!confirm(`清理 ${clean.length} 个「可清理」worktree（${gb(cleanKb)}）？分支保留，未提交改动的目录不动。`)) return;
+    const btn = $("#sy-wt-clean"); btn.disabled = true; btn.textContent = "清理中…";
+    toast((await post("/api/worktrees/remove", { states: ["clean"] })).msg || "已提交");
+    loadWorktrees();
+  });
+  $$("#sy-worktrees [data-wt]").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.dataset.wt, force = b.dataset.force === "1";
+    if (!confirm(force ? `强制删除 ${name}？未提交改动会一起没。` : `清理 ${name}？`)) return;
+    b.disabled = true;
+    const res = await post("/api/worktrees/remove", { names: [name], force });
+    toast(res.results?.[0]?.msg || res.msg || "已提交");
+    loadWorktrees();
+  }));
+}
+function wtRowHtml(e) {
+  const tone = WT_TONE[e.state];
+  return `<div class="card" ${tone ? `data-tone="${tone}"` : ""}>
+    <div class="top"><span class="tag" ${tone ? `data-tone="${tone === "accent" ? "ok" : tone}"` : ""}>${WT_LABEL[e.state] || e.state}</span>
+      <span class="task-project">${esc(e.name)}</span>
+      <span class="right mono">${gb(e.sizeKb)} · ${ageText(new Date(e.lastActiveAt).toISOString())}</span></div>
+    <div class="body" style="font-size:12px;color:var(--text-secondary)">${e.branch ? `<span class="mono">${esc(e.branch)}</span> · ` : ""}${esc(e.reason)}</div>
+    ${e.tasks.length ? `<div class="body" style="font-size:11px;color:var(--text-tertiary);-webkit-line-clamp:1;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">${esc(e.tasks.map((t) => `${t.id} ${t.title}`).join(" · "))}</div>` : ""}
+    <div class="foot"><span style="flex:1"></span>
+      ${e.state === "busy" ? "" : e.removable
+        ? `<button class="button sm ghost" data-wt="${esc(e.name)}">清理</button>`
+        : `<button class="button sm ghost danger" data-wt="${esc(e.name)}" data-force="1">强制清理</button>`}
+    </div>
+  </div>`;
 }

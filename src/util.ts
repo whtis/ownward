@@ -71,6 +71,13 @@ export function fmt(d: Date, kind: "date" | "time" | "datetime"): string {
   return `${date} ${time}`;
 }
 
+/** 工作台地址。飞书卡片上的按钮会在手机上点开，localhost 到不了——
+ *  配了 notify.workbenchUrl（外网隧道地址）就用它，没配就退回本机地址（至少在电脑上能点）。 */
+export function workbenchUrl(path = "/"): string {
+  const base = String(cfg.notify?.workbenchUrl || "").replace(/\/+$/, "") || `http://localhost:${cfg.dashboard?.port || 4517}`;
+  return path.startsWith("/") ? base + path : `${base}/${path}`;
+}
+
 export function inQuietHours(d = new Date()): boolean {
   const t = fmt(d, "time");
   const { start, end } = cfg.quietHours || {};

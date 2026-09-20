@@ -137,7 +137,7 @@ export async function applyCcHook(taskId: string, hook: any): Promise<{ ok: bool
   finalizeTerminalTask(fresh)
     .then(async () => {
       const { notify } = await import("./notify.ts");
-      await notify(`✅ terminal 任务结束 [${t.project}] ${t.task.slice(0, 40)}\n（Claude 会话已退出，已 done+收割）`, { source: "dispatch" });
+      await notify(`✅ terminal 任务结束 [${t.project}] ${t.task.slice(0, 40)}\n（Claude 会话已退出，已 done+收割）`, { source: "dispatch", level: "fyi", key: `terminal-end:${t.id}` });
     })
     .catch((e) => log(`terminal end(hook) finalize [${taskId}] failed: ${e}`));
   return { ok: true, msg: "已排队收尾" };
@@ -231,7 +231,7 @@ export async function sweepTerminalTasks(): Promise<void> {
     await finalizeTerminalTask(t);
     try {
       const { notify } = await import("./notify.ts");
-      await notify(`✅ terminal 任务自动结束 [${t.project}] ${t.task.slice(0, 40)}\n（Claude 会话沉寂 >${TERMINAL_SILENT_MS / 60000}min，已 done+收割）`, { source: "dispatch" });
+      await notify(`✅ terminal 任务自动结束 [${t.project}] ${t.task.slice(0, 40)}\n（Claude 会话沉寂 >${TERMINAL_SILENT_MS / 60000}min，已 done+收割）`, { source: "dispatch", level: "fyi", key: `terminal-end:${t.id}` });
     } catch { /* 通知失败不影响收尾 */ }
   }
 }

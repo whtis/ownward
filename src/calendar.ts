@@ -1,7 +1,7 @@
 // 今日会议：lark-cli calendar +agenda（user 身份）。列表 5min 缓存；
 // daemon 每分钟查一次"10 分钟内要开的会"推提醒（按 event_id 去重，跨重启无所谓——会只提醒当天）。
 import { notify } from "./notify.ts";
-import { log, run } from "./util.ts";
+import { log, run, fmt } from "./util.ts";
 
 export interface Meeting {
   id: string;
@@ -48,8 +48,11 @@ export async function sweepMeetingReminders() {
       if (mins > 0 && mins <= 10 && !reminded.has(m.id)) {
         reminded.add(m.id);
         await notify(
-          `📅 ${Math.round(mins)} 分钟后开会：${m.title}${m.organizer ? `（${m.organizer}）` : ""}${m.meetingUrl ? `\n入会: ${m.meetingUrl}` : ""}`,
-          { source: "lark", link: m.meetingUrl || m.appLink },
+          `📅 ${Math.round(mins)} 分钟后开会：${m.title}`,
+          { source: "calendar", level: "act", quietExempt: true, key: `meeting:${m.id}`,
+            link: m.meetingUrl || m.appLink,
+            context: [m.organizer ? `组织者：${m.organizer}` : "", `开始：${fmt(new Date(start), "time")}`].filter(Boolean),
+            actions: m.meetingUrl ? [{ text: "入会", url: m.meetingUrl, primary: true }] : [] },
         );
       }
     }

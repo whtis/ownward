@@ -28,7 +28,7 @@ test("自动生成失败：落 failed 状态、限速重试、耗尽后通知，
     // 每天都触发、截止时间就是此刻 → sweepRoutines 必定落进生成窗口，测试不看真实时钟走到哪
     const conf = ${JSON.stringify(join(data, "routines.json"))};
     writeFileSync(conf, JSON.stringify([{ id: "daily", name: "测试日报", docUrl: "https://example.com/doc",
-      days: [0, 1, 2, 3, 4, 5, 6], time: fmt(new Date(), "time"), aheadMin: 5, window: "yesterday", guide: "随便", enabled: true }]));
+      days: [0, 1, 2, 3, 4, 5, 6], time: fmt(new Date(), "time"), aheadMin: 5, window: "yesterday", guide: "随便", enabled: true, priorWriting: false }]));   // 回看往期要真拉飞书，这里不测它
 
     const day = fmt(new Date(), "date");
     const occ = join(${JSON.stringify(join(data, "routines"))}, "daily-" + day + ".json");

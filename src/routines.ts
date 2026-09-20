@@ -30,6 +30,9 @@ export interface Routine {
    *  填了多人时草稿按项目合写、不按人分组——读者是领导，看的是项目进展，不是谁干了什么。 */
   people?: string[];
   allowMissingSources?: boolean;
+  /** 日报/周报生成前先回看我在这份文档里往期亲手写的内容（对账上期计划、补非编码工作、对齐口径）。
+   *  默认开；文档不是「每周一节」的结构、抽不出东西时自动等于没开，显式设 false 可以连拉取都省掉。 */
+  priorWriting?: boolean;
 }
 
 // 默认没有 routine——晨会/周报这类职责因团队而异。
@@ -122,7 +125,8 @@ export function isDraftStale(r: Routine, s: OccState | null, date: string): bool
 
 function routineMaterialRuleSig(r: Routine) {
   return JSON.stringify([r.window, r.cadence, r.people, r.refRoutines, r.guide, r.project, r.docUrl,
-    listRoutines(true).filter((ref) => r.refRoutines?.includes(ref.id)).map((ref) => [ref.id, ref.docUrl])]);
+    listRoutines(true).filter((ref) => r.refRoutines?.includes(ref.id)).map((ref) => [ref.id, ref.docUrl]),
+    ...(r.priorWriting === false ? ["no-prior-writing"] : [])]);   // 只在关掉时才进指纹：默认值不能让升级前的待审草稿集体报「素材已变」
 }
 
 /** 职责总览：今天该做的可操作，非今天的显示下次触发时间——功能不因今天为空而隐身。
@@ -233,6 +237,18 @@ export function materialDays(window: "yesterday" | "week" | "month", anchor = ne
   return days;
 }
 
+/** 回看「我往期亲手写的内容」的日期窗口（见 priorWritingMaterial）。
+ *  日报：今天 + 往前 7 个自然日——昨天格子里的计划用来对账，今天格子我可能已经先填了计划，再早几天给口径；
+ *  周报：取材窗口再往前带一周——上周的「下周计划」就是这周达成情况的提纲。 */
+export function historyDays(window: "yesterday" | "week", anchor = new Date()): string[] {
+  const end = new Date(`${fmt(anchor, "date")}T00:00:00Z`);
+  const start = new Date(window === "yesterday" ? end : new Date(`${materialDays("week", anchor)[0]}T00:00:00Z`));
+  start.setUTCDate(start.getUTCDate() - 7);
+  const days: string[] = [];
+  for (const d = start; d <= end; d.setUTCDate(d.getUTCDate() + 1)) days.push(d.toISOString().slice(0, 10));
+  return days;
+}
+
 /** 素材指纹：日志文件的 size + 任务的 id/状态。草稿生成时冻结一份，人审时重算比对——
  *  草稿从生成到批准可能隔几小时甚至几天（逾期补做卡最多追 7 天），期间 vault 会继续长，
  *  拿一份过期草稿去写飞书文档是静默的错。只做提示，重不重新生成由人定。
@@ -268,6 +284,7 @@ export function compactLog(text: string): string {
 
 /** 取材：refRoutines 指到的晨会/周会文档排最前（人整理过的一手记录），
  *  然后是 inbox 收割记录（分流开着时只含工作 scope），legacy staging 兜底过渡。
+ *  日报/周报最前面还有一段「我之前亲手写的」（本文档往期内容，见 priorWritingMaterial）。
  *  月窗口素材量是周的 4-5 倍：每天日志的切片收窄、总量上限放宽，否则 slice 会把月末几周整段吃掉。
  *  会议文档不进 materialSig——指纹在每次列表刷新时都要算，不能为它去拉两份几百 KB 的飞书文档。 */
 export async function gatherMaterial(r: Routine, opts: { dryRun?: boolean; days?: string[]; sources?: MeetingSource[]; warnings?: string[]; archive?: boolean } = {}): Promise<string> {
@@ -276,12 +293,20 @@ export async function gatherMaterial(r: Routine, opts: { dryRun?: boolean; days?
   const staging = STAGING_DIR;
   const days = opts.days || materialDays(window);
   const monthly = window === "month";
-  const perDay = monthly ? 1_000 : 2_000;
+  // 每天的切片按窗口天数摊：日报只有一天素材，没理由和周报共用 2k 的上限——
+  // 忙的一天收割日志有 6-7k 字，切到 2k 等于只看得见上午，下午的活整段从日报里消失。
+  const perDay = monthly ? 1_000 : window === "week" ? 6_000 : 20_000;
   const total = monthly ? 90_000 : 40_000;
-  // 月窗口：每天日志先压缩再切片——收割条目里的 Failed attempt / Files / hash / changed / stats / 来源
-  // 对复盘毫无用处，却占一半篇幅；砍掉它们再切 4k，才装得下整天的条目而不是前两条。
-  const compact = (t: string) => monthly ? compactLog(t) : t;
+  // 每天日志先压缩再切片——收割条目里的 Failed attempt / Files / hash / changed / stats / 来源
+  // 对总结毫无用处，却占一半篇幅；砍掉它们，才装得下整天的条目而不是前两条。
+  const compact = compactLog;
   const parts: string[] = [];
+  if (window !== "month" && r.priorWriting !== false && r.docUrl) {
+    const { priorWritingMaterial } = await import("./meeting-notes.ts");
+    const me = r.people?.length ? r.people : [cfg.owner?.name || ""].filter(Boolean);
+    const prior = await priorWritingMaterial(r.docUrl, historyDays(window), me, 8_000, { warnings: opts.warnings });
+    if (prior) parts.push(prior);
+  }
   if (r.refRoutines?.length) {
     const { meetingNotesMaterial } = await import("./meeting-notes.ts");
     const people = r.people?.length ? r.people : [cfg.owner?.name || ""].filter(Boolean);
@@ -291,7 +316,11 @@ export async function gatherMaterial(r: Routine, opts: { dryRun?: boolean; days?
     for (const id of r.refRoutines) {
       const ref = all.find((x) => x.id === id);
       if (!ref?.docUrl) { opts.warnings?.push(`${id}：来源不存在或没配文档`); parts.push(`===== ${id} =====\n(routine 不存在或没配文档，跳过)`); continue; }
-      parts.push(await meetingNotesMaterial(ref.name.split(/[：:]/)[0], ref.docUrl, days, people, Math.floor((monthly ? 20_000 : 10_000) / r.refRoutines.length), { ...opts, allowMissingSources: r.allowMissingSources }));
+      // 月度复盘只读显式归档的快照（可复核、可冻结指纹）。日报/周报引用的是「本周还在长」的晨会表，读快照等于读不到本周，
+      // 所以实时拉、不归档、不记来源指纹（指纹是拿归档比的，没归档就会永远报「素材已变」）；拉不到降级成一条警告。
+      const refOpts = monthly ? { ...opts, allowMissingSources: r.allowMissingSources }
+        : { dryRun: true, warnings: opts.warnings, allowMissingSources: true };
+      parts.push(await meetingNotesMaterial(ref.name.split(/[：:]/)[0], ref.docUrl, days, people, Math.floor((monthly ? 20_000 : 10_000) / r.refRoutines.length), refOpts));
     }
   }
   for (const day of days) {
@@ -351,6 +380,8 @@ export async function routineArchiveStatus(id: string) {
   }));
 }
 
+const PRIOR_MARK = "===== 我之前亲手写的";   // priorWritingMaterial 的段头；有这段才下「怎么用」的指令
+
 /** 生成草稿。dryRun=true 只返回草稿正文，不落 occurrence、不开 action、不发通知——调 prompt/guide 时用。 */
 export async function generateDraft(routineId: string, opts: { dryRun?: boolean } = {}): Promise<string> {
   const r = listRoutines(!!opts.dryRun).find((x) => x.id === routineId);
@@ -364,7 +395,7 @@ export async function generateDraft(routineId: string, opts: { dryRun?: boolean 
   const sources: MeetingSource[] = [];
   const warnings: string[] = [];
   const material = stripPersonal(await gatherMaterial(r, { dryRun: opts.dryRun, days, sources, warnings, archive: false }));
-  if (r.refRoutines?.length && !r.allowMissingSources && warnings.some((w) => /无可用归档|取材失败/.test(w))) {
+  if (r.window === "month" && r.refRoutines?.length && !r.allowMissingSources && warnings.some((w) => /无可用归档|取材失败/.test(w))) {
     throw new Error(`月度复盘「${r.name}」缺少会议素材：${warnings.filter((w) => /无可用归档|取材失败/.test(w)).join("；")}`);
   }
   const { personal } = projectScope();
@@ -378,9 +409,21 @@ export async function generateDraft(routineId: string, opts: { dryRun?: boolean 
     "",
     ...(r.refRoutines?.length ? [
       "=== 素材怎么用 ===",
-      "素材开头的「晨会记录」「周会记录」是当事人自己在会议文档里填的计划/结果/达成情况，已经是人话，口径也最接近产品和运营；以它为主线组织内容。",
+      "素材里的「晨会记录」「周会记录」是当事人自己在会议文档里填的计划/结果/达成情况，已经是人话，口径也最接近产品和运营；以它为主线组织内容。",
       "后面的「工作日志」是从 commit 和排障记录里自动收割的，只用来补细节和状态，不要让它把主线带偏成研发流水账。",
       "两边说的是同一件事时合成一条，以会议记录里的说法为准。",
+      "",
+    ] : []),
+    ...(material.includes(PRIOR_MARK) ? [
+      "=== 我之前亲手写的内容怎么用 ===",
+      "素材开头「我之前亲手写的」是我本人在这份文档里往期已经定稿的内容（草稿经我改过，或我直接手写的），比自动收割的工作日志可信。",
+      "1. 对账：上一期的「计划 / 下周计划」就是这一期「结果 / 达成情况」的提纲，逐条对。工作日志里有证据的写进结果；",
+      "   没证据的不许写成已完成，也不许悄悄丢掉——放进输出的 unverified 数组，我审的时候自己补。",
+      "2. 补盲：工作日志只收得到写代码的活，开会、评审、沟通、写方案、运营这类事只会出现在我亲手写的内容里。",
+      "   往期提到、明显还没收尾的事可以延续进本期计划；但不许凭往期内容编造本期的新进展。",
+      "3. 口径：项目叫法、分条粒度、语气跟着我往期的写法走；同一件事沿用我用过的说法，别换新词。",
+      "4. 不重复：往期已经报过「已完成 / 已上线」的事，本期不再当新成果写。",
+      "5. 本期的格子里如果我已经先填了内容（比如今天的计划），以我填的为准，草稿只在它基础上补充，不要另起一套。",
       "",
     ] : []),
     ...(multi ? [
@@ -402,6 +445,7 @@ export async function generateDraft(routineId: string, opts: { dryRun?: boolean 
     "但要砍的是技术细节，不是事情本身：素材里各自独立的事各成一条，宁可多一条也别笼统合并掉。",
     "不许写空心话——「优化了 X」「完善了 Y」「推进了 Z」后面必须说清到底什么变了、变成什么样。",
     "翻译不等于脑补：素材里没有的原因、数字、比例一律不许补，宁可写得笼统也不能编具体细节。",
+    `工作日志是 AI 助手记给${owner}看的，里面的「你」就是${owner}本人。草稿是第一人称，不许出现「你」——「待你拍板」要写成「待定」或「我还要确认」。`,
     "",
     "=== 不许出现 ===",
     "commit hash、PR/issue 编号、文件名与路径、函数名类名、分支名、改动行数、错误码、",
@@ -426,10 +470,14 @@ export async function generateDraft(routineId: string, opts: { dryRun?: boolean 
     "=== 工作记录素材 ===",
     material,
     "",
-    `输出严格 JSON（不要代码块）：{"draft": "<按上述格式的完整草稿，markdown>"}`,
+    material.includes(PRIOR_MARK)
+      ? `输出严格 JSON（不要代码块）：{"draft": "<按上述格式的完整草稿，markdown>", "unverified": ["<上期计划了、但素材里没找到证据的事，一条一句；没有就空数组>"]}`
+      : `输出严格 JSON（不要代码块）：{"draft": "<按上述格式的完整草稿，markdown>"}`,
   ].join("\n"), { timeoutMs: r.window === "month" ? 600_000 : 180_000, quiet: opts.dryRun });   // dryRun 的 Provider 降级也不能写状态/发通知
   if (!res?.draft) throw new Error("草稿生成失败");
   const draft = String(res.draft);
+  // 对不上账的上期计划走 warnings 端到审阅面板，不进正文——正文会被原样写进飞书文档
+  if (Array.isArray(res.unverified)) for (const u of res.unverified.slice(0, 8)) if (typeof u === "string" && u.trim()) warnings.push(`上期计划未见证据：${u.trim().slice(0, 120)}`);
   if (opts.dryRun) return draft;
   saveOcc(r.id, today, { status: "draft", draft, updatedAt: new Date().toISOString(), sourceSig, materialDays: days, sources, ruleSig, warnings, materialPeople: team });
   resolveAction(`routine:${r.id}:${today}:failed`, "recovered");   // 之前几次失败的行动项就此了结
@@ -442,7 +490,7 @@ export async function generateDraft(routineId: string, opts: { dryRun?: boolean 
     ref: { url: r.docUrl },
   });
   // 草稿就绪：横幅+feed（低打扰），飞书发可直接点「写入/跳过」的互动卡片
-  await notify(`📋 ${r.name} 草稿已生成（${r.time} 截止），今日页审核写入`, { source: "heartbeat", link: r.docUrl, noLark: true });
+  await notify(`📋 ${r.name} 草稿已生成（${r.time} 截止），今日页审核写入`, { source: "heartbeat", level: "fyi", key: `routine-draft:${r.id}`, link: r.docUrl });
   import("./lark-cards.ts").then((m) =>
     m.sendRoutineCard(r.id, today, r.name, r.time, draft.slice(0, 600)),
   ).catch(() => {});
@@ -566,7 +614,7 @@ async function recordDraftFailure(r: Routine, key: string, e: unknown) {
     reason: `${attempts} 次自动生成都失败：${error}。今日页可重试；提示缺会议素材时先到设置页刷新会议归档`,
     ref: { url: r.docUrl },
   });
-  await notify(`⚠️ ${r.name} 草稿生成失败：${error.slice(0, 120)}`, { source: "heartbeat", link: r.docUrl, noLark: true });
+  await notify(`⚠️ ${r.name} 草稿生成失败：${error.slice(0, 120)}`, { source: "heartbeat", level: "fyi", key: `routine-draft-fail:${r.id}`, link: r.docUrl });
 }
 
 export function sweepRoutines() {

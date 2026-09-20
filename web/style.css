@@ -290,6 +290,21 @@ textarea { resize: vertical; }
 .card .top { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); flex-wrap: wrap; }
 .card .top .title { font-weight: 600; color: var(--text-primary); font-size: 13px; overflow-wrap: anywhere; }
 .card .top .right { margin-left: auto; color: var(--text-tertiary); font-size: 11px; }
+/* 今日焦点多选：复选框不参与 .top 的 flex-wrap 换行，始终贴在第一行最左 */
+.td-pick { flex: 0 0 auto; margin: 0; accent-color: var(--accent); cursor: pointer; }
+
+/* Composer 文件附件 chips（与图片缩略图并列；文件没有可视内容，只能靠文件名+体积辨认） */
+.composer-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.composer-files:not(:empty) { padding: 6px 0 0; }
+.file-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 3px 4px 3px 9px;
+  border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--surface-2); font-size: 11px; }
+.file-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.file-chip-size { flex: 0 0 auto; color: var(--text-tertiary); font-size: 10px; }
+.file-chip button { flex: 0 0 auto; width: 16px; height: 16px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: var(--text-tertiary); font-size: 10px; cursor: pointer; }
+.file-chip button:hover { background: var(--surface-3, var(--surface-popover)); color: var(--text-primary); }
+/* 拖放高亮：派发弹窗的 textarea 自己没有 .composer-box 那层边框可借 */
+[data-dropping="1"] { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .card .body { margin-top: 5px; font-size: 12.5px; color: var(--text-secondary); line-height: 19px; overflow-wrap: anywhere; }
 .card .foot { margin-top: 8px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .card.clickable { cursor: pointer; }
@@ -1253,6 +1268,91 @@ html[data-look="win98"] .card[data-selected="true"] * { color: #fff !important; 
 /* 桌面上的文字（section 标题）：白字深影 = Win98 桌面图标文字规矩 */
 html[data-look="win98"] .section-title { color: #fff; text-shadow: 1px 1px 0 #003a3a; font-weight: 400; }
 html[data-look="win98"] .empty { color: #1c1c1c; }
+
+/* ============ 墨外观（html[data-look="ink"]） ============
+ * 近单色：纯中性底 + 被 accent 色相轻染的表面/边线（整体一个色温，不是灰+一块彩色）。
+ * accent 只留给小面积（焦点环/链接/状态）；大面积填充一律用墨色反相。
+ * 层级靠留白、发丝线和字重，不靠描边盒子；玻璃只用在悬浮 chrome（顶栏），浮层保持不透明。 */
+html[data-look="ink"] {
+  --ink-tint: var(--accent);
+  --sf-canvas: #0a0a0a;
+  --sf-subtle: color-mix(in oklab, #0d0d0e, var(--ink-tint) 3%);
+  --sf-1: color-mix(in oklab, #121213, var(--ink-tint) 5%);
+  --sf-2: color-mix(in oklab, #18181a, var(--ink-tint) 6%);
+  --sf-3: color-mix(in oklab, #202023, var(--ink-tint) 7%);
+  --sf-hover: color-mix(in oklab, #1b1b1d, var(--ink-tint) 8%);
+  --sf-active: color-mix(in oklab, #232326, var(--ink-tint) 11%);
+  --border-subtle: color-mix(in oklab, #232326, var(--ink-tint) 12%);
+  --border-default: color-mix(in oklab, #303034, var(--ink-tint) 16%);
+  --border-strong: color-mix(in oklab, #46464c, var(--ink-tint) 18%);
+  --text-primary: #fafafa; --text-secondary: #b4b8ba;
+  --text-tertiary: color-mix(in oklab, #8f9699, var(--ink-tint) 22%);
+  --text-disabled: #5a5f62; --text-inverse: #0a0a0a;
+  --accent-soft: color-mix(in oklab, var(--text-primary) 9%, var(--sf-canvas));
+  --shadow-popover: 0 1px 3px #0003, 0 12px 40px #00000080, inset 0 1px #ffffff0f;
+  --radius-control: 8px; --radius-row: 10px; --radius-panel: 16px; --radius-modal: 20px;
+}
+html[data-look="ink"][data-theme="light"] {
+  --sf-canvas: #ffffff;
+  --sf-subtle: color-mix(in oklab, #fbfbfb, var(--ink-tint) 3%);
+  --sf-1: color-mix(in oklab, #f6f7f7, var(--ink-tint) 4%);
+  --sf-2: color-mix(in oklab, #f0f1f2, var(--ink-tint) 5%);
+  --sf-3: color-mix(in oklab, #e8eaeb, var(--ink-tint) 6%);
+  --sf-hover: color-mix(in oklab, #eff1f1, var(--ink-tint) 6%);
+  --sf-active: color-mix(in oklab, #e6e8e9, var(--ink-tint) 9%);
+  --border-subtle: color-mix(in oklab, #e6e8e9, var(--ink-tint) 10%);
+  --border-default: color-mix(in oklab, #d3d6d8, var(--ink-tint) 12%);
+  --border-strong: color-mix(in oklab, #aeb3b6, var(--ink-tint) 14%);
+  --text-primary: #0a0a0a; --text-secondary: #474c4f;
+  --text-tertiary: color-mix(in oklab, #6b7275, var(--ink-tint) 14%);
+  --text-disabled: #9aa0a3; --text-inverse: #ffffff;
+  --shadow-popover: 0 1px 3px #0000000d, 0 12px 40px #00000024, inset 0 .5px #fff6;
+}
+html[data-look="ink"] body { letter-spacing: -.006em; -webkit-font-smoothing: antialiased; }
+/* 顶栏：液态玻璃（重模糊 + 提饱和 + 顶部内高光） */
+html[data-look="ink"] .topbar {
+  background: color-mix(in srgb, var(--sf-canvas) 62%, transparent);
+  border-bottom-color: color-mix(in oklab, var(--text-primary) 8%, transparent);
+  backdrop-filter: blur(40px) saturate(1.7); -webkit-backdrop-filter: blur(40px) saturate(1.7);
+}
+html[data-look="ink"] .brand { font-weight: 600; letter-spacing: -.02em; }
+html[data-look="ink"] .brand span { color: var(--text-tertiary); }
+html[data-look="ink"] .nav-tabs { border: none; background: color-mix(in oklab, var(--text-primary) 5%, transparent); border-radius: 999px; padding: 4px; }
+html[data-look="ink"] .nav-tab { border-radius: 999px; padding: 0 14px; font-weight: 500; color: var(--text-tertiary); transition: color 150ms cubic-bezier(0,0,.2,1), background-color 150ms cubic-bezier(0,0,.2,1); }
+html[data-look="ink"] .nav-tab:hover { background: transparent; color: var(--text-primary); }
+html[data-look="ink"] .nav-tab[data-on="true"] { background: var(--text-primary); color: var(--sf-canvas); }
+html[data-look="ink"] .nav-tab[data-on="true"] .badge { background: var(--sf-canvas); color: var(--text-primary); }
+/* 主按钮：墨色反相药丸，hover 走透明度而不是换色 */
+html[data-look="ink"] .button { border-radius: 999px; padding: 0 14px; font-weight: 500; transition: opacity 150ms cubic-bezier(0,0,.2,1), background-color 150ms cubic-bezier(0,0,.2,1), transform 80ms ease; }
+html[data-look="ink"] .button.sm { padding: 0 11px; }
+html[data-look="ink"] .button.primary { background: var(--text-primary); color: var(--sf-canvas); }
+html[data-look="ink"] .button.primary:hover { background: var(--text-primary); opacity: .8; }
+html[data-look="ink"] .button.secondary { background: color-mix(in oklab, var(--text-primary) 6%, transparent); border-color: transparent; }
+html[data-look="ink"] .button.secondary:hover { background: color-mix(in oklab, var(--text-primary) 11%, transparent); }
+html[data-look="ink"] .button.stop { border-radius: 999px; }
+/* 标题：中等字重 + 紧字距；分区标题降为大写微标签 */
+html[data-look="ink"] .page-head h1 { font-weight: 500; letter-spacing: -.03em; font-size: clamp(22px, 2.4vw, 30px); }
+html[data-look="ink"] .col-head { font-weight: 500; letter-spacing: -.015em; }
+html[data-look="ink"] .section-title { font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; margin-top: 24px; }
+/* 列表：去掉盒子，只留发丝线 */
+html[data-look="ink"] .glist { background: transparent; border: none; border-radius: 0; padding: 0; border-top: 1px solid color-mix(in oklab, var(--text-primary) 9%, transparent); }
+html[data-look="ink"] .glist .card { border-radius: var(--radius-row); padding: 13px 12px; }
+html[data-look="ink"] .glist .card + .card::after { left: 0; right: 0; background: color-mix(in oklab, var(--text-primary) 9%, transparent); }
+html[data-look="ink"] .glist .card.clickable:hover + .card::after, html[data-look="ink"] .glist .card.clickable:hover::after { opacity: 0; }
+html[data-look="ink"] .card { border-radius: var(--radius-panel); padding: 14px 16px; }
+html[data-look="ink"] .card .top .title { font-weight: 500; }
+html[data-look="ink"] .card[data-selected="true"], html[data-look="ink"] .glist .card[data-selected="true"] { box-shadow: none; background: color-mix(in oklab, var(--text-primary) 7%, transparent); }
+html[data-look="ink"] .group-head { background: transparent; padding-left: 4px; }
+html[data-look="ink"] .today-brief { border: none; border-radius: var(--radius-panel); background: var(--surface-1); padding: 16px 18px; color: var(--text-primary); }
+html[data-look="ink"] .today-brief a { color: var(--text-primary); text-decoration: underline; text-decoration-color: color-mix(in oklab, var(--text-primary) 30%, transparent); text-underline-offset: 3px; }
+/* 选中/气泡：中性墨色软底，不再用 accent 大面积铺色 */
+html[data-look="ink"] .chip { border-radius: 999px; }
+html[data-look="ink"] .chip[data-on="true"] { background: var(--text-primary); color: var(--sf-canvas); font-weight: 500; }
+html[data-look="ink"] .msg[data-role="user"] .bubble { background: color-mix(in oklab, var(--text-primary) 8%, transparent); border-radius: 18px 18px 6px 18px; }
+html[data-look="ink"] input[type=text], html[data-look="ink"] textarea, html[data-look="ink"] select { border-radius: 12px; }
+html[data-look="ink"] .composer { border-top-color: color-mix(in oklab, var(--text-primary) 8%, transparent); }
+html[data-look="ink"] .overlay { background: color-mix(in srgb, var(--sf-canvas) 55%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+html[data-look="ink"] .modal { border-color: color-mix(in oklab, var(--text-primary) 10%, transparent); }
 
 /* 中断按钮：VS Code 式——运行中出现在发送键旁的红色方块，注意力不离开输入区 */
 .button.stop { background: var(--danger); color: #fff; min-width: 40px; justify-content: center; font-size: 14px; line-height: 1; }

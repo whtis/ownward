@@ -125,6 +125,33 @@ switch (cmd) {
     }
     break;
   }
+  case "worktrees": {
+    // own worktrees [clean] [--force] [--include-unmerged] [--keep-branch] [名字…]
+    const rest = process.argv.slice(3);
+    const sub = rest[0] === "clean" ? "clean" : "list";
+    const names = rest.slice(sub === "clean" ? 1 : 0).filter((a) => !a.startsWith("--"));
+    const force = rest.includes("--force"), withUnmerged = rest.includes("--include-unmerged"), keepBranch = rest.includes("--keep-branch");
+    const wt = await import("./worktrees.ts");
+    if (sub === "list") {
+      const { root, entries, totalKb } = await wt.listWorktrees();
+      const days = wt.worktreeRetentionDays();
+      console.log(`worktreeRoot: ${root}（${entries.length} 个，共 ${(totalKb / 1024 / 1024).toFixed(1)}G；自动清理：${days ? `${days} 天没动的「可清理」项` : "关闭，config dispatch.worktreeRetentionDays"}）`);
+      for (const e of entries) {
+        console.log(`  ${e.state.padEnd(9)} ${(`${Math.round(e.sizeKb / 1024)}M`).padStart(7)}  ${e.name}${e.branch ? `  [${e.branch}]` : ""}  ${e.reason}`);
+      }
+      const clean = entries.filter((e) => e.state === "clean");
+      if (clean.length) console.log(`\n可安全清理 ${clean.length} 个 / ${(clean.reduce((s, e) => s + e.sizeKb, 0) / 1024 / 1024).toFixed(1)}G：own worktrees clean`);
+      break;
+    }
+    const r = await wt.cleanupWorktrees({
+      ...(names.length ? { names } : { states: withUnmerged ? ["clean", "unmerged"] : ["clean"] }),
+      force, keepBranch,
+    });
+    for (const item of r.results) console.log(`  ${item.ok ? "✅" : "⏭ "} ${item.name}: ${item.msg}`);
+    const left = Object.entries(r.skipped).map(([s, n]) => `${s} ${n}`).join("、");
+    console.log(`释放 ${(r.freedKb / 1024 / 1024).toFixed(1)}G${left ? `；未动：${left}` : ""}`);
+    break;
+  }
   case "sessions-migrate": {
     const { migrateLegacySessions } = await import("./sessions/repository.ts");
     const apply = process.argv.includes("--apply");
@@ -136,6 +163,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.log("Ownward\nusage: own <status|test-notify [text]|triage-now|heartbeat-now|logs|work|tasks|done <id>|evolve \"<需求>\"|apply <id>|rollback|sessions-migrate [--apply]>");
+    console.log("Ownward\nusage: own <status|test-notify [text]|triage-now|heartbeat-now|logs|work|tasks|done <id>|evolve \"<需求>\"|apply <id>|rollback|worktrees [clean [--force] [--include-unmerged] [--keep-branch] [名字…]]|sessions-migrate [--apply]>");
     process.exit(1);
 }
