@@ -2,7 +2,7 @@
 // 飞书读写走 lark-cli 的 user 身份（你的账号）；vault 只允许读 vault 目录内的 md。
 import { isStrictlyWithin, isWithin } from "./path-within.ts";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "fs";
-import { basename, isAbsolute, join, normalize, resolve, sep } from "path";
+import { basename, isAbsolute, join, normalize, relative, resolve, sep } from "path";
 import { lookup } from "dns/promises";
 import { listActions, resolveAction, setActionState } from "./actions.ts";
 import { chatBinding, deleteChat, getChat, listChats, providers, renameChat, resolveChatBinding, saveChatCandidate, streamChat } from "./chat.ts";
@@ -11,6 +11,10 @@ import { chatMeta, markRead, touchChat } from "./lark-state.ts";
 import { RESEARCH_DIR, VAULT_ROOT } from "./paths.ts";
 import { gmailInbox, gmailMessageDetail, gmailReply } from "./sources/gmail.ts";
 import { CONFIG_ROOT, DATA, ROOT, SOURCE_ROOT, cfg, expandHome, log, run, tailRead } from "./util.ts";
+import {
+  VAULT_LIST_CAP, applyNotePref, buildLinkIndex, findBacklinks, notePrefsView, readNotePrefs, resolveVaultAsset,
+  saveVaultNote, scanVault, searchVault, writeNotePrefs, type LinkIndex, type VaultIndex,
+} from "./vault-notes.ts";
 import { parseSessionMigrationMode, validateSessionRunnerTaskIds } from "./kernel/sessions/contracts.ts";
 import { createNewSessionService, createSessionService, effectiveSessionMode } from "./session-service.ts";
 import { connectorConfig } from "./connector-config.ts";
@@ -53,7 +57,7 @@ export async function queueRouteResponse(method:string,id:string,state:()=>Promi
   if(!r.removed)return json({ok:false,errorCode:"QUEUE_ITEM_GONE",msg:"这条已经发出，或已不在队列里",queued:r.queued},409);
   return json({ok:true,msg:"已撤回",queued:r.queued});
 }
-function sessionError(error:any):Response{const code=typeof error?.code==="string"?error.code:undefined,unavailable=new Set(["RUNNER_UNAVAILABLE","RUNNER_CONTROL_TIMEOUT","RUNNER_PROVIDER_UNAVAILABLE","RUNNER_PROVIDER_MISSING","RUNNER_PROVIDER_DEGRADED"]),conflict=code==="SESSION_RUNNER_DRAIN_REQUIRED"||!!code?.startsWith("SESSION_HANDOFF_")||!!code?.startsWith("SESSION_RECONFIGURE_"),status=unavailable.has(code??"")?503:conflict?409:400,known:Record<string,string>={RUNNER_UNAVAILABLE:"Runner 不可用，请使用原 commandId 查询结果",RUNNER_CONTROL_TIMEOUT:"Runner 结果未知，请使用原 commandId 查询结果",SESSION_RUNNER_DRAIN_REQUIRED:"Runner 命令尚未收敛，暂不能切回旧链写入"},raw=String(error instanceof Error?error.message:error),safe=/(?:ENOENT|lstat|\/Users\/|\/var\/|\.sock)/.test(raw)?"Session 操作失败":raw.slice(0,240);return json({ok:false,msg:code?(known[code]??safe):safe,...(code?{errorCode:code}:{}),...(typeof error?.commandId==="string"?{commandId:error.commandId}:{}),...(typeof error?.runId==="string"?{runId:error.runId}:{}),...(error?.outcomeUnknown===true?{outcomeUnknown:true}:{})},status);}
+function sessionError(error:any):Response{const code=typeof error?.code==="string"?error.code:undefined,unavailable=new Set(["RUNNER_UNAVAILABLE","RUNNER_CONTROL_TIMEOUT","RUNNER_PROVIDER_UNAVAILABLE","RUNNER_PROVIDER_MISSING","RUNNER_PROVIDER_DEGRADED"]),conflict=code==="SESSION_RUNNER_DRAIN_REQUIRED"||!!code?.startsWith("SESSION_HANDOFF_")||!!code?.startsWith("SESSION_RECONFIGURE_")||!!code?.startsWith("SESSION_FORK_"),status=unavailable.has(code??"")?503:conflict?409:400,known:Record<string,string>={RUNNER_UNAVAILABLE:"Runner 不可用，请使用原 commandId 查询结果",RUNNER_CONTROL_TIMEOUT:"Runner 结果未知，请使用原 commandId 查询结果",SESSION_RUNNER_DRAIN_REQUIRED:"Runner 命令尚未收敛，暂不能切回旧链写入"},raw=String(error instanceof Error?error.message:error),safe=/(?:ENOENT|lstat|\/Users\/|\/var\/|\.sock)/.test(raw)?"Session 操作失败":raw.slice(0,240);return json({ok:false,msg:code?(known[code]??safe):safe,...(code?{errorCode:code}:{}),...(typeof error?.commandId==="string"?{commandId:error.commandId}:{}),...(typeof error?.runId==="string"?{runId:error.runId}:{}),...(error?.outcomeUnknown===true?{outcomeUnknown:true}:{})},status);}
 
 async function sessionService(taskId: string) { const mode=effectiveSessionMode(taskId);return{mode,service:createSessionService(taskId,cfg.architecture?.allowedRoots??[])}; }
 
@@ -122,8 +126,34 @@ async function rawChatLists(): Promise<{ p2p: any; groups: any }> {
   return chatsCache;
 }
 
-// vault 文件索引缓存：递归遍历 + 每文件 statSync 会阻塞事件循环，30s TTL 足够
-let vaultCache: { at: number; files: any[] } | null = null;
+// vault 文件索引缓存：递归遍历 + 每文件 statSync 会阻塞事件循环，30s TTL 足够；
+// 工作台自己写过 vault（保存/新建）立刻作废，不然刚存的笔记在「最近更新」里要等半分钟
+let vaultCache: { at: number; index: VaultIndex } | null = null;
+let linkCache: { at: number; index: LinkIndex } | null = null;
+let vaultCapLogged = false;
+function vaultIndex(): VaultIndex {
+  if (vaultCache && Date.now() - vaultCache.at < 30_000) return vaultCache.index;
+  const index = scanVault(VAULT_ROOT);
+  if (index.files.length > VAULT_LIST_CAP && !vaultCapLogged) {
+    vaultCapLogged = true;
+    log(`[notes] vault 共 ${index.files.length} 篇，笔记列表只回最近修改的 ${VAULT_LIST_CAP} 篇（其余可全文搜索）`);
+  }
+  vaultCache = { at: Date.now(), index };
+  return index;
+}
+function vaultLinks(): LinkIndex {
+  if (linkCache && Date.now() - linkCache.at < 30_000) return linkCache.index;
+  linkCache = { at: Date.now(), index: buildLinkIndex(vaultIndex().files) };
+  return linkCache.index;
+}
+function invalidateVault() { vaultCache = null; linkCache = null; }
+const NOTE_PREFS_FILE = join(DATA, "notes-prefs.json");
+/** 客户端传来的 vault 内 md 绝对路径 → 规范化的绝对路径；越界或不是 md 回 null */
+function vaultNotePath(raw: unknown): string | null {
+  const full = normalize(expandHome(String(raw || "")));
+  return isStrictlyWithin(VAULT_ROOT, full) && full.endsWith(".md") ? full : null;
+}
+const vaultRelOf = (full: string) => relative(VAULT_ROOT, full).split(sep).join("/").replace(/\.md$/, "");
 
 // 飞书文档解析缓存（进程生命周期内不重拉）
 const docCache = new Map<string, any>();
@@ -306,38 +336,51 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   // （对话附件走 /api/chat/convert-heic，同一个 heicToJpeg——两处路径不同是给客户端看的语义，实现只有一份）
   if (p === "/api/skins/convert-heic" && req.method === "POST") return heicToJpeg(req);
 
-  // ---- 笔记（vault 只读浏览） ----
-  if (p === "/api/vault/list") {
-    if (vaultCache && Date.now() - vaultCache.at < 30_000) return json(vaultCache.files);
-    if (!existsSync(VAULT_ROOT)) return json([]);  // 新装还没建 vault：空列表，别 500
-    // 全 vault 扫描（隐藏目录除外），客户端拿相对目录建文件树
-    const files: { path: string; name: string; dir: string; mtime: number }[] = [];
-    for (const raw of readdirSync(VAULT_ROOT, { recursive: true }) as string[]) {
-      if (!raw.endsWith(".md")) continue;
-      // readdirSync 给的是 OS 分隔符（Windows 上是 \）。统一转成 "/" 再解析：
-      // 否则隐藏目录过滤失效、name 变成整条相对路径、dir 恒为空——客户端的文件树直接塌成一层。
-      const f = raw.split(sep).join("/");
-      if (f.split("/").some((seg) => seg.startsWith("."))) continue; // .git/.obsidian/.omc 等
-      const full = join(VAULT_ROOT, raw);
-      try {
-        files.push({
-          path: full,
-          name: f.split("/").pop()!.replace(/\.md$/, ""),
-          dir: f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "",
-          mtime: statSync(full).mtimeMs,
-        });
-      } catch { /* skip */ }
-    }
-    files.sort((a, b) => b.mtime - a.mtime);
-    vaultCache = { at: Date.now(), files: files.slice(0, 2000) };
-    return json(vaultCache.files);
-  }
+  // ---- 笔记（vault 浏览 / 搜索 / 反链 / 图片 / 最近与收藏） ----
+  if (p === "/api/vault/list") return json(vaultIndex().files.slice(0, VAULT_LIST_CAP));
   if (p === "/api/vault/file") {
     const raw = url.searchParams.get("path") || "";
     const full = normalize(raw);
     if (!isWithin(VAULT_ROOT, full) || !full.endsWith(".md")) return json({ ok: false, msg: "越界" }, 403);
     if (!existsSync(full)) return json({ ok: false, msg: "不存在" }, 404);
-    return json({ ok: true, text: readFileSync(full, "utf8") });
+    // mtime 是保存时的冲突基线：客户端带着它回来存，磁盘在这之后被改过就拒绝覆盖
+    return json({ ok: true, text: readFileSync(full, "utf8"), mtime: statSync(full).mtimeMs });
+  }
+  if (p === "/api/vault/search") {
+    const q = (url.searchParams.get("q") || "").trim().slice(0, 200);
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 40));
+    return json({ ok: true, q, ...searchVault(vaultIndex().files, q, limit) });
+  }
+  if (p === "/api/vault/backlinks") {
+    const full = vaultNotePath(url.searchParams.get("path"));
+    if (!full) return json({ ok: false, msg: "只允许 vault 内的 md" }, 400);
+    const files = vaultIndex().files, links = vaultLinks();
+    const rel = vaultRelOf(full), slash = rel.lastIndexOf("/");
+    const target = files.find((f) => f.path === full) || { path: full, name: rel.slice(slash + 1), dir: slash < 0 ? "" : rel.slice(0, slash) };
+    return json({ ok: true, hits: findBacklinks(links, files, target), skipped: links.skipped });
+  }
+  if (p === "/api/vault/asset") {
+    const hit = resolveVaultAsset(VAULT_ROOT, vaultIndex().assets, url.searchParams.get("ref") || "", url.searchParams.get("from") || undefined);
+    if (!hit) return new Response("not found", { status: 404 });
+    return new Response(Bun.file(hit.path), {
+      headers: { "Content-Type": hit.type, "Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff" },
+    });
+  }
+  if (p === "/api/ui/lang" && req.method === "POST") {
+    const body = await req.json().catch(() => ({})) as { lang?: string };
+    if (body.lang !== "zh" && body.lang !== "en") return json({ ok: false, msg: "lang 只能是 zh 或 en" }, 400);
+    (await import("./ui-lang.ts")).writeUiLang(body.lang);
+    return json({ ok: true, lang: body.lang });
+  }
+  if (p === "/api/vault/prefs" && req.method === "GET") return json(notePrefsView(VAULT_ROOT, readNotePrefs(NOTE_PREFS_FILE)));
+  if (p === "/api/vault/prefs" && req.method === "POST") {
+    const body = await req.json() as { op?: string; path?: string };
+    const op = body.op === "open" || body.op === "pin" || body.op === "unpin" ? body.op : null;
+    const full = vaultNotePath(body.path);
+    if (!op || !full) return json({ ok: false, msg: "op 或路径非法" }, 400);
+    const prefs = applyNotePref(readNotePrefs(NOTE_PREFS_FILE), op, vaultRelOf(full));
+    writeNotePrefs(NOTE_PREFS_FILE, prefs);
+    return json(notePrefsView(VAULT_ROOT, prefs));
   }
 
   // ---- 飞书（user 身份） ----
@@ -466,11 +509,17 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
 
   // ---- 笔记编辑（vault 写入，路径锁死 vault 内 .md） ----
   if (req.method === "POST" && p === "/api/vault/save") {
-    const body = await req.json() as { path: string; content: string };
-    const full = normalize(expandHome(body.path));
-    if (!isStrictlyWithin(VAULT_ROOT, full) || !full.endsWith(".md")) return json({ ok: false, msg: "只允许写 vault 内的 md" }, 400);
-    writeFileSync(full, body.content ?? "");
-    return json({ ok: true, msg: "已保存" });
+    const body = await req.json() as { path: string; content: string; baseMtime?: number };
+    const full = vaultNotePath(body.path);
+    if (!full) return json({ ok: false, msg: "只允许写 vault 内的 md" }, 400);
+    const res = saveVaultNote(full, body.content ?? "", typeof body.baseMtime === "number" ? body.baseMtime : undefined);
+    if ("code" in res) {   // tsconfig 非 strict，布尔字面量判别收窄不了，按 code 判
+      return json(res.code === "VAULT_GONE"
+        ? { ...res, msg: "这篇笔记已被删除或移走" }
+        : { ...res, msg: "这篇笔记在别处被改过，没有覆盖" }, 409);
+    }
+    invalidateVault();
+    return json({ ok: true, msg: "已保存", mtime: res.mtime });
   }
   if (req.method === "POST" && p === "/api/vault/new") {
     const body = await req.json() as { name: string; dir?: string };
@@ -482,6 +531,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     mkdirSync(dir, { recursive: true });
     const full = join(dir, `${name}.md`);
     if (!existsSync(full)) writeFileSync(full, `# ${name}\n\n`);
+    invalidateVault();
     return json({ ok: true, msg: "已创建", path: full });
   }
   if (req.method === "POST" && p === "/api/vault/append-today") {
@@ -853,6 +903,9 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
 
   if (p === "/api/dev/messages") {
     const id = url.searchParams.get("id") || "";
+    const { parseMessageTail, tailMessages } = await import("./kernel/sessions/message-tail.ts");
+    const tail = parseMessageTail(url.searchParams.get("tail"));
+    if (tail === null) return json({ ok: false, msg: "tail 要非负整数" }, 400);
     try {
       const service=(await sessionService(id)).service;
       const state = url.searchParams.get("refresh")==="1"?await service.refreshHistory(id):await service.state(id);
@@ -863,7 +916,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
         const session = new SessionRepository(DATA).getByTaskId(id);
         if (session) { cwd = session.cwd; extraDirs = session.extraDirs ?? []; }
       } catch { /* 旧数据或仓库暂不可读时使用任务快照 */ }
-      return json({ ...state, cwd, extraDirs });
+      return json(tailMessages({ ...state, cwd, extraDirs }, tail));
     } catch (e) { return sessionError(e); }
   }
   if (p === "/api/system/session-migration-report") {
@@ -949,6 +1002,12 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     const body=await req.json().catch(()=>({})) as {id?:string;providerId?:"claude"|"codex"|"codebuddy";model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean};
     if(!body.id||!body.providerId||!["claude","codex","codebuddy"].includes(body.providerId))return json({ok:false,msg:"缺少合法 id/providerId"},400);
     try{const result=await(await sessionService(body.id)).service.handoff(body.id,{providerId:body.providerId,...(body.model?{model:body.model}:{}),...(body.effort?{effort:body.effort}:{}),...(body.reason?{reason:body.reason}:{}),...(body.confirmUnknownOutcome===true?{confirmUnknownOutcome:true}:{})});return json({ok:true,msg:(result as {inPlace?:boolean}).inPlace?`已就地切换${body.model?` 模型 ${body.model}`:""}${body.effort?` 深度 ${body.effort}`:""}，下一轮生效`:`已接力到 ${body.providerId}`,...result});}catch(e){return sessionError(e);}
+  }
+  // 分叉：带着完整上下文新开一个任务会话，原会话不受影响（不打断、不抢输入权）
+  if(req.method==="POST"&&p==="/api/dev/fork"){
+    const body=await req.json().catch(()=>({})) as {id?:string};
+    if(!body.id)return json({ok:false,msg:"缺 id"},400);
+    try{const{forkTask}=await import("./dispatch.ts");const task=await forkTask(body.id);return json({ok:true,msg:"已分叉到新会话，原会话不受影响",task});}catch(e){return sessionError(e);}
   }
   // 同 Provider 就地改模型/思考深度（不接力、不重放历史）。/model、/effort 斜杠命令和会话配置弹窗都打这里。
   if(req.method==="POST"&&p==="/api/dev/reconfigure"){

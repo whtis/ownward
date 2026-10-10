@@ -96,7 +96,7 @@ function renderBrief(open) {
   const now = new Date();
   const hour = now.getHours();
   const hello = hour < 5 ? "夜深了" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
-  const date = now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "short" });
+  const date = now.toLocaleDateString(globalThis.I18N?.locale || "zh-CN", { month: "long", day: "numeric", weekday: "short" });
   const overdue = Today.routines.filter((r) => r.overdue).length;
   const dueToday = Today.routines.filter((r) => (r.isToday || r.status === "failed") && ["pending", "draft", "failed"].includes(r.status)).length;
   const stuck = Today.attention.filter((x) => x.kind === "stuck").length;
@@ -109,7 +109,7 @@ function renderBrief(open) {
   if (overdue) parts.push(`<a onclick="tdJump('td-routines')">${overdue} 项职责逾期</a>`);
   else if (dueToday) parts.push(`<a onclick="tdJump('td-routines')">${dueToday} 项职责今天截止</a>`);
   if (next) parts.push(`下场会议 ${esc(t(next.start))}`);
-  el.innerHTML = `<span class="quiet">${hello}，${date} ·&nbsp;</span>` +
+  el.innerHTML = `<span class="quiet">${globalThis.I18N?.t(hello) ?? hello}${globalThis.I18N?.lang === "en" ? ", " : "，"}${date} ·&nbsp;</span>` +  // 问候和日期同一文本节点，词典整串匹配不到，这里直接翻
     (parts.length ? parts.join(`<span class="quiet">&nbsp;·&nbsp;</span>`) : `<span class="quiet">目前没有需要你处理的事 ☕</span>`);
 }
 function tdJump(id) { document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" }); }

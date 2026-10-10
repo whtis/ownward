@@ -45,8 +45,8 @@ describe("task session status badges", () => {
   test("recent snapshots stay on the slow auxiliary cadence", () => {
     const timer = source.slice(source.indexOf("Tasks.timer = setInterval"), source.indexOf("hide() { clearInterval"));
     expect(timer).not.toContain("refreshRecentSessions();");
-    expect(timer).toContain("}, 2500)");
-    expect(timer).toContain("if (++Tasks.auxTick % 24 === 0) loadTasksAux().then(renderTaskList)");
+    expect(timer).toContain("}, 10000)");
+    expect(timer).toContain("if (++Tasks.auxTick % 6 === 0) loadTasksAux().then(renderTaskList)");
     expect(source).toContain('getJSON("/api/dev/recent")');
   });
 });

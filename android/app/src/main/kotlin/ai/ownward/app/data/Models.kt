@@ -218,6 +218,8 @@ data class AgentState(
     val resume: ResumeInfo? = null, // 释放输入权后在别的终端续聊的命令（kernel/sessions/contracts.ts）
     // 会话谱系：接力链上每个 Session（含当前）各一条，带原生会话 ID 与恢复命令（kernel/sessions/contracts.ts SessionLineageEntry）
     val lineage: List<SessionLineageEntry> = emptyList(),
+    // 带 tail 请求时：messages 前面省掉的条数。下标加上它才是全量里的绝对位置（列表 key 不随窗口滑动）
+    val omitted: Int = 0,
 )
 
 @Serializable

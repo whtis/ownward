@@ -80,11 +80,16 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
         }
     }
 
-    private suspend inline fun <reified T> get(path: String): T =
-        AppJson.decodeFromString(exec(req(path)))
+    // 解码也挪出主线程：长会话的 /api/dev/messages 有好几 MB，在调用方（Poller 的主线程协程）上解会掉帧
+    private suspend inline fun <reified T> get(path: String): T {
+        val body = exec(req(path))
+        return withContext(Dispatchers.Default) { AppJson.decodeFromString<T>(body) }
+    }
 
-    private suspend inline fun <reified T> post(path: String, obj: JsonObject): T =
-        AppJson.decodeFromString(exec(req(path).post(jsonBody(obj))))
+    private suspend inline fun <reified T> post(path: String, obj: JsonObject): T {
+        val body = exec(req(path).post(jsonBody(obj)))
+        return withContext(Dispatchers.Default) { AppJson.decodeFromString<T>(body) }
+    }
 
     // ---- 连接检查 ----
     suspend fun state(): StateSnapshot = get("/api/state")
@@ -126,8 +131,9 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
     /** 各家订阅额度（服务端 60s 缓存；拿不到的那家为 null） */
     suspend fun usage(): ProvidersUsage = get("/api/usage")
 
-    suspend fun devMessages(id: String): AgentState =
-        get("/api/dev/messages?id=" + id.urlEnc())
+    /** tail = 只要最后几条（服务端回 omitted = 前面省掉的条数）；0 = 只要元数据（审批卡之类）；null = 全量 */
+    suspend fun devMessages(id: String, tail: Int? = null): AgentState =
+        get("/api/dev/messages?id=" + id.urlEnc() + (if (tail != null) "&tail=$tail" else ""))
 
     suspend fun devSend(id: String, text: String, images: List<OutImage> = emptyList()): OkMsg =
         post("/api/dev/send", buildJsonObject {

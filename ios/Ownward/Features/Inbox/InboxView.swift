@@ -34,7 +34,7 @@ final class InboxStore {
             let perms: [TaskPerm] = await withTaskGroup(of: [TaskPerm].self) { group in
                 for t in running {
                     group.addTask { [client] in
-                        guard let s = try? await client.devMessages(id: t.id) else { return [] }
+                        guard let s = try? await client.devMessages(id: t.id, tail: 0) else { return [] }  // 只看审批卡，不要历史
                         return s.pending.map { TaskPerm(taskId: t.id, project: t.project, perm: $0) }
                     }
                 }

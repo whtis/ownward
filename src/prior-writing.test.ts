@@ -21,7 +21,7 @@ const projectWeekly = [
   "# 9.07-9.11",
   "## 项目：项目甲", `### 成员：${user("Cara 王五")}`, "### 本周进展：", `- 别人的项目，正文里 @ 了 ${user("Alex 张三")} 也不算我的`,
   "## 项目：项目乙", `### 成员：${user("Alex 张三")}${user("Bob 李四")}`, "### 本周进展：", "- 自动总结已上线",
-  "![飞书自动生成的几百字看板截图描述](https://feishu.cn/file/x)", "### 下周计划：", "- 客户文档进入开发",
+  "![飞书自动生成的几百字看板截图描述](https://feishu.cn/file/x)", "### 下周计划：", "- 支付模块进入开发",
   "# 8.03-8.07", "## 项目：项目乙", `### 成员：${user("Alex 张三")}`, "### 本周进展：", "- 窗口外的旧内容",
 ].join("\n");
 
@@ -47,7 +47,7 @@ describe("extractOwnedSections", () => {
     const got = extractOwnedSections(projectWeekly, ["2026-09-01", "2026-09-17"], ["Alex"]);
     expect(got.map((s) => `${s.week}|${s.section}`)).toEqual(["9.07-9.11|项目：项目乙"]);
     expect(got[0].text).toContain("自动总结已上线");
-    expect(got[0].text).toContain("客户文档进入开发");
+    expect(got[0].text).toContain("支付模块进入开发");
     expect(got[0].text).not.toContain("几百字");
   });
 });

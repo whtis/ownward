@@ -1,6 +1,9 @@
 "use strict";
 /* 任务 tab：任务列表 + 引擎会话（追问/审批/中断/接管）/ 日志视图 / CC 会话旁观与接管 */
 
+const FEED_PAGE = 200;    // 会话流每页铺多少项（折叠后）
+const MSG_PAGE = 1000;    // 每次向服务端多要多少条消息（/api/dev/messages?tail=）
+
 const Tasks = {
   sel: null,               // 选中任务 id 或 cc 会话 id
   dev: null,               // 引擎会话最近一次 DevSessionRes
@@ -13,6 +16,11 @@ const Tasks = {
   pinned: [],              // 置顶会话（daemon 持久化）
   dismissed: {},           // 隐藏的项目组 {project: epochMs}
   openTools: new Set(),    // 工具帧展开状态（重渲染保持）
+  feedLimit: 200,          // 会话流只铺最后这么多项（feedWindow），「显示更早」每次加一页；换会话复位
+  msgTail: 1000,           // 向服务端要最后这么多条；铺的窗口快用完且服务端还省着（omitted）时再多要一页
+  feedHidden: 0,           // 上次渲染窗口外、已在手里但没铺的项数
+  feedRuns: new Map(),     // 折叠组 key → 组数据：收起的组不铺明细，展开时按 key 现填
+  devSig: "",              // Tasks.dev 的序列化快照：轮询只序列化新响应一次来比对，不再每轮把旧的也重算一遍
   images: [],              // 粘贴待发的图片 [{media_type, data(base64), size}]
   repoOpen: false, repo: null,  // repo 验收面板
   timer: null, auxTick: 0, busy: false, recentBusy: false, auxLoaded: false, auxError: "", tasksError: "",
@@ -20,7 +28,7 @@ const Tasks = {
   tabs: JSON.parse(localStorage.getItem("ownward-session-tabs") || "[]"),  // 打开过的会话工作集（桌面版的 tab 页习惯）
   select(id) { stashTaskComposer(); Tasks.selKind = "task"; Tasks.sel = id; Tasks.resetSession(); tabUpsert("task", id); tkOpenDetail("task", id); renderTaskList(); pollDetail(true); },
   resetSession() {
-    Tasks.dev = null; Tasks.ccMsgs = []; Tasks.ccOffset = 0; Tasks.openTools = new Set();
+    Tasks.dev = null; Tasks.devSig = ""; Tasks.ccMsgs = []; Tasks.ccOffset = 0; Tasks.openTools = new Set(); Tasks.feedLimit = FEED_PAGE; Tasks.msgTail = MSG_PAGE; Tasks.feedHidden = 0; Tasks.feedRuns = new Map();
     Tasks.images = ComposerDrafts.getAttachments(Tasks.selKind === "task" && Tasks.sel ? `task:${Tasks.sel}` : ""); Tasks.repoOpen = false; Tasks.repo = null;
   },
 };
@@ -73,9 +81,9 @@ TABS.tasks = {
     loadTasksAux().then(renderTaskList);
     Tasks.timer = setInterval(() => {
       pollDetail(false);
-      // 会话列表/置顶/隐藏是慢数据：每 60s 跟一轮就够（24 × 2.5s）
-      if (++Tasks.auxTick % 24 === 0) loadTasksAux().then(renderTaskList);
-    }, 2500);
+      // 会话列表/置顶/隐藏是慢数据：每 60s 跟一轮就够（6 × 10s）
+      if (++Tasks.auxTick % 6 === 0) loadTasksAux().then(renderTaskList);
+    }, 10000);
   },
   hide() { clearInterval(Tasks.timer); },
 };
@@ -148,6 +156,7 @@ function taskCardHtml(t) {
   const st = running ? `<span class="dot ok breathe" style="background:var(--accent)"></span>运行中`
     : failed ? `<span class="dot bad"></span>失败 ${t.exitCode ?? ""}`
     : t.kind === "adopted" && t.status === "done" ? `<span class="dot"></span>接管`
+    : t.kind === "forked" && !t.endedAt ? `<span class="dot"></span>分叉`
     : `<span class="dot ok"></span>${t.status === "done" ? "完成" : "成功"}`;
   const evolve = t.kind === "evolve" ? `<span class="tag" data-tone="${t.verify === "pass" ? "ok" : t.verify === "fail" ? "bad" : "warn"}">演进 ${esc(t.verify || "")}</span>` : "";
   const provider = Tasks.sel === t.id && Tasks.dev ? (Tasks.dev.backend || Tasks.dev.providerId) : (t.backend || t.providerId || t.mode);
@@ -576,7 +585,7 @@ async function submitSessionConfig() {
  *  没有 nativeRef 的行（还没跑过一轮 / 归档）如实写「尚无原生会话 ID」，不编一个命令出来。 */
 function lineageRows(lineage) {
   if (!Array.isArray(lineage) || !lineage.length) return [];
-  const when = (iso) => { const t = Date.parse(iso || ""); return Number.isFinite(t) ? new Date(t).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""; };
+  const when = (iso) => { const t = Date.parse(iso || ""); return Number.isFinite(t) ? new Date(t).toLocaleString(globalThis.I18N?.locale || "zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""; };
   const row = (entry, label, ref, resume, extra = "") => `<div class="lineage-row" data-current="${!!entry.current}">
       <span class="mode-tag" data-m="${esc(entry.providerId)}">${esc(entry.providerId)}</span>
       <span class="lineage-meta">${esc(label)}${extra ? ` · ${esc(extra)}` : ""} · 模型 ${esc(entry.model || "默认")} · 深度 ${esc(entry.effort || "默认")}${entry.reason ? ` · ${esc(entry.reason)}` : ""}</span>
@@ -613,7 +622,7 @@ function usagePillHtml(backend) {
   const tone = worst >= 90 ? "bad" : worst >= 70 ? "warn" : "";
   const text = u.windows.map((w) => { const eta = usageEta(w.resetsAt); return `${w.label} ${Math.round(w.percent)}%${eta ? `(${eta})` : ""}`; }).join(" · ");
   const title = `${backend} 订阅额度${u.plan ? `（${u.plan}）` : ""}：` + u.windows.map((w) =>
-    `${w.label} 窗口已用 ${Math.round(w.percent)}%${w.resetsAt ? `，${new Date(w.resetsAt).toLocaleString("zh-CN", { hour12: false })} 重置` : ""}`).join("；");
+    `${w.label} 窗口已用 ${Math.round(w.percent)}%${w.resetsAt ? `，${new Date(w.resetsAt).toLocaleString(globalThis.I18N?.locale || "zh-CN", { hour12: false })} 重置` : ""}`).join("；");
   return `<span class="tag mono"${tone ? ` data-tone="${tone}"` : ""} title="${esc(title)}">额度 ${esc(text)}</span>`;
 }
 /** 额度独立于会话数据 60s 刷一次：就地换徽标内容，不为它整块重渲会话 */
@@ -680,8 +689,13 @@ function closeSessionTab(id) {
 async function pollDetail(force) {
   if (S.tab !== "tasks" || !Tasks.sel) return;
   if (Tasks.busy) { if (force) setTimeout(() => pollDetail(true), 300); return; }  // 强制刷新别被在飞的轮询吞掉
-  Tasks.busy = true;
   const sel = Tasks.sel, kind = Tasks.selKind;
+  // 后台轮询只跟"运行中"的进度；任务已结束就不再每轮刷详情（点开/切换走 force 强制刷一次）
+  if (!force && kind !== "cc" && !String(sel).startsWith("cdx:")) {
+    const snap = S.tasks.find((x) => x.id === sel);
+    if (snap && snap.status !== "running") return;
+  }
+  Tasks.busy = true;
   const stale = () => Tasks.sel !== sel || Tasks.selKind !== kind;
   try {
     if (kind === "cc" || String(sel).startsWith("cdx:")) { await pollCcObserve(sel, kind); return; }
@@ -690,14 +704,15 @@ async function pollDetail(force) {
     if (!t) { $("#tk-detail").innerHTML = stateBox("任务不存在或已移除", "error"); tkSetContext("", "任务不可用"); return; }
     tkSetContext(t.project, t.title || t.task);
     if (t.engine) {
-      const dev = await getJSON(`/api/dev/messages?id=${encodeURIComponent(t.id)}`).catch(() => null);
+      const dev = await getJSON(`/api/dev/messages?id=${encodeURIComponent(t.id)}&tail=${Tasks.msgTail}`).catch(() => null);
       if (stale()) return;
       if (!dev) {
         $("#tk-detail").innerHTML = detailHead(t) + stateBox("会话详情暂时无法载入，正在重试", "error");
         return;
       }
-      const changed = force || JSON.stringify(dev) !== JSON.stringify(Tasks.dev);
-      Tasks.dev = dev;
+      // 长会话的响应有好几 MB：只序列化新响应一次，跟上一轮存下的串比
+      const sig = JSON.stringify(dev), changed = force || sig !== Tasks.devSig;
+      Tasks.dev = dev; Tasks.devSig = sig;
       if (changed) { renderSessionTabs(); renderSession(t, dev); }
     } else if (t.mode === "terminal") {
       await renderTerminal(t, force, sel, kind);
@@ -727,6 +742,10 @@ function detailHead(t, extra) {
     if (dev.backend === "codex") {
       const on = !!dev.fullAccess;
       btns.push(`<button class="button sm ${on ? "danger" : "ghost"}" title="${on ? "已解除沙箱：可写全盘。点击恢复" : "解除沙箱：codex 可写全盘（下一轮生效）"}" onclick="devSetAccess('${esc(t.id)}',${!on})">${on ? "🔓 无沙箱" : "🔒 沙箱"}</button>`);
+    }
+    // 分叉：原会话要有自己的原生会话（跑完过一轮）才分得出来；本轮在跑也能点，后端会等它这一轮结束；归档会话由后端拒绝
+    if (dev.resume && (dev.providerId === "claude" || dev.providerId === "codex")) {
+      btns.push(`<button class="button sm ghost" title="分叉：带着完整上下文新开一个会话，原会话照常可用。两个会话共用同一工作目录，注意别同时改同一处" onclick="forkSession('${esc(t.id)}')">分叉</button>`);
     }
     if (dev.control === "observing") btns.push(`<button class="button sm secondary" onclick="devControl('${esc(t.id)}','take')">接管输入</button>`);
     else if (dev.control === "ownward") btns.push(`<button class="button sm ghost" onclick="devControl('${esc(t.id)}','release')">释放输入权</button>`);
@@ -865,19 +884,55 @@ async function repoDo(id, action) {
 function toolRunHtml(item, live) {
   const key = `g${item.index}`;
   const errors = item.msgs.filter(isToolError).length;
+  // 收起时不铺明细：长会话几千条工具帧（每条一个 <pre>）即使收着也全在 DOM 里，是节点数的大头
+  const open = Tasks.openTools.has(key);
+  Tasks.feedRuns.set(key, item);
   const head = live ? `⚙ 正在执行 · 第 ${item.msgs.length} 步` : `⚙ 执行了 ${item.msgs.length} 步`;
-  return `<div class="msg" data-role="tool"><details class="tool-run" ${Tasks.openTools.has(key) ? "open" : ""}
-    ontoggle="this.open?Tasks.openTools.add('${key}'):Tasks.openTools.delete('${key}')">
+  return `<div class="msg" data-role="tool"><details class="tool-run" ${open ? "open" : ""}
+    ontoggle="toolRunToggle(this,'${key}')">
     <summary><span class="run-head">${esc(head)}</span>${errors ? `<span class="run-err">· ${errors} 处出错</span>` : ""}<span class="run-sub">${esc(toolRunSubtitle(item.msgs, live))}</span></summary>
-    <div class="run-body">${item.msgs.map((m, k) => toolFrameHtml(m, item.index + k)).join("")}</div></details></div>`;
+    <div class="run-body">${open ? toolRunBodyHtml(item) : ""}</div></details></div>`;
+}
+const toolRunBodyHtml = (item) => item.msgs.map((m, k) => toolFrameHtml(m, item.index + k)).join("");
+function toolRunToggle(el, key) {
+  if (!el.open) { Tasks.openTools.delete(key); return; }
+  Tasks.openTools.add(key);
+  const body = el.querySelector(".run-body"), item = Tasks.feedRuns.get(key);
+  if (body && item && !body.childElementCount) body.innerHTML = toolRunBodyHtml(item);
 }
 
 /** 会话流：连续工具调用折成一组。live = 本轮还在跑（只有末尾那组显示「正在执行」） */
-function feedHtml(msgs, live = false) {
-  const feed = foldToolRuns(msgs || []);
-  return feed.map((it, n) => (it.msgs
-    ? toolRunHtml(it, live && n === feed.length - 1)
+function feedHtml(msgs, live = false, omitted = 0) {
+  // omitted = 服务端没下发的更早条数；下标加上它还原成全量里的绝对位置，窗口往后滑时展开态 key 不变
+  const feed = foldToolRuns(msgs || []).map((it) => ({ ...it, index: it.index + omitted }));
+  const { hidden, items } = feedWindow(feed, Tasks.feedLimit);
+  Tasks.feedRuns = new Map(); Tasks.feedHidden = hidden;
+  const earlier = omitted + feed.slice(0, hidden).reduce((n, it) => n + (it.msgs ? it.msgs.length : 1), 0);
+  const more = earlier ? `<div class="feed-more"><button class="button sm ghost" onclick="feedShowEarlier()">显示更早的 ${earlier} 条</button></div>` : "";
+  return more + items.map((it, n) => (it.msgs
+    ? toolRunHtml(it, live && n === items.length - 1)
     : msgHtml(it.msg, it.index))).join("");
+}
+
+/** 往前多铺一页；保持离底部的距离不变，正在看的那条不跳走。
+ *  跟轮询抢同一把 Tasks.busy：旁观会话的增量拉取并发跑两份会把同一段消息追加两遍 */
+async function feedShowEarlier() {
+  while (Tasks.busy) await new Promise((r) => setTimeout(r, 100));
+  const sc = $("#tk-scroll"), fromBottom = sc ? sc.scrollHeight - sc.scrollTop : 0;
+  Tasks.feedLimit += FEED_PAGE;
+  // 手里没铺的不够一页、服务端还省着：多要一页消息，走正常拉取渲染
+  const fetchMore = Tasks.selKind === "task" && Tasks.feedHidden < FEED_PAGE && (Tasks.dev?.omitted || 0) > 0;
+  if (fetchMore) Tasks.msgTail += MSG_PAGE;
+  Tasks.busy = true;
+  let rendered = false;
+  try {
+    if (fetchMore) { /* 交给下面的 pollDetail(true) */ }
+    else if (Tasks.selKind === "cc" || String(Tasks.sel).startsWith("cdx:")) { await pollCcObserve(Tasks.sel, Tasks.selKind, true); rendered = true; }
+    else if (Tasks.dev) { const t = S.tasks.find((x) => x.id === Tasks.sel); if (t) { renderSession(t, Tasks.dev); rendered = true; } }
+  } finally { Tasks.busy = false; }
+  if (!rendered) await pollDetail(true);
+  const sc2 = $("#tk-scroll");
+  if (sc2) sc2.scrollTop = sc2.scrollHeight - fromBottom;
 }
 
 /** 单条工具帧（不带 .msg 外壳）：折叠组展开后直接铺这个，和没折叠时长得一模一样 */
@@ -895,6 +950,9 @@ function devImgsHtml(m) {
 
 function msgHtml(m, i) {
   const imgs = devImgsHtml(m);
+  if (m.role === "system" && m.name === "fork") {
+    return `<div class="handoff-divider"><span>${esc(m.text || "已从原会话分叉")}</span></div>`;
+  }
   if (m.role === "system" && m.name === "handoff") {
     return `<div class="handoff-divider"><span>${esc(m.text || "已切换引擎，旧会话历史保留")}</span></div>`;
   }
@@ -910,7 +968,7 @@ function msgHtml(m, i) {
 function renderSession(t, dev) {
   const el = $("#tk-detail");
   // 追问框组字中不动 DOM；置空 dev 让下轮轮询必然重渲（否则 changed 比对会漏掉这帧）
-  if (composingEl && el.contains(composingEl)) { Tasks.dev = null; return; }
+  if (composingEl && el.contains(composingEl)) { Tasks.dev = null; Tasks.devSig = ""; return; }
   const sc = $("#tk-scroll", el);
   const nearBottom = !sc || sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80;
   const prevTop = sc ? sc.scrollTop : 0;   // 用户上翻阅读时，重渲染后要回到原位而不是顶部
@@ -980,7 +1038,7 @@ function renderSession(t, dev) {
   el.innerHTML = detailHead(t) + `
     <div class="session-scroll" id="tk-scroll">
       ${plan}
-      ${feedHtml(dev.messages, running)}
+      ${feedHtml(dev.messages, running, dev.omitted || 0)}
       ${partial}${perms}
       ${dev.turn === "running" && !dev.partial ? `<div class="msg" data-role="system"><div class="bubble">agent 正在工作…</div></div>` : ""}
     </div>
@@ -1194,6 +1252,13 @@ async function taskDone(id) {
   toast((await post("/api/task/done", { id })).msg);
   refreshTasks();
 }
+/** 分叉成功就跳到新会话：输入框按任务 id 存草稿，新会话天然是空的 */
+async function forkSession(id) {
+  const res = await post("/api/dev/fork", { id });
+  toast(res.msg);
+  if (res.ok && res.task) { await refreshTasks(); Tasks.select(res.task.id); }
+}
+
 async function adoptTerminal(id) {
   const res = await post("/api/task/adopt-terminal", { id });
   toast(res.msg);

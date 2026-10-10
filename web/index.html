@@ -31,6 +31,8 @@
   } catch (e) { /* 缓存坏了走原生 */ }
 })();
 </script>
+<script src="/i18n-en.js"></script>
+<script src="/i18n.js"></script>
 </head>
 <body>
 <div class="app-shell">
@@ -152,9 +154,9 @@
       <label style="margin:0;display:flex;gap:5px;align-items:center"><input type="checkbox" id="w-worktree" checked> worktree 隔离</label>
     </div>
     <div class="row">
-      <label style="margin:0">模型 <select id="w-model" style="width:130px"><option value="">默认</option></select></label>
-      <label style="margin:0">思考深度 <select id="w-effort" style="width:130px"><option value="">默认</option></select></label>
-      <label style="margin:0">权限 <select id="w-perm" style="width:110px"><option value="">默认</option><option value="safe">safe（要审批）</option><option value="bypass">bypass</option></select></label>
+      <label style="margin:0;display:flex;gap:5px;align-items:center;white-space:nowrap">模型 <select id="w-model" style="min-width:130px;max-width:200px"><option value="">默认</option></select></label>
+      <label style="margin:0;display:flex;gap:5px;align-items:center;white-space:nowrap">思考深度 <select id="w-effort" style="width:130px"><option value="">默认</option></select></label>
+      <label style="margin:0;display:flex;gap:5px;align-items:center;white-space:nowrap">权限 <select id="w-perm" style="width:110px"><option value="">默认</option><option value="safe">safe（要审批）</option><option value="bypass">bypass</option></select></label>
     </div>
     <div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">后台任务默认 worktree 隔离；terminal 模式会在本机拉起 Terminal 窗口</div>
     <div class="actions">

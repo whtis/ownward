@@ -63,6 +63,17 @@ export function resetCliHelpCache(): void { helpCache.clear(); inflight.clear();
 
 export interface ClaudeAdditionalModel { value: string; label: string; description: string }
 /** ~/.claude.json 的 additionalModelOptionsCache：服务端按账号下发的额外型号（/model 菜单里内置四项之外的那些） */
+/** Claude Code 自己的默认型号与思考深度：用户级 settings.json 的 model / effortLevel（CLAUDE_CONFIG_DIR 优先）。
+ *  只拿来在派发弹窗里标出「默认」会落到哪——派发时 Ownward 不传 --model/--effort，由 CLI 自己读配置；
+ *  项目级 .claude/settings.json 与 ANTHROPIC_MODEL 还能再覆盖，所以这是「通常会用」而不是保证 */
+export function claudeCliDefaults(file = join(process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME || homedir(), ".claude"), "settings.json")): { model?: string; effort?: string } {
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as { model?: unknown; effortLevel?: unknown };
+    const model = typeof raw.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$/.test(raw.model) ? raw.model : undefined;
+    const effort = typeof raw.effortLevel === "string" && /^[a-z]{2,16}$/.test(raw.effortLevel) ? raw.effortLevel : undefined;
+    return { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+  } catch { return {}; }
+}
 export function claudeAdditionalModels(file = join(process.env.HOME || homedir(), ".claude.json")): ClaudeAdditionalModel[] {
   try {
     if (!existsSync(file)) return [];

@@ -53,12 +53,14 @@ function applyProviderCatalog(catalog) {
   const models = catalog.codex.models.filter((m) => m && typeof m.slug === "string" && m.slug && Array.isArray(m.efforts) && m.efforts.every((x) => typeof x === "string" && x));
   if (!models.length) return false;
   const caps = { ...WORK_PROVIDER_CAPABILITIES_BUILTIN };
+  // CLI 自己配置的默认型号/档位（只用于把「默认」标清楚）；形状不对就当没有，别画出半截文案
+  const cliDefault = (v) => Object.freeze(Object.fromEntries(["model", "effort"].filter((k) => typeof v?.[k] === "string" && v[k]).map((k) => [k, v[k]])));
   for (const id of ["claude", "codebuddy"]) {
     const c = catalog[id];
-    if (c && strings(c.models) && strings(c.efforts)) caps[id] = Object.freeze({ ...WORK_PROVIDER_CAPABILITIES_BUILTIN[id], models: Object.freeze([...c.models]), efforts: Object.freeze([...c.efforts]) });
+    if (c && strings(c.models) && strings(c.efforts)) caps[id] = Object.freeze({ ...WORK_PROVIDER_CAPABILITIES_BUILTIN[id], models: Object.freeze([...c.models]), efforts: Object.freeze([...c.efforts]), cliDefault: cliDefault(c.cliDefault) });
   }
   const defaultModel = typeof catalog.codex.defaultModel === "string" && catalog.codex.defaultModel ? catalog.codex.defaultModel : WORK_PROVIDER_CAPABILITIES_BUILTIN.codex.defaultModel;
-  caps.codex = Object.freeze({ ...WORK_PROVIDER_CAPABILITIES_BUILTIN.codex, models: Object.freeze(models.map((m) => m.slug)), defaultModel, handoffModel: defaultModel });
+  caps.codex = Object.freeze({ ...WORK_PROVIDER_CAPABILITIES_BUILTIN.codex, models: Object.freeze(models.map((m) => m.slug)), defaultModel, handoffModel: defaultModel, cliDefault: cliDefault(catalog.codex.cliDefault) });
   WORK_PROVIDER_CAPABILITIES = Object.freeze(caps);
   WORK_CODEX_MODEL_EFFORTS = Object.freeze(Object.fromEntries(models.map((m) => [m.slug, Object.freeze([...m.efforts])])));
   WORK_CODEX_MODEL_INFO = Object.freeze(Object.fromEntries(models.map((m) => [m.slug, Object.freeze({ displayName: m.displayName || m.slug, defaultEffort: m.defaultEffort || "", fast: m.fast || null })])));
@@ -82,6 +84,33 @@ function workProviderEfforts(providerId, model) {
 function workProviderDefaultEffort(providerId, model) {
   const efforts = workProviderEfforts(providerId, model);
   return efforts.includes("medium") ? "medium" : efforts[0] || "";
+}
+/** 派发弹窗的型号/思考深度选中项与「默认」文案（纯函数，web/provider-catalog.test.ts 直接求值）。
+ *  「默认」= 不传参数，交给 CLI 自己的配置（Codex 读 ~/.codex/config.toml，Claude 读 settings.json），文案里标出它会落到哪。
+ *  切到 Codex 不再替人选死某个型号：2026-09-22 之前一律选 gpt-5.6-sol，config.toml 里配的 gpt-6-astra 从没被派发用上。
+ *  current 是下拉框当前值（切引擎时沿用），selection 是调用方显式要的（打开弹窗时的 dispatch.defaults） */
+function workDialogChoice(providerId, selection = {}, current = {}) {
+  const has = (k) => Object.prototype.hasOwnProperty.call(selection, k);
+  const capability = workProviderCapability(providerId), cli = capability.cliDefault || {};
+  const requestedModel = selection.model ?? current.model ?? "";
+  const explicitModel = has("model") && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(requestedModel);
+  const model = capability.models.includes(requestedModel) || explicitModel ? requestedModel : "";
+  const customModel = explicitModel && !capability.models.includes(requestedModel) ? [requestedModel] : [];
+  const efforts = workProviderEfforts(providerId, model);
+  const requestedEffort = selection.effort ?? current.effort ?? "";
+  // 显式选了型号、而 CLI 配的档位它不支持（配的 ultra、选的 gpt-5.5）：不能留「默认」，CLI 收到不认识的档位直接报错
+  const cliEffortFits = !cli.effort || efforts.includes(cli.effort);
+  const effort = efforts.includes(requestedEffort) ? requestedEffort
+    : !model || (!requestedEffort && cliEffortFits) || (has("effort") && !requestedEffort) ? ""
+    : workProviderDefaultEffort(providerId, model);
+  const defaultModel = cli.model || (providerId === "codex" ? capability.defaultModel : "");
+  const defaultEffort = !cliEffortFits ? ""
+    : cli.effort || (providerId === "codex" ? (WORK_CODEX_MODEL_INFO[model || capability.defaultModel]?.defaultEffort || "") : "");
+  return {
+    model, customModel, efforts, effort,
+    modelLabel: defaultModel ? `默认（${defaultModel}）` : "默认",
+    effortLabel: defaultEffort ? `默认（${WORK_EFFORT_LABELS[defaultEffort] || defaultEffort}）` : "默认",
+  };
 }
 /** 只配了默认模型没配默认引擎时（dispatch.defaults.model="opus"、provider 留空），按模型反查它属于哪家 */
 function workProviderForModel(model) {
@@ -109,8 +138,9 @@ function mdHtml(src) {
     s = s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
     const links = [];  // 护住已组装的 <a>，免得裸链接规则再把 href 里的 URL 包一层
     s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (_, t, u) => `\u0001${links.push(`<a href="${u}" target="_blank" rel="noopener">${t}</a>`) - 1}\u0001`);
-    // 裸链接：中文里 URL 常紧跟全角标点，遇到全角字符或转义后的 <>" 就截断；句尾的半角标点不算进链接
-    s = s.replace(/https?:\/\/(?:(?!&(?:lt|gt|quot);)[^\s<>\u0000\u0001\u3000-\u303f\uff00-\uffef])+/g, (u) => {
+    // 裸链接：中文里 URL 常紧跟全角标点，遇到全角字符或转义后的 <>" 就截断；句尾的半角标点不算进链接。
+    // 私用区（\ue000-\uf8ff）也截断：笔记阅读视图拿它给双链/图片占位，被吞进 href 就拼坏了
+    s = s.replace(/https?:\/\/(?:(?!&(?:lt|gt|quot);)[^\s<>\u0000\u0001\u3000-\u303f\uff00-\uffef\ue000-\uf8ff])+/g, (u) => {
       const tail = u.match(/[.,;:!?)\]'*]+$/)?.[0] || "";
       u = u.slice(0, u.length - tail.length);
       return `\u0001${links.push(`<a href="${u}" target="_blank" rel="noopener">${u}</a>`) - 1}\u0001${tail}`;
@@ -154,7 +184,7 @@ function mdHtml(src) {
   }
   return `<div class="md">${out.join("")}</div>`;
 }
-const hhmm = (iso) => new Date(iso).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+const hhmm = (iso) => new Date(iso).toLocaleTimeString(globalThis.I18N?.locale || "zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
 function ageText(iso) {
   if (!iso) return "无信号";
   const s = Math.round((Date.now() - new Date(iso)) / 1000);
@@ -673,23 +703,11 @@ function bindTopbar() {
     }
     const providerId = engineSelect.value;
     const capability = workProviderCapability(providerId);
-    const requestedModel = selection.model ?? $("#w-model").value;
-    const explicitModel = Object.prototype.hasOwnProperty.call(selection, "model") && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(requestedModel);
-    const model = capability.models.includes(requestedModel)
-      ? requestedModel
-      : explicitModel ? requestedModel
-      : providerId === "codex" && selection.useProviderDefault !== false ? capability.defaultModel : "";
-    const customModel = explicitModel && !capability.models.includes(requestedModel) ? [requestedModel] : [];
-    $("#w-model").innerHTML = `<option value="">默认</option>` + [...customModel, ...capability.models].map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join("");
-    $("#w-model").value = model;
-
-    const efforts = workProviderEfforts(providerId, model);
-    const requestedEffort = selection.effort ?? $("#w-effort").value;
-    const effort = efforts.includes(requestedEffort)
-      ? requestedEffort
-      : Object.prototype.hasOwnProperty.call(selection, "effort") && !requestedEffort ? "" : workProviderDefaultEffort(providerId, model);
-    $("#w-effort").innerHTML = `<option value="">默认</option>` + efforts.map((item) => `<option value="${esc(item)}">${esc(WORK_EFFORT_LABELS[item] || item)}</option>`).join("");
-    $("#w-effort").value = effort;
+    const c = workDialogChoice(providerId, selection, { model: $("#w-model").value, effort: $("#w-effort").value });
+    $("#w-model").innerHTML = `<option value="">${esc(c.modelLabel)}</option>` + [...c.customModel, ...capability.models].map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join("");
+    $("#w-model").value = c.model;
+    $("#w-effort").innerHTML = `<option value="">${esc(c.effortLabel)}</option>` + c.efforts.map((item) => `<option value="${esc(item)}">${esc(WORK_EFFORT_LABELS[item] || item)}</option>`).join("");
+    $("#w-effort").value = c.effort;
   };
   const openWork = (dir) => {
     overlay.dataset.open = "true";
@@ -706,7 +724,7 @@ function bindTopbar() {
         || (d.codex !== undefined ? (d.codex ? "codex" : "claude") : "")
         || workProviderForModel(d.model || "")
         || "claude";
-      fillWorkProviderOptions({ model: d.model || "", effort: d.effort || "", useProviderDefault: !d.model });
+      fillWorkProviderOptions({ model: d.model || "", effort: d.effort || "" });
     } else fillWorkProviderOptions();
     paintProjectCandidates();     // 先用缓存立刻画出来
     refreshProjectCandidates();   // 再后台刷新：刚派过/刚聊过的目录要能立刻出现在最近目录里
@@ -770,7 +788,7 @@ function bindTopbar() {
     if (e.key === "Enter") { e.preventDefault(); submitAddDir(); }
   });
 
-  // 模型和思考深度一起随 Provider 切换；Codex 没有显式配置时在 UI 里明确落到 5.6-sol。
+  // 模型和思考深度一起随 Provider 切换；没显式选的停在「默认」，由 CLI 自己的配置决定（文案里标出会落到哪）。
   $("#w-engine").addEventListener("change", () => fillWorkProviderOptions());
   $("#w-model").addEventListener("change", () => fillWorkProviderOptions({ model: $("#w-model").value }));
   fillWorkProviderOptions();

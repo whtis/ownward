@@ -175,7 +175,17 @@ final class OwnwardClient: Sendable {
 
     func tasks() async throws -> [WorkTask] { try await get("/api/tasks") }
     func recentSessions() async throws -> [RecentSession] { try await get("/api/dev/recent") }
-    func devMessages(id: String) async throws -> AgentState { try await get("/api/dev/messages?id=" + Self.enc(id)) }
+    /// tail = 只要最后几条（服务端回 omitted = 前面省掉的条数）；0 = 只要元数据（审批卡之类）；nil = 全量
+    func devMessages(id: String, tail: Int? = nil) async throws -> AgentState {
+        let data = try await exec(makeRequest("/api/dev/messages?id=" + Self.enc(id) + (tail.map { "&tail=\($0)" } ?? "")))
+        return try await Self.decodeOffMain(data)
+    }
+    /// 长会话的响应有好几 MB：调用方是 @MainActor 的 store，普通 nonisolated async 会在主线程上解码（approachable concurrency），
+    /// @concurrent 显式切到后台
+    @concurrent private static func decodeOffMain<T: Decodable & Sendable>(_ data: Data) async throws -> T {
+        do { return try JSONDecoder().decode(T.self, from: data) }
+        catch { throw ApiError(code: -2, message: "响应解析失败") }
+    }
     /// 各家订阅额度（服务端 60s 缓存；拿不到的那家为 null）
     func usage() async throws -> ProvidersUsage { try await get("/api/usage") }
     func devSend(id: String, text: String, images: [OutImage] = []) async throws -> OkMsg {

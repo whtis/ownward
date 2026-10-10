@@ -1,7 +1,7 @@
 import type { DevImage, DevMsg, AgentControl } from "./types.ts";
 import type { SessionProviderId } from "../../sessions/repository.ts";
 
-export type SessionCapability = "stream" | "resume" | "interrupt" | "approval" | "images" | "tools" | "add-dir" | "set-access" | "set-options" | "new-session";
+export type SessionCapability = "stream" | "resume" | "interrupt" | "approval" | "images" | "tools" | "add-dir" | "set-access" | "set-options" | "new-session" | "fork";
 export type KernelGrantedAccess = "workspace" | "full-access" | "bypass";
 export function parseSessionMigrationMode(value: unknown): "off" | "runner" { if (value === undefined) return "runner"; if (value !== "off" && value !== "runner") throw new Error(`未知 sessionRunnerMode: ${String(value)}（仅支持 off/runner）`); return value; }
 /** Runner canary is stable by persisted task identity. Empty allowlist means all tasks when mode=runner. */
@@ -34,6 +34,8 @@ export interface KernelSessionState {
   operability?: "active" | "read-only"; archiveState?: "orphaned-task-link";
   handoff?: { predecessorId?: string; at: string; reason?: string; currentProviderId: SessionProviderId };
   lineage?: SessionLineageEntry[];
+  /** 只在 /api/dev/messages 带 tail 时出现：messages 前面省掉的条数（见 message-tail.ts） */
+  omitted?: number;
 }
 export interface SessionMutationResult { queued: boolean; commandId?: string; runId?: string; outcomeUnknown?: boolean; }
 export interface SessionService {
@@ -54,4 +56,6 @@ export interface SessionService {
   handoff(id:string,input:{providerId:SessionProviderId;model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean}):Promise<SessionMutationResult & {sessionId:string;providerId:SessionProviderId;inPlace?:true}>;
   /** 同 Provider 就地改模型/思考深度：沿用原生会话（claude --resume / codex exec resume 都认新参数），不接力、不重放历史 */
   reconfigure(id:string,input:{model?:string;effort?:string}):Promise<SessionMutationResult & {sessionId:string;providerId:SessionProviderId;model?:string;effort?:string}>;
+  /** 分叉：新建一条独立 Session 继承原会话的完整上下文与配置；原会话一个字节都不碰（不打断、不抢输入权、不动队列） */
+  fork(id:string,input:{taskId:string},grants:KernelSessionGrants):Promise<KernelSessionDto>;
 }

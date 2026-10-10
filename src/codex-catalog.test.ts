@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { BUILTIN_CODEX_CATALOG, codexCatalogModel, parseCodexCatalog, readCodexCatalog } from "./codex-catalog.ts";
-import { assertProviderOptions, CODEX_MODEL_EFFORTS, isCodexModelEffortPair } from "./session-options.ts";
+import { BUILTIN_CODEX_CATALOG, codexCatalogModel, parseCodexCatalog, parseCodexConfigDefaults, readCodexCatalog, readCodexCliDefaults } from "./codex-catalog.ts";
+import { assertProviderOptions, CODEX_MODEL_EFFORTS, defaultCodexModel, DEFAULT_CODEX_MODEL, isCodexModelEffortPair } from "./session-options.ts";
 
 // 形状照抄 codex-cli 0.148 写出的 ~/.codex/models_cache.json（2026-09-05），字段裁剪到解析用到的
 const level = (effort: string) => ({ effort, description: "" });
@@ -86,5 +86,46 @@ describe("codex catalog", () => {
     expect(() => assertProviderOptions("claude", "opus", "ultra")).toThrow("effort 非法");
     expect(() => assertProviderOptions("codebuddy", "hy3", "max")).not.toThrow();
     expect(() => assertProviderOptions("claude", "bad model!", undefined)).toThrow("model 非法");
+  });
+});
+
+describe("Codex CLI defaults (~/.codex/config.toml)", () => {
+  test("only top-level keys count, a selected profile overrides them, other tables are ignored", () => {
+    expect(parseCodexConfigDefaults('service_tier = "priority"\nmodel = "gpt-6-astra"   # 顶层\nmodel_reasoning_effort = "high"\n[sandbox_workspace_write]\nmodel = "gpt-5.5"\n'))
+      .toEqual({ model: "gpt-6-astra", effort: "high" });
+    expect(parseCodexConfigDefaults("profile = \"deep\"\nmodel = 'gpt-5.5'\n[profiles.deep]\nmodel_reasoning_effort = \"ultra\"\n[profiles.\"other.p\"]\nmodel = \"x\"\n"))
+      .toEqual({ model: "gpt-5.5", effort: "ultra" });
+    expect(parseCodexConfigDefaults("# nothing here\n[notice]\nmodel = \"gpt-5.5\"\n")).toEqual({});
+  });
+
+  test("unknown models and unsupported efforts are dropped instead of sent to the CLI", () => {
+    const home = mkdtempSync(join(tmpdir(), "codex-cli-defaults-"));
+    writeFileSync(join(home, "models_cache.json"), official(new Date().toISOString()));
+    writeFileSync(join(home, "config.toml"), 'model = "gpt-6-astra"\nmodel_reasoning_effort = "high"\n');
+    expect(readCodexCliDefaults({ home, now: 1 })).toMatchObject({ model: "gpt-6-astra", effort: "high" });
+    const bad = mkdtempSync(join(tmpdir(), "codex-cli-defaults-"));
+    writeFileSync(join(bad, "models_cache.json"), official(new Date().toISOString()));
+    writeFileSync(join(bad, "config.toml"), 'model = "gpt-9-imaginary"\nmodel_reasoning_effort = "high"\n');
+    expect(readCodexCliDefaults({ home: bad, now: 1 })).toEqual({ file: join(bad, "config.toml") });
+    const odd = mkdtempSync(join(tmpdir(), "codex-cli-defaults-"));
+    writeFileSync(join(odd, "models_cache.json"), official(new Date().toISOString()));
+    writeFileSync(join(odd, "config.toml"), 'model = "gpt-5.3-codex-spark"\nmodel_reasoning_effort = "ultra"\n');   // spark 只到 xhigh
+    expect(readCodexCliDefaults({ home: odd, now: 1 })).toEqual({ file: join(odd, "config.toml"), model: "gpt-5.3-codex-spark" });
+    expect(readCodexCliDefaults({ home: join(home, "missing"), now: 1 })).toEqual({ file: join(home, "missing", "config.toml") });
+  });
+
+  test("defaultCodexModel: CLI config first, then the caller's fallback, then the built-in default", () => {
+    const saved = process.env.CODEX_HOME;
+    try {
+      const configured = mkdtempSync(join(tmpdir(), "codex-default-model-"));
+      writeFileSync(join(configured, "config.toml"), 'model = "gpt-5.6-terra"\n');
+      process.env.CODEX_HOME = configured;
+      expect(defaultCodexModel("gpt-5.5")).toBe("gpt-5.6-terra");
+      process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "codex-default-model-"));
+      expect(defaultCodexModel("gpt-5.5")).toBe("gpt-5.5");
+      expect(defaultCodexModel()).toBe(DEFAULT_CODEX_MODEL);
+    } finally {
+      if (saved === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = saved;
+    }
   });
 });

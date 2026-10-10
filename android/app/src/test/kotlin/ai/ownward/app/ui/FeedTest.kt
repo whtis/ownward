@@ -115,6 +115,14 @@ class FeedTest {
     }
 
     @Test
+    // 只拿了消息尾部（tail）时下标平移成绝对位置：组和单条都平移，内容不变
+    fun `shifted 平移下标不动内容`() {
+        val feed = foldToolRuns(listOf(user("a"), tool("Bash"), tool("Bash"), tool("Bash"))).map { it.shifted(100) }
+        assertEquals(listOf(100, 101), feed.map { it.index })
+        assertEquals(3, (feed[1] as FeedItem.Tools).msgs.size)
+    }
+
+    @Test
     fun `空列表不炸`() {
         assertEquals(emptyList<FeedItem>(), foldToolRuns(emptyList()))
         assertEquals("", toolRunSubtitle(emptyList(), live = true))

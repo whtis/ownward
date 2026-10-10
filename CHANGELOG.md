@@ -2,6 +2,26 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.5.0] - 2026-10-10
+
+### Added
+
+- Sessions can be forked. A fork opens a new session that carries the full context of the original, and the original stays usable, so you can try a different direction without losing the thread you were on.
+- The web workbench has an English interface, switchable in Settings. Generated task titles follow the selected language: with English selected, new tasks get English titles even when the task itself is written in Chinese. Existing titles are left as they are.
+- The notes page remembers where you were, saves as you type, and can search and jump between notes.
+
+### Changed
+
+- Long session histories load in pages. The web page and the iOS and Android apps fetch only the most recent part of a session (`/api/dev/messages?tail=N`) and load earlier messages on demand, and the web page renders only the latest 200 items and builds collapsed tool groups lazily. Very long sessions used to exhaust the browser tab's memory and crash it.
+- Task detail polling dropped from every 2.5 seconds to every 10 seconds and stops for finished tasks.
+- The "default" model in the dispatch dialog follows the CLI's own configuration instead of a hard-coded model.
+
+### Fixed
+
+- Background subagents started by Claude are no longer killed when the turn ends; their reports land in the same run, and a background task that finishes in the turn that started it is no longer labelled as left over from a previous turn.
+- Provider errors show their details instead of a bare `provider_input_invalid`.
+- The release canary uses a copy of the credentials without the refresh token, so installing a release no longer signs you out of the CLI.
+
 ## [1.4.0] - 2026-09-20
 
 ### Added

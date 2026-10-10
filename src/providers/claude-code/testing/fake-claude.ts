@@ -7,7 +7,9 @@ if(process.env.FAKE_CLAUDE_PERMISSION_PROMPT_TOOL==="0"&&args.includes("--permis
 {const ppIdx=args.indexOf("--permission-prompt-tool");if(ppIdx>=0&&(ppIdx===args.length-1||args[ppIdx+1].startsWith("-"))){console.error("error: option '--permission-prompt-tool <tool>' argument missing");process.exit(1);}}
 if(args.includes("--help")){const delay=Number(process.env.FAKE_CLAUDE_HELP_DELAY_MS||0);if(delay>0)await Bun.sleep(delay);if(process.env.FAKE_CLAUDE_HELP_FAIL==="1"){console.error("fake help failed");process.exit(9);}console.log(process.env.FAKE_CLAUDE_EFFORT==="0"?"fake help":"fake help --effort <level>");process.exit(0);}
 if(process.env.FAKE_CLAUDE_SPAWN_RECORD)appendFileSync(process.env.FAKE_CLAUDE_SPAWN_RECORD,JSON.stringify(args)+"\n");
-const sessionId = process.env.FAKE_CLAUDE_SESSION_ID || `fake-session-${process.pid}`;
+// 真 CLI 的 --fork-session：从 --resume 的会话读上下文、换一个新 session id。FAKE_CLAUDE_FORK_IGNORED=1 模拟旗标没生效
+const forked = args.includes("--fork-session") && process.env.FAKE_CLAUDE_FORK_IGNORED !== "1";
+const sessionId = forked ? `forked-${process.pid}` : process.env.FAKE_CLAUDE_SESSION_ID || `fake-session-${process.pid}`;
 let initialized = false;
 let waiting: "approval" | "long" | "long-noack" | null = null;
 const write = (value: unknown) => process.stdout.write(JSON.stringify(value) + "\n");
@@ -73,6 +75,28 @@ function onFrame(frame: any) {
     if (text === "EOF") { process.exit(7); return; }
     if (text === "RESULT_THEN_LINGER") { complete(`linger:pid:${process.pid}`); setTimeout(() => process.exit(0), 250); return; }
     if (text === "APPROVAL") { waiting = "approval"; write({ type: "control_request", request_id: "approval-1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "git push" } } }); return; }
+    // 后台子代理（2026-10-08 真 CLI 抓帧）：task_started + background_tasks_changed → 主线程 result；
+    // 子代理跑完 → task_notification + background_tasks_changed[] → 独立的汇报伪 turn（init + result(origin.runId)）
+    if (text === "BG_AGENT" || text === "BG_AGENT_SILENT" || text === "BG_AGENT_HANG") {
+      const runId = `bg-run-${text}`, task = { task_id: "agent-1", run_id: runId, task_type: "local_agent", subagent_type: "general-purpose", description: "fake subagent" };
+      write({ type: "system", subtype: "background_tasks_changed", tasks: [task] });
+      write({ type: "system", subtype: "task_started", ...task, tool_use_id: "toolu_agent", is_backgrounded: true, spawn_depth: 1 });
+      write({ type: "system", subtype: "task_started", task_id: "inner-bash", run_id: "inner-run", task_type: "local_bash", owned_by_subagent: true, is_backgrounded: false });
+      completeWithUsage(`launched:pid:${process.pid}`, { input_tokens: 1, output_tokens: 1 });
+      if (text === "BG_AGENT_HANG") return;
+      setTimeout(() => {
+        if (text === "BG_AGENT_SILENT") { write({ type: "system", subtype: "background_tasks_changed", tasks: [] }); return; }
+        write({ type: "system", subtype: "task_notification", task_id: "inner-bash", run_id: "inner-run", status: "completed", summary: "inner" });
+        write({ type: "system", subtype: "task_notification", task_id: "agent-1", run_id: runId, tool_use_id: "toolu_agent", status: "completed", summary: "fake subagent" });
+        write({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+        initialized = false; init();
+        write({ type: "assistant", message: { model: "fake-claude", usage: { input_tokens: 1, output_tokens: 1 }, content: [{ type: "text", text: `report:PONG:pid:${process.pid}` }] } });
+        write({ type: "result", subtype: "success", is_error: false, origin: { kind: "task-notification", producer: "session-task", runId }, usage: { input_tokens: 1, output_tokens: 1 } });
+      }, 300);
+      return;
+    }
+    // 本轮自己起的后台 shell 在本轮内跑完：通知不该标成「上一轮」
+    if (text === "BG_BASH_IN_TURN") { write({ type: "system", subtype: "task_started", task_id: "bash-own", run_id: "bash-own-run", task_type: "local_bash", is_backgrounded: true }); write({ type: "system", subtype: "task_notification", task_id: "bash-own", run_id: "bash-own-run", status: "completed", summary: "own bash" }); complete("bash-done"); return; }
     if (text === "LONG") { waiting = "long"; return; }
     if (text === "NO_ACK_LONG") { waiting = "long-noack"; return; }
     const canary=/OWNWARD_(?:CANARY|RESUME)_[0-9a-f-]+/.exec(text)?.[0];complete(canary??`reply:${text};images:${imageCount};pid:${process.pid};envleak:${process.env.CLAUDE_CODE_SECRET_SHOULD_CLEAR || process.env.CODEBUDDY_SECRET_SHOULD_CLEAR || "none"};args:${args.join("|")}`); return;

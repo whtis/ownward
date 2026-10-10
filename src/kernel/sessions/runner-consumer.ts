@@ -15,13 +15,15 @@ import { readInitialHistory } from "./initial-history.ts";
 import { assertProviderOptions } from "../../session-options.ts";
 
 export const PROVIDER_CAPABILITIES: Readonly<Record<SessionProviderId, ReadonlySet<SessionCapability>>> = {
-  claude: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
-  codex: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
+  // fork：claude 走原生 --resume <ref> --fork-session；codex 没有可验证的原生分叉，adapter 复制 rollout 到新 thread id
+  //（还要过 providers.codex.fork 开关，见 KernelSessionService.fork）
+  claude: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "fork"]),
+  codex: new Set(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "fork"]),
   // CodeBuddy 走 Claude Code 协议克隆：审批桥是 stream-json 上的 control_request/can_use_tool ↔ control_response，
   // 与 --permission-prompt-tool 旗标无关（那只是真 CC 的启动开关；克隆 CLI 不认，spawn 已按 probe 降级成只给 --permission-mode）。
   // 2026-09-16 实测 codebuddy 照发 can_use_tool，漏声明 approval 会让 respondApproval 抛 PROVIDER_CAPABILITY_UNSUPPORTED、
   // 审批卡永远答不了、turn 挂到 runner 重启才收敛成 unknown-outcome → 必须声明 approval；
-  // transcript 是私有格式，无 history 能力（adapter readHistory 会拒）
+  // transcript 是私有格式，无 history 能力（adapter readHistory 会拒）；--fork-session 未实测，不声明 fork
   codebuddy: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
 };
 
@@ -296,13 +298,17 @@ export class RunnerAgentStateProjector {
       lock_conflict: `⚠️ 会话被另一个进程占用，本轮没跑起来${detail ? `：${detail}` : ""}\n多半是终端里还开着同一个会话（codex resume / claude --resume），先退出它再续聊`,
       resume_not_found: `⚠️ 找不到可恢复的会话${detail ? `：${detail}` : ""}`,
       background_task: `⚠️ ${detail || "后台任务状态变更"}`,
+      background_waiting: `⏳ ${detail || "后台子代理在跑，跑完会自动汇报"}`,
+      fork_waiting: `⏳ ${detail || "原会话本轮还在进行，等它这一轮结束再分叉（原会话不受影响）"}`,
+      run_rejected: `⚠️ 这一轮没跑起来${body.reason ? `（${body.reason}）` : ""}${detail ? `：${detail}` : ""}`,
     };
     // 查不到就兜底原样透出：分类表永远追不上 provider 新增的错误，而「有错误却什么都不显示」
     // 正是这个函数存在的理由。2026-08-24 实撞：lock_conflict 不在表里，用户只看到「失败 1」。
     const text = map[body.category] ?? (detail ? `⚠️ ${body.category}：${detail}` : "");
     if (!text) return;
-    if (commandId && !["compacting", "compact_ok"].includes(body.category)) this.explained.add(commandId);
-    this.messages.push({ role: "system", ...(["compacting", "compact_ok"].includes(body.category) ? {} : { name: "error" }), text, ts: at });
+    const informational = ["compacting", "compact_ok", "background_waiting", "fork_waiting"].includes(body.category);
+    if (commandId && !informational) this.explained.add(commandId);
+    this.messages.push({ role: "system", ...(informational ? {} : { name: "error" }), text, ts: at });
   }
   state() { return { messages: structuredClone(this.messages), turn: this.turn, alive: this.turn === "running", partial: this.partial, pending: structuredClone(this.pending), resume: null, backend: this.session.providerId, providerId: this.session.providerId, control: this.session.control, queued: [], plan: structuredClone(this.plan), tokens: structuredClone(this.tokens), lastActivityAt: this.lastActivityAt, ...(this.commands ? { commands: [...this.commands] } : {}), ...(this.model ? { model: this.model } : {}), ...(this.ctxTokens ? { ctxTokens: this.ctxTokens } : {}), ...(this.ctxWindow ? { ctxWindow: this.ctxWindow } : {}) }; }
 }
@@ -312,5 +318,7 @@ export function inputForRunner(dataRoot: string, session: SessionRecord, input: 
   const options = session.providerId !== "codex" ? { access: access === "bypass" || access === "full-access" ? "bypass" : "standard", extraDirs, ...(session.model ? { model: session.model } : {}), ...(session.effort ? { effort: session.effort } : {}) }
     : { access: access === "full-access" || access === "bypass" ? "full-access" : "workspace-write", extraDirs, home: session.providerHome ? { kind: "path", path: expandCodexHome(session.providerHome) } : { kind: "default" }, ...(session.model ? { model: session.model } : {}), ...(session.effort ? { effort: session.effort } : {}) };
   const images = (input.images ?? []).map((image) => ({ mediaType: image.media_type, blob: stageRunnerAttachment(dataRoot, image.data) }));
-  return { text: input.text, images, cwd: session.cwd, options, ...(session.nativeRef ? { nativeRef: session.nativeRef } : {}) };
+  // 分叉还没兑现（没有自己的 nativeRef）：首轮 start-run 带上原会话 ref，由 adapter 分叉出新的原生会话
+  const forkFrom = !session.nativeRef && session.fork?.pending ? session.fork.originNativeRef : undefined;
+  return { text: input.text, images, cwd: session.cwd, options, ...(session.nativeRef ? { nativeRef: session.nativeRef } : {}), ...(forkFrom ? { forkFrom } : {}) };
 }

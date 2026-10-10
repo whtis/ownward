@@ -114,6 +114,13 @@ struct FeedTests {
         #expect(toolRunSubtitle([tool(""), tool("")], live: false) == "tool ×2")
     }
 
+    // 只拿了消息尾部（tail）时下标平移成绝对位置：组和单条都平移，内容不变
+    @Test func shifted平移下标不动内容() {
+        let feed = foldToolRuns([user("a"), tool("Bash"), tool("Bash"), tool("Bash")]).map { $0.shifted(by: 100) }
+        #expect(feed.map(\.index) == [100, 101])
+        if case .tools(_, let ms) = feed[1] { #expect(ms.count == 3) } else { Issue.record("第二项应是工具组") }
+    }
+
     @Test func 空列表不炸() {
         #expect(foldToolRuns([]).isEmpty)
         #expect(toolRunSubtitle([], live: true) == "")

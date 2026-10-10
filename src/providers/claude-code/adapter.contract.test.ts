@@ -7,7 +7,7 @@ import { stageRunnerAttachment } from "../../runner/attachments.ts";
 import { auditRunnerBlobs, RunnerEventJournal } from "../../runner/journals.ts";
 import { RunnerServer } from "../../runner/server.ts";
 import { ClaudeCodeRunnerProvider, type ClaudeProviderOptions } from "./adapter.ts";
-import { CLAUDE_EFFORTS, CLAUDE_PROVIDER_CAPABILITIES, buildClaudeProviderArgs, parseClaudeOptions } from "./protocol.ts";
+import { CLAUDE_EFFORTS, CLAUDE_PROVIDER_CAPABILITIES, buildClaudeProviderArgs, parseClaudeOptions, parseClaudeStartInput } from "./protocol.ts";
 import { canaryProvider } from "../../release/provider-canary.ts";
 
 const roots: string[] = [], providers: ClaudeCodeRunnerProvider[] = [];
@@ -33,7 +33,7 @@ describe("Claude Code Runner Provider contract", () => {
     const provider = new ClaudeCodeRunnerProvider(command, { ...process.env, HOME: home }); providers.push(provider); expect(await provider.readHistory({ nativeRef: "native-history" })).toEqual([{ role: "user", text: "question", ts: "2026-08-01T00:00:00Z" }, { role: "assistant", text: "answer", ts: "2026-08-01T00:00:01Z" }]); expect((await provider.readHistory({ nativeRef: "missing" }))[0]).toMatchObject({ role: "system", name: "history" });
   });
   test("声明阶段 2 capability，参数只由 Kernel grant 映射", () => {
-    expect([...CLAUDE_PROVIDER_CAPABILITIES]).toEqual(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort"]);
+    expect([...CLAUDE_PROVIDER_CAPABILITIES]).toEqual(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort", "fork"]);
     expect(buildClaudeProviderArgs(["claude"], { access: "standard", extraDirs: ["/a"] }, "native")).toContain("--permission-prompt-tool");
     expect(buildClaudeProviderArgs(["claude"], { access: "bypass", extraDirs: [] })).toContain("--dangerously-skip-permissions");
   });
@@ -181,6 +181,48 @@ describe("Claude Code Runner Provider contract", () => {
     } finally { client.close(); server.stop(); }
   });
 
+  test("分叉：argv 只在没有自己的 ref 时带 --resume <origin> --fork-session，start input 严格白名单", () => {
+    expect(buildClaudeProviderArgs(["claude"], { access: "standard", extraDirs: [] }, undefined, true, true, "origin-ref").slice(-3)).toEqual(["--resume", "origin-ref", "--fork-session"]);
+    const resumed = buildClaudeProviderArgs(["claude"], { access: "standard", extraDirs: [] }, "own-ref", true, true, "origin-ref");
+    expect(resumed.slice(-2)).toEqual(["--resume", "own-ref"]); expect(resumed).not.toContain("--fork-session");
+    const base = { text: "x", cwd: tmpdir(), images: [], options };
+    expect(parseClaudeStartInput(JSON.stringify({ ...base, forkFrom: "origin-ref" })).forkFrom).toBe("origin-ref");
+    expect(parseClaudeStartInput(JSON.stringify(base)).forkFrom).toBeUndefined();
+    expect(() => parseClaudeStartInput(JSON.stringify({ ...base, forkFrom: " " }))).toThrow("forkFrom 非法");
+    expect(() => parseClaudeStartInput(JSON.stringify({ ...base, forkOf: "x" }))).toThrow("含未知字段");
+  });
+
+  test("分叉：原会话本轮在跑时先等它这一轮结束，原会话不被打断；分叉拿到自己的新 ref", async () => {
+    const spawnRecord = join(root(), "fork-spawn.jsonl"), { data, server, client } = await fixture({}, {}, { FAKE_CLAUDE_SPAWN_RECORD: spawnRecord }); try {
+      await client.request("submit", startBody("origin", "LONG", "origin-session")); await Bun.sleep(50);
+      await client.request("submit", { ...startBody("fork", "after fork", "fork-session"), input: JSON.stringify({ text: "after fork", cwd: tmpdir(), images: [], options, forkFrom: "native-claude-1" }) });
+      await Bun.sleep(150);
+      const waiting = (await client.queryCommand("fork")).body.events as any[];
+      expect(waiting.map((event) => event.type)).toEqual(["dispatching", "provider-notice"]);
+      expect(payloads(data, waiting)[0]).toMatchObject({ category: "fork_waiting" });
+      // 分叉在等，原会话照常跑完自己的这一轮（这里由用户中断收尾）
+      await client.request("interrupt", { commandId: "origin-interrupt", runId: "run-origin", sessionId: "origin-session", providerId: "claude" });
+      expect((await waitTerminal(client, "origin")).at(-1)?.type).toBe("interrupted");
+      const events = await waitTerminal(client, "fork");
+      expect(events.at(-1)?.type).toBe("completed");
+      const ref = events.find((event) => event.type === "session-updated")?.nativeRef;
+      expect(ref).toStartWith("forked-"); expect(ref).not.toBe("native-claude-1");
+      const argv = readFileSync(spawnRecord, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]).filter((args) => !args.includes("--help"));
+      expect(argv.filter((args) => args.includes("--fork-session"))).toHaveLength(1);
+      expect(argv.find((args) => args.includes("--fork-session"))!.join(" ")).toContain("--resume native-claude-1 --fork-session");
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("分叉：CLI 没换出新 id 时这一轮明确失败，绝不把原会话 ref 绑给分叉", async () => {
+    const { data, server, client } = await fixture({}, {}, { FAKE_CLAUDE_FORK_IGNORED: "1" }); try {
+      await client.request("submit", { ...startBody("fork-same", "x", "fork-same-session"), input: JSON.stringify({ text: "x", cwd: tmpdir(), images: [], options, forkFrom: "native-claude-1" }) });
+      const events = await waitTerminal(client, "fork-same");
+      expect(events.at(-1)).toMatchObject({ type: "failed", reason: "provider_protocol_error" });
+      expect(events.some((event) => event.type === "session-updated")).toBe(false);
+      expect(JSON.stringify(payloads(data, events))).toContain("分叉未生成新会话");
+    } finally { client.close(); server.stop(); }
+  });
+
   test("control stdin write 后必须等匹配 ack，超时显式 provider_no_ack", async () => {
     const { server, client } = await fixture({ controlAckTimeoutMs: 40 }); try {
       await client.request("submit", startBody("no-ack-turn", "NO_ACK_LONG", "no-ack-session")); await Bun.sleep(20);
@@ -203,10 +245,10 @@ describe("Claude Code Runner Provider contract", () => {
   });
 
   test("adapter error code 均映射稳定 reason，未知 code 不伪装业务成功", async () => {
-    const { server, client } = await fixture(); try {
+    const { data, server, client } = await fixture(); try {
       await client.request("submit", { ...startBody("missing", "x", "missing-session"), kind: "send-input", input: JSON.stringify({ text: "x", images: [] }) }); expect((await waitTerminal(client, "missing")).at(-1)?.reason).toBe("provider_unavailable");
       await client.request("submit", { ...startBody("bad-input", "x"), input: "not-json" }); expect((await waitTerminal(client, "bad-input")).at(-1)?.reason).toBe("provider_input_invalid");
-      await client.request("submit", { ...startBody("bad-cwd", "x"), input: JSON.stringify({ text: "x", cwd: "/definitely/missing", images: [], options }) }); expect((await waitTerminal(client, "bad-cwd")).at(-1)?.reason).toBe("provider_input_invalid");
+      await client.request("submit", { ...startBody("bad-cwd", "x"), input: JSON.stringify({ text: "x", cwd: "/definitely/missing", images: [], options }) }); const badCwd = await waitTerminal(client, "bad-cwd"); expect(badCwd.at(-1)?.reason).toBe("provider_input_invalid"); expect(payloads(data, badCwd)).toContainEqual({ category: "run_rejected", reason: "provider_input_invalid", message: "Claude cwd 不存在或不是目录" });
       await client.request("submit", startBody("idle", "one", "idle-session")); await waitTerminal(client, "idle"); await client.request("interrupt", { commandId: "inactive", runId: "run-idle", sessionId: "idle-session", providerId: "claude" }); expect((await waitTerminal(client, "inactive")).at(-1)?.reason).toBe("run_not_active");
       const direct = new ClaudeCodeRunnerProvider(command); providers.push(direct); const badCommand = { schemaVersion: 1, commandId: "unsupported", kind: "unknown", acceptedAt: new Date().toISOString(), runId: "r", sessionId: "s", providerId: "claude" } as any; let found: any; try { for await (const _ of direct.execute(badCommand, "{}")) {} } catch (error) { found = error; } expect(found?.code).toBe("PROVIDER_CAPABILITY_UNSUPPORTED");
     } finally { client.close(); server.stop(); }
@@ -323,6 +365,53 @@ describe("Claude Code Runner Provider contract", () => {
       expect(events.filter((event) => ["completed", "failed", "interrupted"].includes(event.type))).toHaveLength(1);
       expect(events.at(-1)).toMatchObject({ type: "completed" });
       expect(provider.metrics.droppedFrames).toBeGreaterThan(0);                     // 伪 turn 的 result 是可观测地丢的
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("后台子代理：result 后不杀 CLI，turn 挂起直到汇报伪 turn 到达，汇报进同一个 run", async () => {
+    // 2026-10-08：以前主线程 result 一到就 SIGKILL CLI，后台子代理跟着死，「跑完自动汇报」永远不来
+    const { data, server, client } = await fixture({ backgroundCheckMs: 20 }); try {
+      await client.request("submit", startBody("bg-agent", "BG_AGENT"));
+      const events = await waitTerminal(client, "bg-agent", 5_000), values = payloads(data, events), text = JSON.stringify(values);
+      expect(values.find((value) => value.category === "background_waiting")?.message ?? "<无挂起通知>").toContain("1 个后台子代理");
+      const launched = /launched:pid:(\d+)/.exec(text)?.[1], reported = /report:PONG:pid:(\d+)/.exec(text)?.[1];
+      expect(launched).toBeTruthy(); expect(reported).toBe(launched);               // 汇报来自同一个没被杀的 CLI 进程
+      expect(values.filter((value) => value.category === "background_task").map((value) => value.message)).toEqual(["后台任务 agent-1 → completed：fake subagent"]);  // 子代理内部任务不刷屏
+      expect(events.filter((event) => ["completed", "failed", "interrupted"].includes(event.type))).toHaveLength(1);
+      expect(events.at(-1)).toMatchObject({ type: "completed" });
+      await client.request("submit", { commandId: "bg-agent-next", kind: "send-input", runId: "run-bg-agent-next", sessionId: "session-bg-agent", providerId: "claude", input: JSON.stringify({ text: "after", images: [] }) });
+      expect((await waitTerminal(client, "bg-agent-next")).at(-1)?.type).toBe("completed");
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("本轮自己起的后台 shell 的通知不标成「上一轮」", async () => {
+    const { data, server, client } = await fixture(); try {
+      await client.request("submit", startBody("bg-bash", "BG_BASH_IN_TURN"));
+      const values = payloads(data, await waitTerminal(client, "bg-bash"));
+      expect(values.find((value) => value.category === "background_task")?.message).toBe("后台任务 bash-own → completed：own bash");
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("后台子代理结束却不汇报：宽限期后收尾，不无限挂起", async () => {
+    const { data, server, client } = await fixture({ backgroundCheckMs: 20, backgroundReportGraceMs: 200 }); try {
+      await client.request("submit", startBody("bg-silent", "BG_AGENT_SILENT"));
+      const events = await waitTerminal(client, "bg-silent", 5_000), values = payloads(data, events);
+      expect(events.at(-1)).toMatchObject({ type: "completed" });
+      expect(values.some((value) => value.category === "background_task" && String(value.message).includes("没有收到汇报"))).toBe(true);
+    } finally { client.close(); server.stop(); }
+  });
+
+  test("挂起等后台子代理时 interrupt：直接收尾 interrupted 并停掉 CLI", async () => {
+    const { server, client } = await fixture({ backgroundCheckMs: 20 }); try {
+      await client.request("submit", startBody("bg-hang", "BG_AGENT_HANG"));
+      const deadline = Date.now() + 3_000; while (Date.now() < deadline) { const events = (await client.queryCommand("bg-hang")).body.events as any[]; if (events.some((event) => event.type === "provider-notice")) break; await Bun.sleep(10); }
+      expect(((await client.queryCommand("bg-hang")).body.events as any[]).some((event) => ["completed", "failed", "interrupted"].includes(event.type))).toBe(false);
+      await client.request("interrupt", { commandId: "bg-hang-stop", runId: "run-bg-hang", sessionId: "session-bg-hang", providerId: "claude" });
+      expect((await waitTerminal(client, "bg-hang-stop")).at(-1)?.type).toBe("completed");
+      expect((await waitTerminal(client, "bg-hang")).at(-1)).toMatchObject({ type: "interrupted", reason: "user_interrupt" });
+      // 被杀的 CLI 留下的 run_id 不能把下一轮也挂住（新进程永远不会汇报它）
+      await client.request("submit", { commandId: "bg-hang-next", kind: "send-input", runId: "run-bg-hang-next", sessionId: "session-bg-hang", providerId: "claude", input: JSON.stringify({ text: "after", images: [] }) });
+      const next = await waitTerminal(client, "bg-hang-next"); expect(next.at(-1)?.type).toBe("completed"); expect(next.some((event) => event.type === "provider-notice")).toBe(false);
     } finally { client.close(); server.stop(); }
   });
 

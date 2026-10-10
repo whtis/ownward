@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { RunnerClient } from "../runner/client.ts";
@@ -60,17 +60,49 @@ export function minimalCodexConfig(path:string):string|null{
   return null;
 }
 
+/** 给隔离 home 的凭据副本：只留访问 token，refresh token 清空。
+ *  OAuth 的 refresh token 用一次就轮换——canary 拿着副本刷新一回，用户本机那份立刻作废，而新 token 只写进了
+ *  用完即删的临时目录（2026-09-22 实撞：codex 第一次进发布门，canary 启动成功、续聊 401，用户本机 codex 随即
+ *  "invalidated oauth token"，只能重新登录；09-21 claude 的 "OAuth session expired and could not be refreshed"
+ *  也发生在一次 canary 之后的第一次刷新）。副本里没有 refresh token 就绝不可能动到用户的登录态；
+ *  代价是访问 token 快过期时 canary 做不了——那就提前如实报出来，不去跑一个注定失败的检查。 */
+const CANARY_TOKEN_MIN_REMAINING_MS=15*60_000;
+type CanaryCredential={text:string}|{error:string};
+const minutesLeft=(expiresAtMs:number,now:number)=>Math.max(0,Math.round((expiresAtMs-now)/60_000));
+export function canaryCodexAuth(raw:string,now=Date.now()):CanaryCredential{
+  let auth:any;try{auth=JSON.parse(raw);}catch{return{error:"~/.codex/auth.json 不是合法 JSON"};}
+  if(!auth||typeof auth!=="object")return{error:"~/.codex/auth.json 形状不对"};
+  const tokens=auth.tokens;
+  if(!tokens||typeof tokens!=="object")return{text:raw};   // API key 模式：key 不轮换，原样给
+  if(typeof tokens.access_token!=="string"||!tokens.access_token)return{error:"~/.codex/auth.json 里没有访问 token，先在终端跑 codex login"};
+  let exp=NaN;try{exp=JSON.parse(Buffer.from(tokens.access_token.split(".")[1]||"","base64url").toString("utf8")).exp*1000;}catch{}
+  if(Number.isFinite(exp)&&exp-now<CANARY_TOKEN_MIN_REMAINING_MS)return{error:`Codex 访问 token 只剩 ${minutesLeft(exp,now)} 分钟：先在终端跑一次 codex（让它自己刷新），再发布`};
+  // last_refresh 记成现在：CLI 按它判断要不要主动刷新，不然老登录会在副本里尝试一次注定失败的刷新
+  return{text:JSON.stringify({...auth,tokens:{...tokens,refresh_token:""},last_refresh:new Date(now).toISOString()})};
+}
+export function canaryClaudeCredential(raw:string,now=Date.now()):CanaryCredential{
+  let cred:any;try{cred=JSON.parse(raw);}catch{return{error:"Claude 凭据不是合法 JSON"};}
+  const oauth=cred?.claudeAiOauth;
+  if(!oauth||typeof oauth!=="object"||typeof oauth.accessToken!=="string"||!oauth.accessToken)return{error:"Claude 凭据里没有 claudeAiOauth.accessToken，先在终端跑 claude 登录"};
+  if(Number.isFinite(oauth.expiresAt)&&oauth.expiresAt-now<CANARY_TOKEN_MIN_REMAINING_MS)return{error:`Claude 访问 token 只剩 ${minutesLeft(oauth.expiresAt,now)} 分钟：先在终端随便跑一次 claude（让它自己刷新），再发布`};
+  return{text:JSON.stringify({...cred,claudeAiOauth:{...oauth,refreshToken:""}})};
+}
+
 export async function runIsolatedProviderCanaries(releaseRoot:string,providers:("claude"|"codex")[],timeoutMs=90_000){
   const root=mkdtempSync(join(tmpdir(),"ownward-provider-canary-")),data=join(root,"data"),cwd=join(root,"cwd"),home=join(root,"home"),claude=join(home,".claude"),codex=join(home,".codex");let runner:Bun.Subprocess|undefined;
   try{for(const dir of[data,cwd,home,claude,codex])mkdirSync(dir,{mode:0o700});
-    const copyAuth=(from:string,to:string)=>{if(existsSync(from)){copyFileSync(from,to);chmodSync(to,0o400);}};
-    copyAuth(join(homedir(),".claude",".credentials.json"),join(claude,".credentials.json"));copyAuth(join(homedir(),".codex","auth.json"),join(codex,"auth.json"));
+    // 凭据只给去掉 refresh token 的副本（见 canaryCodexAuth）；准备不出来的那家直接判失败，不进 Runner
+    const preflight:Partial<Record<"claude"|"codex",string>>={};
+    const place=(provider:"claude"|"codex",prepared:CanaryCredential,to:string)=>{if("text" in prepared)writeFileSync(to,prepared.text,{mode:0o400});else preflight[provider]=prepared.error;};
+    const codexAuth=join(homedir(),".codex","auth.json");if(existsSync(codexAuth))place("codex",canaryCodexAuth(readFileSync(codexAuth,"utf8")),join(codex,"auth.json"));
     const codexConfig=minimalCodexConfig(join(homedir(),".codex","config.toml"));if(codexConfig)writeFileSync(join(codex,"config.toml"),codexConfig,{mode:0o400});
-    if(!existsSync(join(claude,".credentials.json"))&&process.platform==="darwin"){const raw=await keychainClaudeCredential();if(raw)try{const parsed=JSON.parse(raw);if(parsed&&typeof parsed==="object"&&parsed.claudeAiOauth)writeFileSync(join(claude,".credentials.json"),raw,{mode:0o400});}catch{}}
+    const claudeFile=join(homedir(),".claude",".credentials.json");
+    const claudeRaw=existsSync(claudeFile)?readFileSync(claudeFile,"utf8"):process.platform==="darwin"?await keychainClaudeCredential():undefined;
+    if(claudeRaw)place("claude",canaryClaudeCredential(claudeRaw),join(claude,".credentials.json"));
     const claudeState=join(homedir(),".claude.json");if(existsSync(claudeState))try{const source=JSON.parse(readFileSync(claudeState,"utf8")),minimal=Object.fromEntries(["oauthAccount","userID","hasCompletedOnboarding","installMethod"].filter(key=>source[key]!==undefined).map(key=>[key,source[key]]));writeFileSync(join(home,".claude.json"),JSON.stringify(minimal),{mode:0o400});}catch{}
     const env={...process.env,HOME:home,CLAUDE_CONFIG_DIR:claude,CODEX_HOME:codex,OWNWARD_DATA_ROOT:data,OWNWARD_RUNNER_BUILD_IDENTITY:process.env.OWNWARD_BUILD_IDENTITY||"canary"};
     runner=Bun.spawn([process.execPath,join(releaseRoot,"src/runner/entry.ts")],{cwd:releaseRoot,env,stdout:"ignore",stderr:"pipe",detached:true});
-    let client:RunnerClient|undefined;for(let i=0;i<100;i++){try{client=new RunnerClient(data,2_000);await client.request("ping",{});break;}catch{client?.close();client=undefined;await Bun.sleep(50);}}if(!client)throw new Error("isolated Runner failed to start");try{const results=[];for(const provider of providers)results.push(await canaryProvider(client,provider,cwd,timeoutMs));return results;}finally{client.close();}
+    let client:RunnerClient|undefined;for(let i=0;i<100;i++){try{client=new RunnerClient(data,2_000);await client.request("ping",{});break;}catch{client?.close();client=undefined;await Bun.sleep(50);}}if(!client)throw new Error("isolated Runner failed to start");try{const results:CanaryResult[]=[];for(const provider of providers)results.push(preflight[provider]?{providerId:provider,ok:false,startCommandId:"",errorCode:"PROVIDER_AUTH_EXPIRED",detail:preflight[provider]}:await canaryProvider(client,provider,cwd,timeoutMs));return results;}finally{client.close();}
   }finally{if(runner)await terminateCanaryProcess(runner);rmSync(root,{recursive:true,force:true});}
 }
 if(import.meta.main){const root=process.argv[2]||process.cwd(),providers=(process.argv.slice(3).length?process.argv.slice(3):["claude","codex"])as("claude"|"codex")[];const result=await runIsolatedProviderCanaries(root,providers);console.log(JSON.stringify(result));if(result.some(x=>!x.ok))process.exitCode=1;}

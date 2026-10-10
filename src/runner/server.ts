@@ -208,7 +208,12 @@ export class RunnerServer {
       await this.safeAbort(provider, command, (error as any)?.code === "PROVIDER_NO_PROGRESS" ? "no-progress" : "provider-error");
       let prior; try { prior = this.events.readStrict().filter((event) => event.commandId === command.commandId); } catch (journalError) { emitCoreLog({ event: "runner-event-journal-read-failed", moduleType: "runner", moduleId: "session-runner", operation: "journal-read", runId: command.runId, sessionId: command.sessionId, eventId: command.commandId, errorClass: (journalError as any)?.code || "UNKNOWN", msg: "terminal reconciliation journal read failed" }); throw journalError; }
       if (!prior.some((event) => terminal(event.type))) {
-        const reason = errorReason(error); await this.appendTerminalWithRetry(command, reason === "provider_no_progress" ? "unknown-outcome" : "failed", reason, "provider-error");
+        const reason = errorReason(error);
+        // reason 只能是分类码，provider 自己写的原因（「cwd 不存在」「不支持思考深度 max」）先走 provider-notice，
+        // 否则界面只剩一句「这一轮没跑起来：provider_input_invalid」，用户无从下手
+        const message = error instanceof Error ? error.message.trim() : "";
+        if (message) { try { this.push(this.events.append({ eventId: runnerEventId("provider-error-notice", command.commandId), type: "provider-notice", at: new Date().toISOString(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId, payload: JSON.stringify({ category: "run_rejected", reason, message: message.slice(0, 500) }) }).record); } catch { this.metrics.observationalDropped++; } }
+        await this.appendTerminalWithRetry(command, reason === "provider_no_progress" ? "unknown-outcome" : "failed", reason, "provider-error");
       }
     } finally { try { await iterator.return?.(); } catch {} }
   }

@@ -1,8 +1,14 @@
-import { CODEX_EFFORTS, codexCatalogModel, isCodexEffort, type CodexEffort } from "./codex-catalog.ts";
+import { CODEX_EFFORTS, codexCatalogModel, isCodexEffort, readCodexCliDefaults, type CodexEffort } from "./codex-catalog.ts";
 
 export { CODEX_EFFORTS, isCodexEffort, type CodexEffort } from "./codex-catalog.ts";
 
 export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol" as const;
+/** 没指定型号时新 Codex 会话用哪个：先跟 CLI 自己的 ~/.codex/config.toml 走（终端里 `codex` 默认用什么，派发就用什么），
+ *  再用调用方给的兜底（llm.codexModel），最后才是内置默认。这里只在新建时取一次、写进 Session——
+ *  之后用户改 config.toml 不会让进行中的会话换型号（续聊按 Session 里记下的型号走）。 */
+export function defaultCodexModel(fallback?: string): string {
+  return readCodexCliDefaults().model || fallback || DEFAULT_CODEX_MODEL;
+}
 export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** CodeBuddy 复用 Claude 协议但多一档 minimal（`codebuddy --help` 2026-09-05：minimal/low/medium/high/xhigh/max） */
 export const CODEBUDDY_EFFORTS = ["minimal", ...CLAUDE_EFFORTS] as const;

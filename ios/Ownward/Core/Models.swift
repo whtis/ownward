@@ -330,6 +330,8 @@ struct AgentState: Decodable, Sendable, Equatable {
     var resume: ResumeInfo?              // 释放输入权后在别的终端续聊的命令
     // 会话谱系：接力链上每个 Session（含当前）各一条，带原生会话 ID 与恢复命令（kernel/sessions/contracts.ts SessionLineageEntry）
     @Defaulted var lineage: [SessionLineageEntry]
+    // 带 tail 请求时：messages 前面省掉的条数。下标加上它才是全量里的绝对位置（ForEach id 不随窗口滑动）
+    @Defaulted var omitted: Int
 
     var isRunning: Bool { turn == "running" }
     var canInput: Bool { control == "ownward" && operability != "read-only" }

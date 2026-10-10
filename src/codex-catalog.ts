@@ -113,6 +113,52 @@ export function readCodexCatalog(options: { home?: string; now?: number } = {}):
   }
 }
 
+/** Codex CLI 自己的默认型号 / 思考深度（用户在终端里 `codex` 不带参数时用的那组）。 */
+export interface CodexCliDefaults { file: string; model?: string; effort?: CodexEffort }
+
+/** 只读 config.toml 里决定默认型号的那几个键：顶层 model / model_reasoning_effort；顶层写了 profile = "x" 时
+ *  [profiles.x] 里的同名键优先（CLI 自己就是这么叠的）。别的段（[sandbox_workspace_write] 之类）里同名的键不算。
+ *  不是通用 TOML 解析器：只认单行字符串值，其余一律跳过。 */
+export function parseCodexConfigDefaults(text: string): { model?: string; effort?: string } {
+  const top: Record<string, string> = {}, profiles: Record<string, Record<string, string>> = {};
+  let section: string | null = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const header = /^\[\s*([^\]]+?)\s*\]\s*(?:#.*)?$/.exec(line);
+    if (header) { section = header[1].replace(/\s*\.\s*/g, ".").replace(/"([^"]*)"/g, "$1"); continue; }
+    const kv = /^([A-Za-z0-9_-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')\s*(?:#.*)?$/.exec(line);
+    if (!kv) continue;
+    const value = kv[2] !== undefined ? kv[2].replace(/\\(["\\])/g, "$1") : kv[3];
+    if (section === null) top[kv[1]] = value;
+    else if (section.startsWith("profiles.")) (profiles[section.slice("profiles.".length)] ??= {})[kv[1]] = value;
+  }
+  const profile = top.profile ? profiles[top.profile] ?? {} : {};
+  const model = profile.model ?? top.model, effort = profile.model_reasoning_effort ?? top.model_reasoning_effort;
+  return { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+}
+
+interface DefaultsEntry { mtimeMs: number; size: number; checkedAt: number; value: CodexCliDefaults }
+const defaultsCache = new Map<string, DefaultsEntry>();
+/** 读 $CODEX_HOME/config.toml 的默认型号与档位。只认目录里查得到的型号、且是该型号支持的档位——
+ *  CLI 不认识的值下发出去就是 400，宁可回空让调用方落内置默认。按 mtime/size 复用，最多每 2s stat 一次；永不抛 */
+export function readCodexCliDefaults(options: { home?: string; now?: number } = {}): CodexCliDefaults {
+  const home = options.home ?? codexHomeDir(), file = join(home, "config.toml"), now = options.now ?? Date.now(), hit = defaultsCache.get(file);
+  if (hit && now - hit.checkedAt < STAT_THROTTLE_MS) return hit.value;
+  let value: CodexCliDefaults = { file };
+  try {
+    const st = statSync(file);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) { hit.checkedAt = now; return hit.value; }
+    const raw = parseCodexConfigDefaults(readFileSync(file, "utf8"));
+    const model = raw.model && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(raw.model) ? codexCatalogModel(raw.model, home) : undefined;
+    if (model) value = { file, model: model.slug, ...(isCodexEffort(raw.effort) && model.efforts.includes(raw.effort) ? { effort: raw.effort } : {}) };
+    defaultsCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, checkedAt: now, value });
+  } catch {
+    defaultsCache.set(file, { mtimeMs: -1, size: -1, checkedAt: now, value });   // 没有 config.toml 是常态，不刷日志
+  }
+  return value;
+}
+
 /** 按 slug 查一条：先官方缓存，再内置快照（缓存里没有但内置有的老型号仍认，避免历史会话突然变非法） */
 export function codexCatalogModel(slug: string | undefined, home?: string): CodexCatalogModel | undefined {
   if (!slug) return undefined;

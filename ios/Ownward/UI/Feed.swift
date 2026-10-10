@@ -16,6 +16,15 @@ enum FeedItem: Identifiable, Equatable, Sendable {
         }
     }
     var id: Int { index }
+
+    /// 消息只拿了尾部时，把下标平移成全量里的绝对位置
+    func shifted(by offset: Int) -> FeedItem {
+        guard offset != 0 else { return self }
+        switch self {
+        case .one(let i, let m): return .one(index: i + offset, msg: m)
+        case .tools(let i, let ms): return .tools(index: i + offset, msgs: ms)
+        }
+    }
 }
 
 /// 把连续的工具调用折成一组。

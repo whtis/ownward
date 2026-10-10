@@ -5,9 +5,9 @@
 //   codebuddy → 型号与档位都解析 `codebuddy --help`（只在 providers.codebuddy.enabled 时探测）
 // 每家都带 source 说明来源，探测失败回退内置快照并注明 reason。web/app.js 与安卓/iOS 各带一份同内容的
 // 内置表作为离线兜底，服务端这份到达后覆盖。
-import { readCodexCatalog, type CodexCatalog } from "./codex-catalog.ts";
-import { claudeAdditionalModels, probeCliHelp } from "./cli-catalog.ts";
-import { CLAUDE_EFFORTS, CODEBUDDY_EFFORTS, DEFAULT_CODEX_MODEL } from "./session-options.ts";
+import { readCodexCatalog, readCodexCliDefaults, type CodexCatalog } from "./codex-catalog.ts";
+import { claudeAdditionalModels, claudeCliDefaults, probeCliHelp } from "./cli-catalog.ts";
+import { CLAUDE_EFFORTS, CODEBUDDY_EFFORTS, defaultCodexModel } from "./session-options.ts";
 import { cfg } from "./util.ts";
 
 export interface StaticProviderCapability {
@@ -31,7 +31,10 @@ export interface CliProviderCatalog extends StaticProviderCapability {
   reason?: string;
   /** 型号的展示名/说明（只有能拿到的才有：Claude 的额外型号带 label/description） */
   modelInfo?: Record<string, { displayName: string; description: string }>;
+  /** 选「默认」时 CLI 自己会用的型号/档位（读 CLI 的用户配置，只用于展示；派发时不传） */
+  cliDefault?: CliDefault;
 }
+export interface CliDefault { model?: string; effort?: string }
 export interface ProviderCatalog {
   claude: CliProviderCatalog;
   codebuddy: CliProviderCatalog;
@@ -40,6 +43,8 @@ export interface ProviderCatalog {
   codex: {
     label: string; source: CodexCatalog["source"]; fetchedAt: string | null; reason?: string;
     defaultModel: string; handoffModel: string; handoffEffort: string;
+    /** ~/.codex/config.toml 里的默认型号/档位；defaultModel 已经按它解析过（没配就是 llm.codexModel / 内置默认） */
+    cliDefault: CliDefault;
     models: { slug: string; displayName: string; description: string; efforts: readonly string[]; defaultEffort: string; fast: { name: string; description: string } | null; contextWindow: number | null }[];
   };
 }
@@ -60,7 +65,7 @@ async function claudeCatalog(): Promise<CliProviderCatalog> {
     if (alias) { modelInfo[alias] = { displayName: item.label, description: item.description }; continue; }
     if (!models.includes(item.value)) { models.push(item.value); modelInfo[item.value] = { displayName: item.label, description: item.description }; }
   }
-  return { ...CLAUDE_CAPABILITY, models, efforts, source: probe.ok ? (extra.length ? "cli-help+account" : "cli-help") : "builtin", ...(probe.ok ? {} : { reason: probe.reason }), ...(Object.keys(modelInfo).length ? { modelInfo } : {}) };
+  return { ...CLAUDE_CAPABILITY, models, efforts, source: probe.ok ? (extra.length ? "cli-help+account" : "cli-help") : "builtin", ...(probe.ok ? {} : { reason: probe.reason }), ...(Object.keys(modelInfo).length ? { modelInfo } : {}), cliDefault: claudeCliDefaults() };
 }
 async function codebuddyCatalog(): Promise<CliProviderCatalog> {
   if (cfg.providers?.codebuddy?.enabled !== true) return { ...CODEBUDDY_CAPABILITY, source: "disabled", reason: "providers.codebuddy.enabled 未开启，未探测 CLI" };
@@ -69,7 +74,8 @@ async function codebuddyCatalog(): Promise<CliProviderCatalog> {
   return { ...CODEBUDDY_CAPABILITY, models: probe.models.length ? probe.models : CODEBUDDY_CAPABILITY.models, efforts: probe.efforts.length ? probe.efforts : CODEBUDDY_CAPABILITY.efforts, source: "cli-help" };
 }
 export async function providerCatalog(): Promise<ProviderCatalog> {
-  const codex = readCodexCatalog(), [claude, codebuddy] = await Promise.all([claudeCatalog(), codebuddyCatalog()]);
+  const codex = readCodexCatalog(), codexCli = readCodexCliDefaults(), codexDefault = defaultCodexModel(cfg.llm?.codexModel);
+  const [claude, codebuddy] = await Promise.all([claudeCatalog(), codebuddyCatalog()]);
   return {
     claude,
     codebuddy,
@@ -81,7 +87,8 @@ export async function providerCatalog(): Promise<ProviderCatalog> {
     },
     codex: {
       label: "Codex", source: codex.source, fetchedAt: codex.fetchedAt, ...(codex.reason ? { reason: codex.reason } : {}),
-      defaultModel: DEFAULT_CODEX_MODEL, handoffModel: DEFAULT_CODEX_MODEL, handoffEffort: "medium",
+      defaultModel: codexDefault, handoffModel: codexDefault, handoffEffort: "medium",
+      cliDefault: { ...(codexCli.model ? { model: codexCli.model } : {}), ...(codexCli.effort ? { effort: codexCli.effort } : {}) },
       models: codex.models.map((m) => ({ slug: m.slug, displayName: m.displayName, description: m.description, efforts: m.efforts, defaultEffort: m.defaultEffort ?? "", fast: m.fast ? { name: m.fast.name, description: m.fast.description } : null, contextWindow: m.contextWindow })),
     },
   };

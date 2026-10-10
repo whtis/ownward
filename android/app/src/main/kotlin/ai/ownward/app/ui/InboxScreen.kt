@@ -114,7 +114,7 @@ fun InboxScreen(
                     .filter { it.status == "running" && it.mode != "terminal" }
                     .map { t ->
                         async {
-                            runCatching { client.devMessages(t.id) }.getOrNull()
+                            runCatching { client.devMessages(t.id, tail = 0) }.getOrNull()  // 只看审批卡，不要历史
                                 ?.pending?.map { TaskPerm(t.id, t.project, it) } ?: emptyList()
                         }
                     }.flatMap { it.await() }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -9,7 +9,7 @@ import { archiveRunnerEvents, RunnerCommandJournal, RunnerEventJournal } from ".
 import { KernelSessionService, onRunnerApprovalRequested, readStableRunnerSnapshot, shellQuote, SESSION_STATE_CACHE_LIMIT } from "./service.ts";
 import { effectiveSessionMigrationMode } from "./contracts.ts";
 import { cfg } from "../../util.ts";
-import { KernelSessionPolicyError, projectRunnerEvent, PROVIDER_CAPABILITIES, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant } from "./runner-consumer.ts";
+import { inputForRunner, KernelSessionPolicyError, projectRunnerEvent, PROVIDER_CAPABILITIES, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant } from "./runner-consumer.ts";
 import { CLAUDE_PROVIDER_CAPABILITIES } from "../../providers/claude-code/protocol.ts";
 import { RunnerServer, type RunnerProvider } from "../../runner/server.ts";
 import { pruneBridgeCommands, SessionRunnerBridgeStore } from "./bridge-store.ts";
@@ -18,6 +18,12 @@ import { readInitialHistorySnapshot, writeInitialHistory } from "./initial-histo
 
 const roots: string[] = [];
 const fresh = () => { const root = mkdtempSync(join(tmpdir(), "ownward-kernel-session-")); roots.push(root); return root; };
+// 新 Codex 会话没指定型号时跟随 $CODEX_HOME/config.toml（defaultCodexModel）。钉一个空的 CODEX_HOME，
+// 别吃跑测试这台机器的 ~/.codex——不然「默认型号」断言在配了 gpt-6-astra 的机器上红、别处绿（SELF.md 守则 6）
+const savedCodexHome = process.env.CODEX_HOME, isolatedCodexHome = mkdtempSync(join(tmpdir(), "ownward-codex-home-"));
+beforeAll(() => { process.env.CODEX_HOME = isolatedCodexHome; });
+afterAll(() => { if (savedCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = savedCodexHome; rmSync(isolatedCodexHome, { recursive: true, force: true }); });
+
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
 function seed(root: string, providerId: "claude" | "codex" | "codebuddy" = "claude") {
   const cwd = join(root, "repo"); mkdirSync(cwd);
@@ -161,6 +167,9 @@ describe("Kernel SessionService migration modes", () => {
     await expect(service.create({taskId:"bad-luna-ultra",providerId:"codex",cwd,model:"gpt-5.6-luna",effort:"ultra"},{roots:[root],access:"workspace"})).rejects.toMatchObject({code:"PROVIDER_INPUT_INVALID"});
     await expect(service.create({taskId:"unknown-with-effort",providerId:"codex",cwd,model:"gpt-explicit",effort:"high"},{roots:[root],access:"workspace"})).rejects.toMatchObject({code:"PROVIDER_INPUT_INVALID"});
     const defaultCodex=await service.create({taskId:"default-codex",providerId:"codex",cwd,effort:"max"},{roots:[root],access:"workspace"});expect(defaultCodex).toMatchObject({model:"gpt-5.6-sol",effort:"max"});expect(await service.state(defaultCodex.id)).toMatchObject({model:"gpt-5.6-sol",effort:"max"});
+    // CLI 自己配了默认型号：没指定型号的新会话跟着它走（换一个 CODEX_HOME 目录，避开上面那次读取的 2s 缓存）
+    const cliHome=mkdtempSync(join(tmpdir(),"ownward-codex-cli-"));roots.push(cliHome);writeFileSync(join(cliHome,"config.toml"),'model = "gpt-5.6-terra"\nmodel_reasoning_effort = "high"\n[sandbox_workspace_write]\nmodel = "gpt-5.5"\n');
+    process.env.CODEX_HOME=cliHome;try{const followCli=await service.create({taskId:"cli-default-codex",providerId:"codex",cwd},{roots:[root],access:"workspace"});expect(followCli).toMatchObject({model:"gpt-5.6-terra"});expect(followCli.effort).toBeUndefined();}finally{process.env.CODEX_HOME=isolatedCodexHome;}
     const ultraCodex=await service.create({taskId:"ultra-codex",providerId:"codex",cwd,model:"gpt-5.6-terra",effort:"ultra"},{roots:[root],access:"workspace"});expect(ultraCodex).toMatchObject({model:"gpt-5.6-terra",effort:"ultra"});
     const explicitCodex=await service.create({taskId:"explicit-codex",providerId:"codex",cwd,model:"gpt-explicit"},{roots:[root],access:"workspace"});expect(explicitCodex).toMatchObject({model:"gpt-explicit"});expect(explicitCodex.effort).toBeUndefined();
     const deepClaude=await service.create({taskId:"deep-claude",providerId:"claude",cwd,effort:"max"},{roots:[root],access:"workspace"});expect(deepClaude).toMatchObject({effort:"max"});expect(deepClaude.model).toBeUndefined();
@@ -349,7 +358,8 @@ describe("Kernel SessionService migration modes", () => {
     // 旗标只是真 CC 的启动开关，桥是 stream-json 的 control_request/can_use_tool ↔ control_response，克隆 CLI 照发；
     // 漏声明的后果是审批卡弹得出、答不了，turn 挂到 runner 重启才收敛成 unknown-outcome。
     expect(PROVIDER_CAPABILITIES.codebuddy.has("approval")).toBe(true);
-    expect([...PROVIDER_CAPABILITIES.codebuddy].sort()).toEqual([...PROVIDER_CAPABILITIES.claude].sort());
+    // 唯一差别是 fork：codebuddy 的 --fork-session 未实测，Kernel 不放行
+    expect([...PROVIDER_CAPABILITIES.codebuddy].sort()).toEqual([...PROVIDER_CAPABILITIES.claude].filter((capability) => capability !== "fork").sort());
     // 两处能力表同源约束：kernel 白名单必须是 Runner 侧 Provider 声明的子集，否则又会一处放行一处拒
     for (const capability of PROVIDER_CAPABILITIES.codebuddy) expect(CLAUDE_PROVIDER_CAPABILITIES.has(capability as never)).toBe(true);
     const root = fresh(); seed(root, "codebuddy");
@@ -592,5 +602,56 @@ describe("bridge 台账剪枝", () => {
     const left = new SessionRunnerBridgeStore(root).list();
     expect(left).toHaveLength(1);
     expect(left[0]).toMatchObject({ commandId: "live", cursor: 42, terminal: false });
+  });
+});
+
+describe("Kernel SessionService fork", () => {
+  const origin = (root: string, providerId: "claude" | "codex" | "codebuddy" = "claude") => {
+    const cwd = join(root, "repo"); mkdirSync(cwd); const repo = new SessionRepository(root), ref = providerId === "codex" ? "00000000-0000-4000-8000-0000000000aa" : "origin-ref";
+    repo.reserve({ taskId: "origin", providerId, cwd, model: providerId === "codex" ? undefined : "opus", effort: "high" }); repo.bind({ taskId: "origin", providerId, nativeRef: ref, cwd });
+    writeInitialHistory(root, { sessionId: "origin", providerId, nativeRef: ref, messages: [{ role: "user", text: "goal", ts: "2026-10-01T00:00:00.000Z" }, { role: "assistant", text: "answer", ts: "2026-10-01T00:00:01.000Z" }] });
+    return { cwd, repo, ref };
+  };
+  test("原会话本轮在跑也能分叉：原会话记录/bridge/队列一律不动，新会话带历史与分叉分隔线", async () => {
+    const root = fresh(), { cwd, repo } = origin(root), bridge = new SessionRunnerBridgeStore(root);
+    // 原会话正在跑一轮（未终态 bridge 命令）
+    bridge.reserve({ taskId: "origin", sessionId: "origin", providerId: "claude", kind: "resume-run", serializedInput: JSON.stringify({ text: "busy", images: [] }), identity: { commandId: "origin-cmd", runId: "origin-run" } });
+    const recordBefore = repo.getById("origin"), bridgeBefore = JSON.stringify(bridge.list("origin"));
+    const runner: any = { require: (providerId: "claude", capability: any) => { if (!PROVIDER_CAPABILITIES[providerId].has(capability)) throw new Error("unsupported"); }, submit: async () => { throw new Error("fork must not submit anything"); }, syncCommand: async () => { throw new Error("fork must not sync the origin"); } };
+    const dto = await new KernelSessionService(root, { mode: "runner", roots: [root] }, runner).fork("origin", { taskId: "fork" }, { roots: [root], access: "workspace" });
+    expect(dto).toMatchObject({ id: "fork", providerId: "claude", nativeRef: null, cwd, model: "opus", effort: "high", taskIds: ["fork"] });
+    expect(new SessionRepository(root).getById("origin")).toEqual(recordBefore!); expect(JSON.stringify(bridge.list("origin"))).toBe(bridgeBefore);
+    const state = await new KernelSessionService(root, { mode: "runner", roots: [root] }, runner).state("fork");
+    expect(state.messages.map((m) => [m.role, m.name ?? null, m.text.slice(0, 12)])).toEqual([["user", null, "goal"], ["assistant", null, "answer"], ["system", "fork", "已从原会话分叉：以上是分"]]);
+    const forked = new SessionRepository(root).getById("fork")!;
+    expect(inputForRunner(root, forked, { text: "next" })).toMatchObject({ forkFrom: "origin-ref" }); expect("nativeRef" in inputForRunner(root, forked, { text: "next" })).toBe(false);
+    new SessionRepository(root).bind({ taskId: "fork", providerId: "claude", nativeRef: "fork-ref", cwd });
+    const bound = inputForRunner(root, new SessionRepository(root).getById("fork")!, { text: "next" }); expect(bound).toMatchObject({ nativeRef: "fork-ref" }); expect("forkFrom" in bound).toBe(false);
+  });
+  test("分叉首轮经 Runner 以 start-run 携带 forkFrom，session-updated 绑定新 ref 后原会话仍是原 ref", async () => {
+    const root = fresh(), { cwd } = origin(root), calls: { kind: string; input: string }[] = [];
+    const provider: RunnerProvider = { async *execute(command, input) { calls.push({ kind: command.kind, input }); const base = { commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId };
+      yield { ...base, eventId: `${command.commandId}:start`, type: "started", at: "2026-10-09T00:00:01.000Z" }; yield { ...base, eventId: `${command.commandId}:native`, type: "session-updated", at: "2026-10-09T00:00:02.000Z", nativeRef: "fork-native", payload: JSON.stringify({ nativeRef: "fork-native" }) }; yield { ...base, eventId: `${command.commandId}:done`, type: "completed", at: "2026-10-09T00:00:03.000Z" }; } };
+    const server = new RunnerServer(root, () => provider); server.start();
+    try {
+      const service = new KernelSessionService(root, { mode: "runner", roots: [root] }); await service.fork("origin", { taskId: "fork" }, { roots: [root], access: "workspace" });
+      await service.send("fork", { text: "hello fork" }); await Bun.sleep(150);
+      expect(calls[0]!.kind).toBe("start-run"); expect(JSON.parse(calls[0]!.input)).toMatchObject({ text: "hello fork", cwd, forkFrom: "origin-ref" });
+      const repo = new SessionRepository(root); expect(repo.getById("fork")).toMatchObject({ nativeRef: "fork-native", fork: { pending: false } }); expect(repo.getById("origin")?.nativeRef).toBe("origin-ref");
+    } finally { server.stop(); }
+  });
+  test("拒绝：原会话没跑完过一轮 / codex 未开开关 / codebuddy 不支持 / 目录超出授权", async () => {
+    const root = fresh(), runner: any = { require: (providerId: "claude" | "codex" | "codebuddy", capability: any) => { if (!PROVIDER_CAPABILITIES[providerId].has(capability)) throw new KernelSessionPolicyError("PROVIDER_CAPABILITY_UNSUPPORTED", "unsupported"); } };
+    const fresh1 = join(root, "fresh"); mkdirSync(fresh1); new SessionRepository(root).reserve({ taskId: "no-ref", providerId: "claude", cwd: fresh1 });
+    const service = new KernelSessionService(root, { mode: "runner", roots: [root] }, runner), grants = { roots: [root], access: "workspace" as const };
+    await expect(service.fork("no-ref", { taskId: "f1" }, grants)).rejects.toMatchObject({ code: "SESSION_FORK_NATIVE_REF_REQUIRED" });
+    for (const [providerId, code] of [["codex", "SESSION_FORK_UNSUPPORTED"], ["codebuddy", "PROVIDER_CAPABILITY_UNSUPPORTED"]] as const) {
+      const r = fresh(); origin(r, providerId); const previous = cfg.providers?.codex?.fork; if (cfg.providers?.codex) cfg.providers.codex.fork = false;
+      try { await expect(new KernelSessionService(r, { mode: "runner", roots: [r] }, runner).fork("origin", { taskId: "f" }, { roots: [r], access: "workspace" })).rejects.toMatchObject({ code }); expect(new SessionRepository(r).getById("f")).toBeNull(); }
+      finally { if (cfg.providers?.codex) cfg.providers.codex.fork = previous; }
+    }
+    const r2 = fresh(); origin(r2); const outside = fresh();
+    await expect(new KernelSessionService(r2, { mode: "runner", roots: [outside] }, runner).fork("origin", { taskId: "f" }, { roots: [outside], access: "workspace" })).rejects.toThrow();
+    expect(new SessionRepository(r2).getById("f")).toBeNull();
   });
 });

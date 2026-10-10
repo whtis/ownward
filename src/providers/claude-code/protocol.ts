@@ -7,14 +7,16 @@ export type { ClaudeEffort } from "../../session-options.ts";
 
 export const CLAUDE_PROVIDER_ID = "claude" as const;
 export const CLAUDE_PROVIDER_CAPABILITIES = new Set([
-  "stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort",
+  "stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort", "fork",
 ] as const);
 
 export type ClaudeAccess = "standard" | "bypass";
 export type ClaudeImage = { mediaType: string; blob: RunnerAttachmentRef };
 export type ClaudeMaterializedImage = { mediaType: string; data: string };
 export type ClaudeSessionOptions = { model?: string; effort?: ClaudeEffort; access: ClaudeAccess; extraDirs: string[] };
-export type ClaudeStartInput = { text: string; cwd: string; images: ClaudeImage[]; options: ClaudeSessionOptions };
+/** forkFrom：分叉首轮的原会话 ref。放在 options 外面——options 的键序是 Session 身份（resume 时按 JSON 比对），
+ *  分叉来源只在拿到新 ref 之前有意义，不能混进身份里 */
+export type ClaudeStartInput = { text: string; cwd: string; images: ClaudeImage[]; options: ClaudeSessionOptions; forkFrom?: string };
 export type ClaudeSendInput = { text: string; images: ClaudeImage[]; cwd?: string; options?: ClaudeSessionOptions; nativeRef?: string };
 export type ClaudeApprovalInput = { targetRunId: string; response: "allow" | "deny"; updatedInput?: Record<string, unknown>; message?: string; remember?: "session" | "global" | null };
 
@@ -59,8 +61,10 @@ export function parseClaudeOptions(raw: unknown): ClaudeSessionOptions {
 }
 export function parseClaudeStartInput(input: string): ClaudeStartInput {
   const raw = JSON.parse(input) as unknown;
-  if (!plain(raw)) throw new Error("Claude start input 非法"); exact(raw, ["text", "cwd", "images", "options"], "Claude start input");
-  return { text: text(raw.text, "text"), cwd: absolute(raw.cwd, "cwd"), images: parseImages(raw.images), options: parseClaudeOptions(raw.options) };
+  if (!plain(raw)) throw new Error("Claude start input 非法"); exact(raw, ["text", "cwd", "images", "options", "forkFrom"], "Claude start input");
+  const forkFrom = raw.forkFrom === undefined ? undefined : text(raw.forkFrom, "forkFrom", 512);
+  if (forkFrom !== undefined && !forkFrom.trim()) throw new Error("forkFrom 非法");
+  return { text: text(raw.text, "text"), cwd: absolute(raw.cwd, "cwd"), images: parseImages(raw.images), options: parseClaudeOptions(raw.options), ...(forkFrom === undefined ? {} : { forkFrom }) };
 }
 export function parseClaudeSendInput(input: string): ClaudeSendInput {
   const raw = JSON.parse(input) as unknown;
@@ -106,7 +110,7 @@ export function claudeUserFrame(textValue: string, images: ClaudeMaterializedIma
   return JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
 }
 
-export function buildClaudeProviderArgs(command: readonly string[], options: ClaudeSessionOptions, nativeRef?: string, supportsEffort=true, supportsPermissionPromptTool=true): string[] {
+export function buildClaudeProviderArgs(command: readonly string[], options: ClaudeSessionOptions, nativeRef?: string, supportsEffort=true, supportsPermissionPromptTool=true, forkFrom?: string): string[] {
   const args = [...command, "--print", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--include-partial-messages"];
   if (options.access === "bypass") args.push("--dangerously-skip-permissions");
   else if (supportsPermissionPromptTool) args.push("--permission-prompt-tool", "stdio", "--permission-mode", "acceptEdits");
@@ -116,5 +120,7 @@ export function buildClaudeProviderArgs(command: readonly string[], options: Cla
   if (options.model) args.push("--model", options.model);
   if (options.effort&&supportsEffort) args.push("--effort", options.effort);
   if (nativeRef) args.push("--resume", nativeRef);
+  // 分叉：从原会话 resume 但换一个新 session id，原会话的 transcript 只读不写（已有自己的 ref 时绝不再分叉）
+  else if (forkFrom) args.push("--resume", forkFrom, "--fork-session");
   return args;
 }

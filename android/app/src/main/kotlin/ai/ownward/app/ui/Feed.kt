@@ -29,6 +29,12 @@ sealed interface FeedItem {
  *
  * 两条不变量（有测试盯着）：每一项的 index 唯一且严格递增；展开后逐条还原就是原列表。
  */
+/** 消息只拿了尾部时，把下标平移成全量里的绝对位置 */
+fun FeedItem.shifted(by: Int): FeedItem = if (by == 0) this else when (this) {
+    is FeedItem.One -> copy(index = index + by)
+    is FeedItem.Tools -> copy(index = index + by)
+}
+
 fun foldToolRuns(msgs: List<DevMsg>, minRun: Int = 3): List<FeedItem> {
     fun foldable(i: Int) = msgs[i].role == "tool" && msgs[i].name != "image"
     val out = ArrayList<FeedItem>(msgs.size)

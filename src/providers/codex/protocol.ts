@@ -7,14 +7,15 @@ export type { CodexEffort } from "../../session-options.ts";
 
 export const CODEX_PROVIDER_ID = "codex" as const;
 export const CODEX_PROVIDER_CAPABILITIES = new Set([
-  "stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort",
+  "stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort", "fork",
 ] as const);
 
 export type CodexAccess = "workspace-write" | "full-access";
 export type CodexHome = { kind: "default" } | { kind: "path"; path: string };
 export type CodexImage = { mediaType: string; blob: RunnerAttachmentRef };
 export type CodexOptions = { model?: string; effort?: CodexEffort; access: CodexAccess; extraDirs: string[]; home: CodexHome };
-export type CodexStartInput = { text: string; cwd: string; images: CodexImage[]; options: CodexOptions };
+/** forkFrom：分叉首轮的原会话 thread id（不进 options——options 键序是 Session 身份） */
+export type CodexStartInput = { text: string; cwd: string; images: CodexImage[]; options: CodexOptions; forkFrom?: string };
 export type CodexSendInput = { text: string; images: CodexImage[]; cwd?: string; options?: CodexOptions; nativeRef?: string };
 
 const plain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -49,8 +50,8 @@ export function parseCodexOptions(v: unknown): CodexOptions {
   return { access: v.access, extraDirs: [...new Set(v.extraDirs.map((d) => absolute(d, "extraDir")))].sort(), home, ...(parsedModel === undefined ? {} : { model: parsedModel }), ...(parsedEffort === undefined ? {} : { effort: parsedEffort }) };
 }
 export function parseCodexStartInput(input: string): CodexStartInput {
-  const v = JSON.parse(input) as unknown; if (!plain(v)) throw new Error("Codex start input 非法"); exact(v, ["text", "cwd", "images", "options"], "Codex start input");
-  return { text: text(v.text, "text", 1024 * 1024, true), cwd: absolute(v.cwd, "cwd"), images: images(v.images), options: parseCodexOptions(v.options) };
+  const v = JSON.parse(input) as unknown; if (!plain(v)) throw new Error("Codex start input 非法"); exact(v, ["text", "cwd", "images", "options", "forkFrom"], "Codex start input");
+  return { text: text(v.text, "text", 1024 * 1024, true), cwd: absolute(v.cwd, "cwd"), images: images(v.images), options: parseCodexOptions(v.options), ...(v.forkFrom === undefined ? {} : { forkFrom: codexNativeRef(v.forkFrom) }) };
 }
 export function parseCodexSendInput(input: string): CodexSendInput {
   const v = JSON.parse(input) as unknown; if (!plain(v)) throw new Error("Codex send input 非法"); exact(v, ["text", "images", "cwd", "options", "nativeRef"], "Codex send input");

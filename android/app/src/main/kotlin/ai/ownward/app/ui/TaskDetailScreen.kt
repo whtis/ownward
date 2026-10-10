@@ -70,10 +70,19 @@ import ai.ownward.app.data.OutImage
 import ai.ownward.app.ui.theme.ownwardColors
 import kotlinx.coroutines.launch
 
+/** 会话详情每次向服务端要最后多少条；长会话（几千条、好几 MB）整份轮询会让解码和比对拖垮主线程。「加载更早」每次再多要这么多 */
+private const val MSG_PAGE = 400
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) {
     var state by remember { mutableStateOf<AgentState?>(null) }
+    var msgTail by remember { mutableStateOf(MSG_PAGE) }
+    // 折叠只在消息变了时重算（不放在 LazyColumn 内容里每次重组都跑）；下标平移成全量里的绝对位置
+    val feed = remember(state?.messages, state?.omitted) {
+        val off = state?.omitted ?: 0
+        foldToolRuns(state?.messages ?: emptyList()).map { it.shifted(off) }
+    }
     var error by remember { mutableStateOf<String?>(null) }
     var submitted by remember { mutableStateOf(setOf<String>()) }
     var showInfo by remember { mutableStateOf(false) }
@@ -102,7 +111,7 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
 
     suspend fun refresh() {
         try {
-            val next = client.devMessages(taskId)
+            val next = client.devMessages(taskId, tail = msgTail)
             if (next != state) state = next
             error = null
         } catch (e: Exception) {
@@ -123,7 +132,8 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
     // 列表 reverseLayout 锚定底部（index 0 = 最新）：进任务直接落在最后一条，流式文本增高也不会把尾巴顶出视野；
     // 贴近底部才自动跟随，上翻不抢滚动位置
     // （之前按 layoutInfo.totalItemsCount 算目标：effect 跑在布局之前，首帧时 total 还是 0，从不滚动）
-    LaunchedEffect(state?.messages?.size, state?.partial.isNullOrBlank(), state?.turn, state?.pending?.size) {
+    // 消息只拿尾部时 size 封顶不变，跟随要按全量条数（omitted + size）算
+    LaunchedEffect((state?.omitted ?: 0) + (state?.messages?.size ?: 0), state?.partial.isNullOrBlank(), state?.turn, state?.pending?.size) {
         if (listState.firstVisibleItemIndex <= 2) listState.scrollToItem(0)
     }
 
@@ -360,10 +370,20 @@ fun TaskDetailScreen(client: OwnwardClient, taskId: String, onBack: () -> Unit) 
             // 连续工具调用折成一组（foldToolRuns）：一轮几十次 Edit/Bash 一条一行能把整屏铺满，
             // 而这段时间要看的只有「还在跑、第几步、有没有出错」。key 仍是正序下标——组的 key 是它的起点，
             // 尾部那组会一直长大但起点不动，追加时旧项不换位。
-            val feed = foldToolRuns(state?.messages ?: emptyList())
             items(feed.size, key = { feed[feed.size - 1 - it].index }) { i ->
                 // i==0 就是流的末尾（reverseLayout 下的第一项）：本轮还在跑时，这组显示「正在执行」
                 FeedRow(feed[feed.size - 1 - i], live = i == 0 && state?.turn == "running", client = client)
+            }
+            // reverseLayout 下最后写的在最上面：服务端还省着更早的，就给一个「加载更早」
+            val omitted = state?.omitted ?: 0
+            if (omitted > 0) {
+                item(key = "earlier") {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        TextButton(onClick = { msgTail += MSG_PAGE; scope.launch { refresh() } }) {
+                            Text("加载更早的 $omitted 条", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
             }
         }
     }

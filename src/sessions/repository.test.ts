@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
@@ -7,6 +7,11 @@ import { canRecoverSessionLock, claimStaleSessionLock, mergeCopyForward, migrate
 const roots: string[] = [];
 const fresh = () => { const r = mkdtempSync(join(tmpdir(), "ownward-sessions-")); roots.push(r); return r; };
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
+// 新 Codex 会话没指定型号时跟随 $CODEX_HOME/config.toml（defaultCodexModel）。钉一个空的 CODEX_HOME，
+// 别吃跑测试这台机器的 ~/.codex——不然「默认型号」断言在配了 gpt-6-astra 的机器上红、别处绿（SELF.md 守则 6）
+const savedCodexHome = process.env.CODEX_HOME, isolatedCodexHome = mkdtempSync(join(tmpdir(), "ownward-codex-home-"));
+beforeAll(() => { process.env.CODEX_HOME = isolatedCodexHome; });
+afterAll(() => { if (savedCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = savedCodexHome; rmSync(isolatedCodexHome, { recursive: true, force: true }); });
 function json(root: string, rel: string, value: unknown) {
   const file = join(root, rel); mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(value, null, 2));
@@ -431,5 +436,41 @@ describe("legacy session copy-forward", () => {
     }] });
     expect(migrateLegacySessions(root, { dryRun: false })).toMatchObject({ plannedUpdates: 1, wrote: true });
     expect(new SessionRepository(root).getByTaskId("new")).toMatchObject({ id: "stable", cwd: "/authoritative", control: "observing" });
+  });
+});
+
+describe("SessionRepository fork", () => {
+  const origin = (root: string) => { const cwd = join(root, "repo"), extra = join(root, "extra"); mkdirSync(cwd); mkdirSync(extra); const repo = new SessionRepository(root); repo.reserve({ taskId: "origin", providerId: "claude", cwd, access: "full-access", extraDirs: [extra], model: "opus", effort: "high" }); repo.bind({ taskId: "origin", providerId: "claude", nativeRef: "origin-ref", cwd }); return { repo, cwd, extra }; };
+  test("分叉继承原会话全部配置，原会话记录一个字段都不改", () => {
+    const root = fresh(), { repo, cwd, extra } = origin(root), before = repo.getById("origin");
+    const forked = repo.fork({ taskId: "fork", originId: "origin" });
+    expect(forked).toMatchObject({ id: "fork", providerId: "claude", nativeRef: null, cwd, control: "ownward", taskIds: ["fork"], access: "full-access", extraDirs: [extra], model: "opus", effort: "high", source: "native", recoverable: false });
+    expect(forked.fork).toMatchObject({ originSessionId: "origin", originNativeRef: "origin-ref", pending: true });
+    expect(new SessionRepository(root).getById("origin")).toEqual(before!);
+    // 同一原会话可以分叉多次，各自独立；原会话照常可以继续绑定新 ref
+    expect(repo.fork({ taskId: "fork-2", originId: "origin" }).fork?.originNativeRef).toBe("origin-ref");
+    expect(() => repo.fork({ taskId: "fork", originId: "origin" })).toThrow("SESSION_FORK_TASK_EXISTS");
+  });
+  test("bind 新 ref 兑现分叉；绑回原会话的 ref 会被唯一性挡住", () => {
+    const root = fresh(), { repo, cwd } = origin(root); repo.fork({ taskId: "fork", originId: "origin" });
+    expect(() => repo.bind({ taskId: "fork", providerId: "claude", nativeRef: "origin-ref", cwd })).toThrow("SESSION_FORK_REF_COLLISION");
+    expect(new SessionRepository(root).getById("origin")).toMatchObject({ taskIds: ["origin"], nativeRef: "origin-ref" });
+    const bound = repo.bind({ taskId: "fork", providerId: "claude", nativeRef: "fork-ref", cwd });
+    expect(bound).toMatchObject({ nativeRef: "fork-ref", fork: { pending: false, originNativeRef: "origin-ref" } });
+    expect(new SessionRepository(root).getById("origin")?.nativeRef).toBe("origin-ref");
+  });
+  test("/new 清空后分叉作废，下一轮全新开局；没有原生会话的原会话不能分叉", () => {
+    const root = fresh(), { repo, cwd } = origin(root); repo.fork({ taskId: "fork", originId: "origin" });
+    expect(repo.clearNativeRef("fork").fork?.pending).toBe(false);
+    repo.fork({ taskId: "fork-reset", originId: "origin" }); expect(repo.resetHistory("fork-reset", "cmd").fork?.pending).toBe(false);
+    repo.reserve({ taskId: "fresh", providerId: "claude", cwd }); expect(() => repo.fork({ taskId: "x", originId: "fresh" })).toThrow("SESSION_FORK_NATIVE_REF_REQUIRED");
+  });
+  test("坏的 fork 字段整条拒绝", () => {
+    const root = fresh(), { repo } = origin(root); repo.fork({ taskId: "fork", originId: "origin" });
+    const file = join(root, "kernel", "sessions.json"), raw = JSON.parse(readFileSync(file, "utf8"));
+    for (const bad of [{ originSessionId: "origin", originNativeRef: "origin-ref", at: "nope", pending: true }, { originSessionId: "origin", originNativeRef: "origin-ref", at: "2026-10-09T00:00:00.000Z", pending: true, extra: 1 }, { originSessionId: "fork", originNativeRef: "r", at: "2026-10-09T00:00:00.000Z", pending: false }]) {
+      const copy = structuredClone(raw); copy.sessions.find((s: any) => s.id === "fork").fork = bad; writeFileSync(file, JSON.stringify(copy));
+      expect(() => new SessionRepository(root).list()).toThrow();
+    }
   });
 });

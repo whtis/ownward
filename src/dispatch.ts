@@ -6,7 +6,7 @@ import { basename, join } from "path";
 import { DATA, ROOT, SOURCE_ROOT, cfg, ensureDir, expandHome, fmt, log, run } from "./util.ts";
 import { readRunJournalStrictIndexed, reduceRuns } from "./runs/repository.ts";
 import { openAction } from "./actions.ts";
-import { DEFAULT_CODEX_MODEL } from "./session-options.ts";
+import { defaultCodexModel } from "./session-options.ts";
 
 export interface WorkTask {
   id: string;
@@ -21,7 +21,8 @@ export interface WorkTask {
   engine?: boolean;       // claude-bg 走会话引擎（可追问/审批/中断），false 为旧式单发
   model?: string;
   effort?: string;
-  kind?: "evolve" | "routine" | "adopted";  // evolve=自演进（verify+审批上线）；routine=文档写入任务；adopted=接管外部会话（非运行，无退出码）
+  kind?: "evolve" | "routine" | "adopted" | "forked";  // evolve=自演进（verify+审批上线）；routine=文档写入任务；adopted=接管外部会话（非运行，无退出码）；forked=从另一个会话分叉
+  forkOf?: string;        // 分叉来源任务 id（kind=forked）
   verify?: "running" | "pass" | "fail";
   applied?: boolean;      // 演进任务已合并上线
   deployState?: "pending" | "applied" | "failed";
@@ -116,7 +117,7 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
   const project = basename(dir);
   const id = `${fmt(new Date(), "date").replaceAll("-", "")}-${Math.random().toString(36).slice(2, 6)}`;
   const provider = opts.provider ?? (opts.codex ? "codex" : "claude");
-  const model = opts.model ?? (provider === "codex" ? (cfg.llm?.codexModel || DEFAULT_CODEX_MODEL) : undefined);
+  const model = opts.model ?? (provider === "codex" ? defaultCodexModel(cfg.llm?.codexModel) : undefined);
   const mode: WorkTask["mode"] = opts.bg ? (`${provider}-bg` as WorkTask["mode"]) : "terminal";
   // terminal 模式给不了图（交互式 claude 只吃 argv 文本）——显式报错，不许静默丢（守则 9）
   if (opts.images?.length && mode === "terminal") throw new Error("terminal 模式不支持图片，请勾选「后台运行」");
@@ -220,20 +221,27 @@ export async function sweepTaskTitles(): Promise<void> {
   }
 }
 
-/** 用轻量模型把任务原文压成一句短标题（<=16字，动词开头）。失败就不设，客户端回退原文 */
+/** 用轻量模型把任务原文压成一句短标题，语言跟界面设置走（不翻译已有标题）。失败就不设，客户端回退原文 */
 export async function titleFor(id: string, task: string): Promise<void> {
   const raw = task.trim();
   if (raw.length < 18) { updateTask(id, { title: raw }); return; }  // 本来就短，不劳模型
+  const { readUiLang } = await import("./ui-lang.ts");
   const { llmJson } = await import("./llm.ts");
-  const res = await llmJson([
+  const en = readUiLang() === "en";
+  const rules = en ? [
+    "Condense the dev task below into one short English title:",
+    "- At most 8 words, start with a verb, sentence case, no trailing period (e.g. \"Polish Lark doc layout\", \"Fix login crash\")",
+    "- Write it in English even if the task is in another language",
+    "- Drop URLs, paths, ids and other noise; keep only the intent; keep code identifiers and product names as-is",
+    "- Output strict JSON: {\"title\": \"...\"}",
+  ] : [
     "把下面的开发任务压成一句中文短标题，要求：",
     "- 12 字以内，动词开头，说清做什么（如「优化飞书文档排版」「修复登录闪退」）",
     "- 去掉 URL、路径、编号等噪音，只保留意图",
     "- 输出严格 JSON：{\"title\": \"...\"}",
-    "",
-    raw.slice(0, 800),
-  ].join("\n"));
-  const title = res?.title ? String(res.title).slice(0, 24).trim() : "";
+  ];
+  const res = await llmJson([...rules, "", raw.slice(0, 800)].join("\n"));
+  const title = res?.title ? String(res.title).slice(0, en ? 80 : 24).trim() : "";
   if (title) updateTask(id, { title });
 }
 
@@ -298,6 +306,33 @@ export async function adoptCcSession(ccId: string): Promise<WorkTask> {
   try { await (await import("./session-service.ts")).createNewSessionService([meta.cwd]).adopt({ taskId: id, providerId: "claude", nativeRef: toolSessionId, cwd: meta.cwd, control: "ownward" }, { roots: [meta.cwd], access: "workspace" }); }
   catch (error) { removeTask(id); throw error; }
   log(`cc session adopted: [${id}] ${meta.project} (${toolSessionId})`);
+  return t;
+}
+
+/** 分叉会话：新开一个任务，带着原任务会话的完整上下文与配置继续；原任务照常可用。
+ *  沿用原任务的 cwd（常是同一个 worktree）——两个 agent 会改同一棵树，界面上提示过；
+ *  新任务不跑首轮，等用户在新会话里发第一句才真正分叉原生会话。 */
+export async function forkTask(originTaskId: string): Promise<WorkTask> {
+  const origin = loadTasks().find((x) => x.id === originTaskId);
+  if (!origin) throw new Error("原任务不存在");
+  if (!origin.engine || origin.mode === "terminal") throw new Error("只有后台引擎会话能分叉");
+  const { SessionRepository } = await import("./sessions/repository.ts");
+  const session = new SessionRepository(DATA).getByTaskId(originTaskId);
+  if (!session) throw new Error("原任务没有会话记录");
+  if (!existsSync(session.cwd)) throw new Error(`原工作目录不存在: ${session.cwd}`);
+  const id = `${fmt(new Date(), "date").replaceAll("-", "")}-${Math.random().toString(36).slice(2, 6)}`;
+  const t: WorkTask = {
+    id, project: origin.project, projectDir: origin.projectDir, cwd: session.cwd, branch: origin.branch,
+    task: `分叉：${(origin.title || origin.task).slice(0, 80)}`, mode: origin.mode, engine: true, kind: "forked", forkOf: origin.id,
+    model: session.model, effort: session.effort, extraDirs: session.extraDirs?.length ? [...session.extraDirs] : undefined,
+    startHead: origin.startHead, gitIdentity: origin.gitIdentity,
+    startedAt: new Date().toISOString(), status: "exited", exitCode: 0, harvested: true,
+  };
+  addTask(t);
+  const roots = [session.cwd, ...(session.extraDirs ?? []), ...(session.providerHome ? [session.providerHome] : [])];
+  try { await (await import("./session-service.ts")).createNewSessionService(roots).fork(originTaskId, { taskId: id }, { roots, access: session.access ?? "workspace" }); }
+  catch (error) { removeTask(id); throw error; }
+  log(`session forked: [${originTaskId}] → [${id}] ${origin.project}`);
   return t;
 }
 

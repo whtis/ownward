@@ -124,7 +124,7 @@ describe("Runner Unix IPC", () => {
 
   test("Provider 在 started 前抛错也 durable failed，不留 accepted 假成功", async () => {
     const r = root(); await spawnRunner(r); const client = new RunnerClient(r); await client.request("submit", submit("bad-fixture", { input: "not-json" })); await Bun.sleep(30);
-    const status = await client.queryCommand("bad-fixture"); expect((status.body.events as any[]).map((event) => event.type)).toEqual(["dispatching", "failed"]); client.close();
+    const status = await client.queryCommand("bad-fixture"); expect((status.body.events as any[]).map((event) => event.type)).toEqual(["dispatching", "provider-notice", "failed"]); client.close();  // notice 携带 provider 报错原文，failed 只带分类码
   });
 
   test("Provider 正常 EOF 但无终态时 durable provider_exit", async () => {

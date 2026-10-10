@@ -48,3 +48,14 @@ function toolRunSubtitle(msgs, live) {
   const kinds = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   return kinds.slice(0, 3).map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(" · ") + (kinds.length > 3 ? " …" : "");
 }
+
+/**
+ * 网页渲染窗口：只铺最后 limit 项（按折叠后的项算，组是整体，不会被切成半截）。
+ * 这不是折叠规则，安卓没有对应——手机列表本来就是懒加载的；网页是整块 innerHTML，
+ * 几千轮的长会话（2026-10 一个 8.8k 条的会话铺出 4 万多个节点、每 10s 重建一次）会把标签页的 JS 堆撑爆。
+ * 返回 { hidden: 没铺的项数, items: 要铺的项 }。
+ */
+function feedWindow(feed, limit) {
+  if (!(limit > 0) || feed.length <= limit) return { hidden: 0, items: feed };
+  return { hidden: feed.length - limit, items: feed.slice(feed.length - limit) };
+}

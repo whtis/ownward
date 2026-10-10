@@ -67,4 +67,62 @@ describe("provider catalog and dispatch engine reset", () => {
       errors: [],
     });
   });
+
+  test("real Chrome: dispatch dialog keeps 「默认」 for unset model/effort and labels what the CLI will use", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ownward-dispatch-choice-")); tempRoots.push(root);
+    const fixture = join(root, "index.html");
+    const appUrl = new URL("./app.js", import.meta.url).href;
+    writeFileSync(fixture, `<!doctype html><meta charset="utf-8"><body>
+      <div id="toast"></div>
+      <script>window.__runtimeErrors=[];addEventListener("error",event=>window.__runtimeErrors.push(event.message));</script>
+      <script src="${appUrl}"></script>
+      <script>
+        applyProviderCatalog({
+          claude:{label:"Claude Code",models:["fable","opus","sonnet","haiku"],efforts:["low","medium","high","xhigh","max"],cliDefault:{model:"opus[1m]",effort:"xhigh"}},
+          codebuddy:{label:"CodeBuddy",models:["hy3"],efforts:["low","medium","high","xhigh","max"]},
+          codex:{label:"Codex",source:"official-cache",defaultModel:"gpt-6-astra",cliDefault:{model:"gpt-6-astra",effort:"ultra"},models:[
+            {slug:"gpt-6-astra",displayName:"GPT-6-Astra",efforts:["low","medium","high","xhigh","max","ultra"],defaultEffort:"low",fast:null},
+            {slug:"gpt-5.6-sol",displayName:"GPT-5.6-Sol",efforts:["low","medium","high","xhigh","max","ultra"],defaultEffort:"low",fast:null},
+            {slug:"gpt-5.5",displayName:"GPT-5.5",efforts:["low","medium","high","xhigh"],defaultEffort:"medium",fast:null},
+          ]},
+        });
+        const pick=(c)=>({model:c.model,effort:c.effort,modelLabel:c.modelLabel,effortLabel:c.effortLabel});
+        const result={
+          claudeOpen:pick(workDialogChoice("claude",{model:"",effort:""})),
+          codexSwitchFromOpus:pick(workDialogChoice("codex",{},{model:"opus",effort:""})),
+          codexExplicitAstra:pick(workDialogChoice("codex",{model:"gpt-6-astra"},{effort:""})),
+          codexExplicit55:pick(workDialogChoice("codex",{model:"gpt-5.5"},{effort:""})),
+          codexKeepsValidEffort:pick(workDialogChoice("codex",{},{model:"gpt-5.6-sol",effort:"max"})),
+          claudeDropsCodexOnlyEffort:pick(workDialogChoice("claude",{},{model:"",effort:"ultra"})),
+          explicitDefaults:pick(workDialogChoice("codex",{model:"gpt-5.6-sol",effort:"high"})),
+        };
+        applyProviderCatalog({codex:{label:"Codex",source:"official-cache",defaultModel:"gpt-5.6-sol",models:[
+          {slug:"gpt-5.6-sol",displayName:"GPT-5.6-Sol",efforts:["low","medium","high"],defaultEffort:"low",fast:null}]}});
+        result.codexWithoutCliConfig=pick(workDialogChoice("codex",{},{model:"",effort:""}));
+        result.claudeWithoutCliConfig=pick(workDialogChoice("claude",{},{model:"",effort:""}));
+        document.body.dataset.runtime=JSON.stringify({result,errors:window.__runtimeErrors});
+      </script>`);
+    const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    const proc = Bun.spawn([chrome, "--headless=new", "--disable-gpu", "--no-sandbox", "--allow-file-access-from-files", "--dump-dom", `file://${fixture}`], { stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    expect(code, err).toBe(0);
+    const encoded = out.match(/data-runtime="([^"]+)"/)?.[1].replaceAll("&quot;", '"');
+    expect(encoded).toBeTruthy();
+    expect(JSON.parse(encoded!)).toEqual({
+      result: {
+        claudeOpen: { model: "", effort: "", modelLabel: "默认（opus[1m]）", effortLabel: "默认（xhigh）" },
+        // 以前这里会被替人选成 gpt-5.6-sol + medium
+        codexSwitchFromOpus: { model: "", effort: "", modelLabel: "默认（gpt-6-astra）", effortLabel: "默认（ultra）" },
+        codexExplicitAstra: { model: "gpt-6-astra", effort: "", modelLabel: "默认（gpt-6-astra）", effortLabel: "默认（ultra）" },
+        // CLI 配的 ultra 5.5 不支持：不能留「默认」，落到 medium
+        codexExplicit55: { model: "gpt-5.5", effort: "medium", modelLabel: "默认（gpt-6-astra）", effortLabel: "默认" },
+        codexKeepsValidEffort: { model: "gpt-5.6-sol", effort: "max", modelLabel: "默认（gpt-6-astra）", effortLabel: "默认（ultra）" },
+        claudeDropsCodexOnlyEffort: { model: "", effort: "", modelLabel: "默认（opus[1m]）", effortLabel: "默认（xhigh）" },
+        explicitDefaults: { model: "gpt-5.6-sol", effort: "high", modelLabel: "默认（gpt-6-astra）", effortLabel: "默认（ultra）" },
+        codexWithoutCliConfig: { model: "", effort: "", modelLabel: "默认（gpt-5.6-sol）", effortLabel: "默认（low）" },
+        claudeWithoutCliConfig: { model: "", effort: "", modelLabel: "默认", effortLabel: "默认" },
+      },
+      errors: [],
+    });
+  });
 });

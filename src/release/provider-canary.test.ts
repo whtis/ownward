@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { RunnerServer, type RunnerProvider } from "../runner/server.ts";
 import { RunnerClient } from "../runner/client.ts";
-import { canaryProvider, minimalCodexConfig, terminateCanaryProcess } from "./provider-canary.ts";
+import { canaryClaudeCredential, canaryCodexAuth, canaryProvider, minimalCodexConfig, terminateCanaryProcess } from "./provider-canary.ts";
 
 const roots:string[]=[];
 afterEach(()=>roots.splice(0).forEach(r=>rmSync(r,{recursive:true,force:true})));
@@ -61,7 +61,7 @@ test("canary cleanup kills the isolated process group including provider childre
 test("isolated canary redirects every provider home and copies only minimal auth material",()=>{
   const source=readFileSync(join(import.meta.dir,"provider-canary.ts"),"utf8");
   for(const key of["HOME:home","CLAUDE_CONFIG_DIR:claude","CODEX_HOME:codex"])expect(source).toContain(key);
-  expect(source).toContain('".credentials.json"');expect(source).toContain('"auth.json"');expect(source).toContain('".claude.json"');expect(source).toContain('"oauthAccount","userID","hasCompletedOnboarding","installMethod"');expect(source).toContain('"Claude Code-credentials"');expect(source).toContain("parsed.claudeAiOauth");expect(source).not.toContain("Bun.spawnSync");expect(source).not.toContain("copyFileSync(homedir()");expect(source).toContain("if(runner)await terminateCanaryProcess(runner);rmSync(root,{recursive:true,force:true})");
+  expect(source).toContain('".credentials.json"');expect(source).toContain('"auth.json"');expect(source).toContain('".claude.json"');expect(source).toContain('"oauthAccount","userID","hasCompletedOnboarding","installMethod"');expect(source).toContain('"Claude Code-credentials"');expect(source).toContain("canaryClaudeCredential(claudeRaw)");expect(source).toContain('canaryCodexAuth(readFileSync(codexAuth,"utf8"))');expect(source).not.toContain("copyFileSync");expect(source).not.toContain("Bun.spawnSync");expect(source).not.toContain("copyFileSync(homedir()");expect(source).toContain("if(runner)await terminateCanaryProcess(runner);rmSync(root,{recursive:true,force:true})");
 });
 
 test("canary waits on the command identifier used by Runner activeRuns",()=>{const canary=readFileSync(join(import.meta.dir,"provider-canary.ts"),"utf8"),server=readFileSync(join(import.meta.dir,"../runner/server.ts"),"utf8");expect(canary).toContain("waitCommandInactive(client,startCommandId");expect(server).toContain("this.active.set(accepted.record.commandId");expect(server).toContain("activeRuns: [...this.active.keys()]")});
@@ -74,4 +74,37 @@ test("isolated codex home mirrors only the user's top-level model, never hooks o
   writeFileSync(file,'[desktop]\nmodel = "gpt-5.5"\n');   // 只在 section 里出现的不算顶层
   expect(minimalCodexConfig(file)).toBeNull();
   expect(minimalCodexConfig(join(dir,"missing.toml"))).toBeNull();
+});
+
+// canary 的凭据副本绝不能带 refresh token：刷新一次服务端就轮换，用户本机那份随即作废（2026-09-22 codex 实撞）
+const jwt=(exp:number)=>`h.${Buffer.from(JSON.stringify({exp})).toString("base64url")}.s`;
+test("codex canary auth keeps the access token, blanks the refresh token and marks it freshly refreshed",()=>{
+  const now=Date.parse("2026-09-22T04:00:00Z"),access=jwt(now/1000+10*86400);
+  const raw=JSON.stringify({auth_mode:"chatgpt",OPENAI_API_KEY:null,tokens:{id_token:"id",access_token:access,refresh_token:"rt-secret",account_id:"acct"},last_refresh:"2026-09-01T00:00:00Z"});
+  const out=canaryCodexAuth(raw,now);
+  if(!("text" in out))throw new Error(out.error);
+  const copy=JSON.parse(out.text);
+  expect(copy.tokens).toEqual({id_token:"id",access_token:access,refresh_token:"",account_id:"acct"});
+  expect(copy.last_refresh).toBe("2026-09-22T04:00:00.000Z");
+  expect(out.text).not.toContain("rt-secret");
+  const apiKey=JSON.stringify({auth_mode:"apikey",OPENAI_API_KEY:"sk-x"});
+  expect(canaryCodexAuth(apiKey,now)).toEqual({text:apiKey});
+});
+test("codex canary auth refuses a near-expiry or missing access token instead of running a doomed check",()=>{
+  const now=Date.parse("2026-09-22T04:00:00Z");
+  const soon=canaryCodexAuth(JSON.stringify({tokens:{access_token:jwt(now/1000+5*60),refresh_token:"rt"}}),now);
+  expect("error" in soon&&soon.error).toContain("只剩 5 分钟");
+  expect("error" in canaryCodexAuth(JSON.stringify({tokens:{refresh_token:"rt"}}),now)).toBe(true);
+  expect("error" in canaryCodexAuth("{",now)).toBe(true);
+});
+test("claude canary credential keeps the access token and blanks the refresh token",()=>{
+  const now=Date.parse("2026-09-22T04:00:00Z");
+  const raw=JSON.stringify({claudeAiOauth:{accessToken:"at",refreshToken:"rt-secret",expiresAt:now+5*3600e3,refreshTokenExpiresAt:now+30*86400e3,scopes:["user:inference"],subscriptionType:"max"}});
+  const out=canaryClaudeCredential(raw,now);
+  if(!("text" in out))throw new Error(out.error);
+  expect(JSON.parse(out.text).claudeAiOauth).toMatchObject({accessToken:"at",refreshToken:"",expiresAt:now+5*3600e3,scopes:["user:inference"]});
+  expect(out.text).not.toContain("rt-secret");
+  const soon=canaryClaudeCredential(JSON.stringify({claudeAiOauth:{accessToken:"at",refreshToken:"rt",expiresAt:now+60_000}}),now);
+  expect("error" in soon&&soon.error).toContain("只剩 1 分钟");
+  expect("error" in canaryClaudeCredential(JSON.stringify({other:true}),now)).toBe(true);
 });

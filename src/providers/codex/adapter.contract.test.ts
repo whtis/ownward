@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { RunnerClient } from "../../runner/client.ts";
@@ -9,6 +9,7 @@ import { RunnerServer } from "../../runner/server.ts";
 import { CodexRunnerProvider } from "./adapter.ts";
 import { buildCodexArgs, CODEX_EFFORTS, CODEX_MODEL_EFFORTS, CODEX_PROVIDER_CAPABILITIES, DEFAULT_CODEX_MODEL, parseCodexOptions } from "./protocol.ts";
 import { canaryProvider } from "../../release/provider-canary.ts";
+import { forkRolloutText } from "./fork.ts";
 import { readAgentImage } from "../../runner/agent-images.ts";
 import { RUNNER_MAX_FRAME_BYTES } from "../../runner/protocol.ts";
 
@@ -22,10 +23,55 @@ async function fixture(extra = {}) { const data = mkdtempSync(join(tmpdir(), "ow
 async function terminal(c: RunnerClient, id: string, timeout = 2_000) { const end = Date.now() + timeout; while (Date.now() < end) { const e = (await c.queryCommand(id)).body.events as any[]; if (e.some((x) => ["completed", "failed", "interrupted", "unknown-outcome"].includes(x.type))) return e; await Bun.sleep(10); } throw new Error(`timeout ${id}`); }
 const payloads = (data: string, events: any[]) => { const j = new RunnerEventJournal(data); return events.filter((e) => e.payloadRef).map((e) => JSON.parse(j.readPayload(e)!)); };
 
+describe("Codex session fork", () => {
+  const line = (v: unknown) => JSON.stringify(v);
+  const rollout = (ref: string) => [
+    line({ type: "session_meta", payload: { id: ref, session_id: ref, cwd: "/repo" } }),
+    line({ type: "event_msg", payload: { type: "task_started" } }), line({ type: "event_msg", payload: { type: "user_message", message: "first" } }),
+    line({ type: "event_msg", payload: { type: "task_complete" } }),
+    // 原会话正在跑的第二轮 + 正在追加的半行：分叉件里都不能有
+    line({ type: "event_msg", payload: { type: "task_started" } }), line({ type: "event_msg", payload: { type: "user_message", message: "second" } }), '{"type":"event_msg","pay',
+  ].join("\n");
+  test("复制件截到最后一个完整轮次、丢半行，session_meta 换成新 id", () => {
+    const out = forkRolloutText(rollout(NATIVE), NATIVE, OTHER_NATIVE), lines = out.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(4); expect(lines[0].payload).toMatchObject({ id: OTHER_NATIVE, session_id: OTHER_NATIVE, cwd: "/repo" });
+    expect(lines.at(-1).payload.type).toBe("task_complete"); expect(out).not.toContain("second"); expect(out).not.toContain(NATIVE);
+    expect(() => forkRolloutText(line({ type: "session_meta", payload: { id: NATIVE } }) + "\n", NATIVE, OTHER_NATIVE)).toThrow("没有完整结束的一轮");
+    expect(() => forkRolloutText(line({ type: "event_msg", payload: { type: "task_complete" } }) + "\n", NATIVE, OTHER_NATIVE)).toThrow("缺少 session_meta");
+  });
+  const forkBody = (id: string, text: string, home: string) => ({ commandId: id, kind: "start-run", runId: `run-${id}`, sessionId: `session-${id}`, providerId: "codex", input: JSON.stringify({ text, cwd: tmpdir(), images: [], options: { ...opts, home: { kind: "path", path: home } }, forkFrom: OLD_NATIVE }) });
+  const seedHome = () => { const home = mkdtempSync(join(tmpdir(), "ownward-codex-fork-home-")); roots.push(home); const dir = join(home, "sessions/2026/10/01"); mkdirSync(dir, { recursive: true }); const file = join(dir, `rollout-2026-10-01T00-00-00-${OLD_NATIVE}.jsonl`); writeFileSync(file, rollout(OLD_NATIVE)); return { home, file, original: readFileSync(file, "utf8") }; };
+  const rollouts = (home: string) => (readdirSync(join(home, "sessions"), { recursive: true }) as string[]).filter((f) => f.endsWith(".jsonl"));
+  test("分叉首轮：复制 rollout 到新 thread id 再 resume，绑定新 ref，原文件一个字节不变", async () => {
+    const { home, file, original } = seedHome(), { data, server, client } = await fixture(); try {
+      await client.request("submit", forkBody("fork", "after fork", home)); const events = await terminal(client, "fork");
+      expect(events.at(-1)?.type).toBe("completed");
+      const ref = events.find((e) => e.type === "session-updated")?.nativeRef;
+      expect(ref).toMatch(/^[0-9a-f-]{36}$/); expect(ref).not.toBe(OLD_NATIVE);
+      expect(readFileSync(file, "utf8")).toBe(original);
+      const copy = rollouts(home).find((f) => f.includes(ref)); expect(copy).toBeDefined();
+      expect(JSON.parse(readFileSync(join(home, "sessions", copy!), "utf8").split("\n")[0]!).payload.id).toBe(ref);
+      expect(JSON.stringify(payloads(data, events))).toContain("after fork");
+    } finally { client.close(); server.stop(); }
+  });
+  test("分叉件没被 codex 认领（首轮没起来）就删掉，不留孤儿 rollout", async () => {
+    const { home } = seedHome(), { server, client } = await fixture(); try {
+      await client.request("submit", forkBody("fork-fail", "STDERR_ONLY", home)); expect((await terminal(client, "fork-fail")).at(-1)?.type).toBe("failed");
+      await Bun.sleep(50); expect(rollouts(home)).toHaveLength(1);
+    } finally { client.close(); server.stop(); }
+  });
+  test("原会话 rollout 找不到：明确失败并说清原因", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ownward-codex-fork-empty-")); roots.push(home); const { data, server, client } = await fixture(); try {
+      await client.request("submit", forkBody("fork-missing", "x", home)); const events = await terminal(client, "fork-missing");
+      expect(events.at(-1)?.type).toBe("failed"); expect(JSON.stringify(payloads(data, events))).toContain("Codex 分叉失败"); expect(existsSync(join(home, "sessions"))).toBe(false);
+    } finally { client.close(); server.stop(); }
+  });
+});
+
 describe("Codex Runner Provider contract", () => {
   test("release canary fixture proves exact start/resume nonce through payload blobs",async()=>{const{server,client}=await fixture();try{expect(await canaryProvider(client,"codex",tmpdir(),2_000)).toMatchObject({ok:true,providerId:"codex"});}finally{client.close();server.stop();}});
   test("read-history 从真实 Codex rollout fixture 恢复", async () => { const home = mkdtempSync(join(tmpdir(), "ownward-codex-home-")); roots.push(home); const dir = join(home, ".codex/sessions/2026/08/17"); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "rollout-fixture.jsonl"), [JSON.stringify({ type: "session_meta", payload: { id: NATIVE } }), JSON.stringify({ timestamp: "2026-08-01T00:00:00Z", type: "event_msg", payload: { type: "user_message", message: "question" } }), JSON.stringify({ timestamp: "2026-08-01T00:00:01Z", type: "event_msg", payload: { type: "agent_message", message: "answer" } }), ""].join("\n")); const provider = new CodexRunnerProvider(cmd, { ...process.env, HOME: home }); providers.push(provider); expect(await provider.readHistory({ nativeRef: NATIVE })).toEqual([{ role: "user", text: "question", ts: "2026-08-01T00:00:00Z" }, { role: "assistant", text: "answer", ts: "2026-08-01T00:00:01Z" }]); });
-  test("capability 对齐真实 CLI，不伪造 approval；resume 的 ref/正文都在 option terminator 后", () => { expect([...CODEX_PROVIDER_CAPABILITIES]).toEqual(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort"]); const args = buildCodexArgs(["codex"], { ...opts, effort: "high", extraDirs: ["/tmp"] }, "hi", [], NATIVE), resume = args.indexOf("resume"); for (const flag of ["--model", "--config", "--sandbox", "--add-dir", "--json", "--color", "--skip-git-repo-check"]) expect(args.indexOf(flag)).toBeLessThan(resume); expect(args.slice(resume)).toEqual(["resume", "--", NATIVE, "hi"]); expect(args.slice(0, resume)).toEqual(expect.arrayContaining(["--config", 'model_reasoning_effort="high"'])); });
+  test("capability 对齐真实 CLI，不伪造 approval；resume 的 ref/正文都在 option terminator 后", () => { expect([...CODEX_PROVIDER_CAPABILITIES]).toEqual(["stream", "resume", "interrupt", "images", "tools", "add-dir", "set-access", "set-options", "new-session", "model", "effort", "fork"]); const args = buildCodexArgs(["codex"], { ...opts, effort: "high", extraDirs: ["/tmp"] }, "hi", [], NATIVE), resume = args.indexOf("resume"); for (const flag of ["--model", "--config", "--sandbox", "--add-dir", "--json", "--color", "--skip-git-repo-check"]) expect(args.indexOf(flag)).toBeLessThan(resume); expect(args.slice(resume)).toEqual(["resume", "--", NATIVE, "hi"]); expect(args.slice(0, resume)).toEqual(expect.arrayContaining(["--config", 'model_reasoning_effort="high"'])); });
   test("model/effort matrix 与合法值 contract", () => {
     expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.6-sol");
     expect(CODEX_EFFORTS).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);

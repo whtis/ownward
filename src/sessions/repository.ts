@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join } from "path";
 import { expandCodexHome } from "./provider-home.ts";
 import { inventoryLegacySessions, type SessionInventoryEntry } from "../session-contract.ts";
 import { kernelSessionsFile, legacySessionsFile } from "../storage/layout.ts";
-import { DEFAULT_CODEX_MODEL } from "../session-options.ts";
+import { defaultCodexModel } from "../session-options.ts";
 
 export type SessionProviderId = "claude" | "codex" | "codebuddy";
 
@@ -42,6 +42,10 @@ export interface SessionRecord {
   pendingHistoryReset?: { commandId: string; previousNativeRef: string | null; startedAt: string };
   handoff?: { predecessorId?: string; successorId?: string; at: string; reason?: string; status: "active" | "superseded" | "failed"; confirmedUnknownRunId?: string };
   confirmedUnknownRunId?: string;
+  /** 分叉来源。pending=true 表示还没拿到自己的原生会话：首轮要从 originNativeRef 分叉（claude --fork-session /
+   *  codex 复制 rollout），bind 到新 ref 或 /new 清空后落 false。originNativeRef 不参与 nativeRef 唯一性校验——
+   *  它属于原会话，分叉只读不写。 */
+  fork?: { originSessionId: string; originNativeRef: string; at: string; pending: boolean };
 }
 
 export interface SessionCreateOptions {
@@ -129,6 +133,10 @@ function normalizeRecord(raw: unknown, index: number): SessionRecord {
     (r.handoff.confirmedUnknownRunId !== undefined && (typeof r.handoff.confirmedUnknownRunId !== "string" || !r.handoff.confirmedUnknownRunId)) ||
     (r.handoff.reason !== undefined && !validOptionText(r.handoff.reason, 512)))) throw new SessionRepositoryError(`session ${r.id} handoff 非法`);
   if(r.confirmedUnknownRunId!==undefined&&!validOptionText(r.confirmedUnknownRunId,128))throw new SessionRepositoryError(`session ${r.id} unknown confirmation 非法`);
+  if (r.fork !== undefined && (!r.fork || typeof r.fork !== "object" || Array.isArray(r.fork) ||
+    JSON.stringify(Object.keys(r.fork).sort()) !== JSON.stringify(["at", "originNativeRef", "originSessionId", "pending"]) ||
+    !validOptionText(r.fork.originSessionId, 256) || !validOptionText(r.fork.originNativeRef, 512) || !iso(r.fork.at) || typeof r.fork.pending !== "boolean" ||
+    r.fork.originSessionId === r.id || (r.fork.pending && r.nativeRef !== null))) throw new SessionRepositoryError(`session ${r.id} fork 非法`);
   const metaFiles = r.legacy?.metaFiles;
   if (metaFiles !== undefined && (!Array.isArray(metaFiles) || metaFiles.some((x: unknown) => typeof x !== "string"))) {
     throw new SessionRepositoryError(`session ${r.id} legacy.metaFiles 非法`);
@@ -302,6 +310,9 @@ function projectLegacy(dataRoot: string): { store: SessionStore; report: Pick<Se
 }
 
 /** 新仓库优先；文件不存在时只读投影 legacy。文件存在但损坏时拒绝降级，避免形成两个真相。 */
+/** 分叉 pending → 已兑现（拿到自己的 ref 或被 /new 清空）。返回是否真的改了 */
+function settleFork(target: SessionRecord): boolean { if (!target.fork?.pending) return false; target.fork = { ...target.fork, pending: false }; return true; }
+
 export class SessionRepository {
   private diagnostics: MigrationConflict[] = [];
   constructor(readonly dataRoot: string) {}
@@ -369,8 +380,11 @@ export class SessionRepository {
     const file = fileFor(this.dataRoot), expected = existsSync(file) ? readFileSync(file, "utf8") : null, view = mutableView(this.dataRoot), store = view.store; assertNotIsolated(view, id);
     const target = store.sessions.find((s) => s.id === id || s.taskIds.includes(id)); if (!target) throw new SessionRepositoryError(`Session 不存在: ${id}`);
     assertMutable(target);
-    if (target.nativeRef === null) return structuredClone(target);
-    target.previousRefs = [...new Set([...(target.previousRefs ?? []), target.nativeRef])].sort(); target.nativeRef = null; target.recoverable = false; target.updatedAt = new Date().toISOString(); atomicWrite(this.dataRoot, mutationPayload(view, store), expected); return new SessionRepository(this.dataRoot).getById(target.id)!;
+    // /new 之后要的是「全新开局」：还没兑现的分叉一并作废，否则下一轮又会从原会话分叉回来
+    const settledFork = settleFork(target);
+    if (target.nativeRef === null && !settledFork) return structuredClone(target);
+    if (target.nativeRef !== null) { target.previousRefs = [...new Set([...(target.previousRefs ?? []), target.nativeRef])].sort(); target.nativeRef = null; target.recoverable = false; }
+    target.updatedAt = new Date().toISOString(); atomicWrite(this.dataRoot, mutationPayload(view, store), expected); return new SessionRepository(this.dataRoot).getById(target.id)!;
   }
 
   /** Provider 收到首轮输入前预留稳定 canonical id；native ref 稍后 bind 也不能换掉这个 id。 */
@@ -381,7 +395,7 @@ export class SessionRepository {
       (input.extraDirs !== undefined && (!Array.isArray(input.extraDirs) || input.extraDirs.some((dir) => typeof dir !== "string" || !isAbsolute(dir)))) ||
       (input.model !== undefined && !validOptionText(input.model, 128)) ||
       (input.effort !== undefined && !validOptionText(input.effort, 64))) throw new SessionRepositoryError("reserve 参数非法");
-    const model=input.model??(input.providerId==="codex"?DEFAULT_CODEX_MODEL:undefined),file = fileFor(this.dataRoot), expected = existsSync(file) ? readFileSync(file, "utf8") : null;
+    const model=input.model??(input.providerId==="codex"?defaultCodexModel():undefined),file = fileFor(this.dataRoot), expected = existsSync(file) ? readFileSync(file, "utf8") : null;
     // 第一次新写必须把完整 legacy store copy-forward 到 primary，不能只保留本次新 Session。
     const view = mutableView(this.dataRoot), store = view.store; assertNotIsolated(view, input.taskId);
     const existing = store.sessions.find((s) => s.taskIds.includes(input.taskId));
@@ -416,6 +430,9 @@ export class SessionRepository {
     const byNative = persisted.sessions.find((s) => s.providerId === input.providerId && (s.nativeRef === input.nativeRef || s.previousRefs?.includes(input.nativeRef)));
     if (persisted.sessions.some((s) => s.archive?.originalTaskRefs.includes(input.taskId))) throw new SessionRepositoryError("SESSION_ARCHIVED_READ_ONLY");
     let changed = false;
+    // 分叉会话绑到原会话的 ref = CLI 没真的分叉、在原会话上续写了。走下面的「同 Provider 合并」会把原会话记录整条吞掉，
+    // 原任务从此找不到自己的会话——必须拒绝，原会话一个字段都不能动
+    if (byTask?.fork && byNative && byTask !== byNative && (byNative.id === byTask.fork.originSessionId || input.nativeRef === byTask.fork.originNativeRef)) throw new SessionRepositoryError("SESSION_FORK_REF_COLLISION");
     if (byTask && byNative && byTask !== byNative) {
       if (byTask.providerId !== byNative.providerId) {
         throw new SessionRepositoryError("bind task/native 指向两个冲突 Session");
@@ -439,6 +456,8 @@ export class SessionRepository {
         target.previousRefs = (target.previousRefs ?? []).filter((r) => r !== input.nativeRef);
         target.nativeRef = input.nativeRef; changed = true;
       }
+      // 分叉兑现：拿到了自己的原生会话，之后都是普通 resume
+      if (settleFork(target)) changed = true;
       if (!target.recoverable) { target.recoverable = true; changed = true; }
       if (!same(target.taskIds, taskIds)) { target.taskIds = taskIds; changed = true; }
       // Provider meta 已成功落盘，cwd/control/home 的最新值应覆盖 repository；相同则保持零写。
@@ -465,20 +484,35 @@ export class SessionRepository {
     return new SessionRepository(this.dataRoot).getByTaskId(input.taskId)!;
   }
 
-  resetHistory(id:string,commandId:string):SessionRecord{if(!commandId)throw new SessionRepositoryError("history reset command 非法");const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),store=view.store;assertNotIsolated(view,id);const target=store.sessions.find((s)=>s.id===id||s.taskIds.includes(id));if(!target)throw new SessionRepositoryError(`Session 不存在: ${id}`);assertMutable(target);if(target.nativeRef)target.previousRefs=[...new Set([...(target.previousRefs??[]),target.nativeRef])].sort();target.nativeRef=null;target.recoverable=false;target.historyResetCommandId=commandId;target.updatedAt=new Date().toISOString();atomicWrite(this.dataRoot,mutationPayload(view,store),expected);return new SessionRepository(this.dataRoot).getById(target.id)!;}
+  resetHistory(id:string,commandId:string):SessionRecord{if(!commandId)throw new SessionRepositoryError("history reset command 非法");const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),store=view.store;assertNotIsolated(view,id);const target=store.sessions.find((s)=>s.id===id||s.taskIds.includes(id));if(!target)throw new SessionRepositoryError(`Session 不存在: ${id}`);assertMutable(target);if(target.nativeRef)target.previousRefs=[...new Set([...(target.previousRefs??[]),target.nativeRef])].sort();target.nativeRef=null;target.recoverable=false;target.historyResetCommandId=commandId;settleFork(target);target.updatedAt=new Date().toISOString();atomicWrite(this.dataRoot,mutationPayload(view,store),expected);return new SessionRepository(this.dataRoot).getById(target.id)!;}
   beginHistoryReset(id:string,commandId:string):SessionRecord{if(!commandId)throw new SessionRepositoryError("history reset command 非法");const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),target=view.store.sessions.find((s)=>s.id===id||s.taskIds.includes(id));assertNotIsolated(view,id);if(!target)throw new SessionRepositoryError(`Session 不存在: ${id}`);assertMutable(target);if(target.pendingHistoryReset&&target.pendingHistoryReset.commandId!==commandId)throw new SessionRepositoryError("SESSION_HISTORY_RESET_PENDING");if(!target.pendingHistoryReset)target.pendingHistoryReset={commandId,previousNativeRef:target.nativeRef,startedAt:new Date().toISOString()};atomicWrite(this.dataRoot,mutationPayload(view,view.store),expected);return new SessionRepository(this.dataRoot).getById(target.id)!;}
-  finishHistoryReset(id:string,commandId:string,completed:boolean):SessionRecord{const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),target=view.store.sessions.find((s)=>s.id===id||s.taskIds.includes(id));assertNotIsolated(view,id);if(!target)throw new SessionRepositoryError(`Session 不存在: ${id}`);assertMutable(target);const pending=target.pendingHistoryReset;if(!pending){if(completed&&target.historyResetCommandId===commandId)return structuredClone(target);throw new SessionRepositoryError("SESSION_HISTORY_RESET_NOT_PENDING");}if(pending.commandId!==commandId)throw new SessionRepositoryError("SESSION_HISTORY_RESET_COMMAND_DRIFT");if(completed){if(pending.previousNativeRef)target.previousRefs=[...new Set([...(target.previousRefs??[]),pending.previousNativeRef])].sort();target.nativeRef=null;target.recoverable=false;target.historyResetCommandId=commandId;}else if(target.nativeRef!==pending.previousNativeRef)throw new SessionRepositoryError("SESSION_HISTORY_RESET_REF_DRIFT");delete target.pendingHistoryReset;target.updatedAt=new Date().toISOString();atomicWrite(this.dataRoot,mutationPayload(view,view.store),expected);return new SessionRepository(this.dataRoot).getById(target.id)!;}
+  finishHistoryReset(id:string,commandId:string,completed:boolean):SessionRecord{const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),target=view.store.sessions.find((s)=>s.id===id||s.taskIds.includes(id));assertNotIsolated(view,id);if(!target)throw new SessionRepositoryError(`Session 不存在: ${id}`);assertMutable(target);const pending=target.pendingHistoryReset;if(!pending){if(completed&&target.historyResetCommandId===commandId)return structuredClone(target);throw new SessionRepositoryError("SESSION_HISTORY_RESET_NOT_PENDING");}if(pending.commandId!==commandId)throw new SessionRepositoryError("SESSION_HISTORY_RESET_COMMAND_DRIFT");if(completed){if(pending.previousNativeRef)target.previousRefs=[...new Set([...(target.previousRefs??[]),pending.previousNativeRef])].sort();target.nativeRef=null;target.recoverable=false;target.historyResetCommandId=commandId;settleFork(target);}else if(target.nativeRef!==pending.previousNativeRef)throw new SessionRepositoryError("SESSION_HISTORY_RESET_REF_DRIFT");delete target.pendingHistoryReset;target.updatedAt=new Date().toISOString();atomicWrite(this.dataRoot,mutationPayload(view,view.store),expected);return new SessionRepository(this.dataRoot).getById(target.id)!;}
   handoff(input:{taskId:string;expectedSessionId:string;providerId:SessionProviderId;model?:string;effort?:string;reason?:string}):{previous:SessionRecord;current:SessionRecord}{
     if(!input.taskId||!validOptionText(input.expectedSessionId,256)||input.model!==undefined&&!validOptionText(input.model,128)||input.effort!==undefined&&!validOptionText(input.effort,64)||input.reason!==undefined&&!validOptionText(input.reason,512))throw new SessionRepositoryError("handoff 参数非法");
     const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),store=view.store;assertNotIsolated(view,input.taskId);const previous=store.sessions.find(s=>s.taskIds.includes(input.taskId));if(!previous)throw new SessionRepositoryError(`Session 不存在: ${input.taskId}`);assertMutable(previous);
     if(previous.id!==input.expectedSessionId)throw new SessionRepositoryError("SESSION_HANDOFF_STALE");
     const sameProvider=previous.providerId===input.providerId,requestedModel=input.model??(sameProvider?previous.model:undefined),effort=input.effort??(sameProvider?previous.effort:undefined);
     if(sameProvider&&requestedModel===previous.model&&effort===previous.effort)throw new SessionRepositoryError("SESSION_HANDOFF_SAME_PROVIDER");
-    const model=requestedModel??(input.providerId==="codex"?DEFAULT_CODEX_MODEL:undefined);
+    const model=requestedModel??(input.providerId==="codex"?defaultCodexModel():undefined);
     const at=new Date().toISOString(),id=`${input.taskId}:handoff:${crypto.randomUUID()}`;previous.taskIds=previous.taskIds.filter(x=>x!==input.taskId);previous.updatedAt=at;previous.handoff={...(previous.handoff?.predecessorId?{predecessorId:previous.handoff.predecessorId}:{}),successorId:id,at,...(input.reason?{reason:input.reason}:{}),status:"superseded"};store.sessions.push({id,providerId:input.providerId,nativeRef:null,previousRefs:[],cwd:previous.cwd,control:previous.control,taskIds:[input.taskId],recoverable:false,source:"native",createdAt:at,updatedAt:at,...(sameProvider&&previous.providerHome?{providerHome:previous.providerHome}:{}),...(previous.access?{access:previous.access}:{}),...(previous.extraDirs?.length?{extraDirs:[...previous.extraDirs]}:{}),...(model?{model}:{}),...(effort?{effort}:{}),handoff:{predecessorId:previous.id,at,...(input.reason?{reason:input.reason}:{}),status:"active"}});atomicWrite(this.dataRoot,mutationPayload(view,store),expected);const repo=new SessionRepository(this.dataRoot);return{previous:repo.getById(previous.id)!,current:repo.getByTaskId(input.taskId)!};
   }
   confirmHandoffUnknown(id:string,runId:string):SessionRecord{if(!runId)throw new SessionRepositoryError("unknown run id 非法");const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),target=view.store.sessions.find(s=>s.id===id||s.taskIds.includes(id));if(!target)throw new SessionRepositoryError(`Session 不存在: ${id}`);assertMutable(target);target.confirmedUnknownRunId=runId;target.updatedAt=new Date().toISOString();atomicWrite(this.dataRoot,mutationPayload(view,view.store),expected);return new SessionRepository(this.dataRoot).getById(target.id)!;}
   rollbackHandoff(id:string):SessionRecord{const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),store=view.store,current=store.sessions.find(s=>s.id===id),predecessor=current?.handoff?.predecessorId?store.sessions.find(s=>s.id===current.handoff!.predecessorId):undefined;if(!current||!predecessor||current.handoff?.status!=="active")throw new SessionRepositoryError("SESSION_HANDOFF_NOT_ACTIVE");const taskIds=[...current.taskIds],at=new Date().toISOString(),ancestor=predecessor.handoff?.predecessorId?store.sessions.find(s=>s.id===predecessor.handoff!.predecessorId):undefined;current.taskIds=[];current.handoff={...current.handoff,status:"failed"};current.updatedAt=at;predecessor.taskIds=[...new Set([...predecessor.taskIds,...taskIds])].sort();if(ancestor?.handoff?.successorId===predecessor.id)predecessor.handoff={predecessorId:ancestor.id,at:ancestor.handoff.at,...(ancestor.handoff.reason?{reason:ancestor.handoff.reason}:{}),status:"active"};else delete predecessor.handoff;predecessor.updatedAt=at;atomicWrite(this.dataRoot,mutationPayload(view,store),expected);return new SessionRepository(this.dataRoot).getById(predecessor.id)!;}
+  /** 分叉：按原会话的配置新建一条独立 Session（新 taskId、nativeRef 待首轮分叉后绑定）。
+   *  与 handoff 不同，原会话记录一个字段都不改——它照常被继续使用。 */
+  fork(input:{taskId:string;originId:string}):SessionRecord{
+    if(!input.taskId||!validOptionText(input.originId,256))throw new SessionRepositoryError("fork 参数非法");
+    const file=fileFor(this.dataRoot),expected=existsSync(file)?readFileSync(file,"utf8"):null,view=mutableView(this.dataRoot),store=view.store;assertNotIsolated(view,input.originId);assertNotIsolated(view,input.taskId);
+    const origin=store.sessions.find(s=>s.id===input.originId||s.taskIds.includes(input.originId));if(!origin)throw new SessionRepositoryError(`Session 不存在: ${input.originId}`);assertMutable(origin);
+    if(!origin.nativeRef)throw new SessionRepositoryError("SESSION_FORK_NATIVE_REF_REQUIRED");
+    if(store.sessions.some(s=>s.id===input.taskId||s.taskIds.includes(input.taskId)||s.archive?.originalTaskRefs.includes(input.taskId)))throw new SessionRepositoryError("SESSION_FORK_TASK_EXISTS");
+    const at=new Date().toISOString();
+    store.sessions.push({id:input.taskId,providerId:origin.providerId,nativeRef:null,previousRefs:[],cwd:origin.cwd,control:"ownward",taskIds:[input.taskId],recoverable:false,source:"native",createdAt:at,updatedAt:at,
+      ...(origin.providerHome?{providerHome:origin.providerHome}:{}),...(origin.access?{access:origin.access}:{}),...(origin.extraDirs?.length?{extraDirs:[...origin.extraDirs]}:{}),
+      ...(origin.model?{model:origin.model}:{}),...(origin.effort?{effort:origin.effort}:{}),
+      fork:{originSessionId:origin.id,originNativeRef:origin.nativeRef,at,pending:true}});
+    atomicWrite(this.dataRoot,mutationPayload(view,store),expected);return new SessionRepository(this.dataRoot).getByTaskId(input.taskId)!;
+  }
 }
 
 /** daemon/provider 共用的可重试补写；不吞错，由边界调用方决定记录日志还是终止运维命令。 */

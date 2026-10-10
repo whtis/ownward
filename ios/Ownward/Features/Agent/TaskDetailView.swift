@@ -15,6 +15,11 @@ final class TaskSessionStore {
     var notice: String?
     var submitted: Set<String> = []
     var sending = false
+    /// 每次向服务端要最后多少条；长会话（几千条、好几 MB）整份轮询会拖垮解码与比对。「加载更早」每次多要一页
+    static let msgPage = 400
+    var msgTail = TaskSessionStore.msgPage
+    /// 折叠好的会话流：只在 state 变了时算一次。放在 body 里算的话，打字机 16ms 一跳就整份重折一遍
+    private(set) var feed: [FeedItem] = []
     let partial = TypewriterBuffer()
     /// 各家订阅额度：独立于会话状态，60s 才问一次（服务端也缓存 60s），拿不到就保留上一份
     var usage: ProvidersUsage?
@@ -24,10 +29,13 @@ final class TaskSessionStore {
 
     func refresh() async {
         do {
-            let next = try await client.devMessages(id: taskId)
+            let next = try await client.devMessages(id: taskId, tail: msgTail)
             let prev = state
             if next != prev {
                 state = next
+                if next.messages != prev?.messages || next.omitted != prev?.omitted {
+                    feed = foldToolRuns(next.messages).map { $0.shifted(by: next.omitted) }
+                }
                 partial.set(next.partial)
                 if !next.isRunning { partial.flush() }
                 if let prev {
@@ -44,6 +52,8 @@ final class TaskSessionStore {
             if let next = try? await client.usage() { usage = next }
         }
     }
+
+    func loadEarlier() async { msgTail += Self.msgPage; await refresh() }
 
     var pollInterval: Duration { state?.isRunning == true ? .milliseconds(2500) : .seconds(8) }
 
@@ -131,14 +141,20 @@ struct TaskDetailView: View {
     private var running: Bool { state?.isRunning ?? false }
 
     var body: some View {
-        let msgs = state?.messages ?? []
+        let total = (state?.omitted ?? 0) + (state?.messages.count ?? 0)
+        let omitted = state?.omitted ?? 0
         let partial = store.partial.displayed
         let pending = state?.pending ?? []
         // 连续工具调用折成一组：一轮几十次 Edit/Bash 一条一行能把整屏铺满，
         // 而这段时间要看的只有「还在跑、第几步、有没有出错」。id 是组的起点下标——
         // 尾部那组会一直长大但起点不动，追加时旧项不换位
-        let feed = foldToolRuns(msgs)
-        ConversationScroll(followKey: msgs.count * 1000 + pending.count * 7 + partial.utf16.count / 40) {
+        let feed = store.feed
+        // 消息只拿尾部时 count 封顶不变，跟随要按全量条数算
+        ConversationScroll(followKey: total * 1000 + pending.count * 7 + partial.utf16.count / 40) {
+            if omitted > 0 {
+                Button { Task { await store.loadEarlier() } } label: { Text("加载更早的 \(String(omitted)) 条").caption() }
+                    .buttonStyle(.borderless).frame(maxWidth: .infinity).padding(.vertical, 8)
+            }
             ForEach(feed) { item in
                 // 最后一项就是流的末尾：本轮还在跑时，这组显示「正在执行」
                 FeedRow(item: item, live: item.index == feed.last?.index && running, client: client)

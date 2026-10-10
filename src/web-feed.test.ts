@@ -10,12 +10,13 @@ import { readFileSync } from "fs";
 import { join } from "path";
 
 const src = readFileSync(join(import.meta.dir, "..", "web", "feed.js"), "utf8");
-const { foldToolRuns, isToolError, toolRunSubtitle } = new Function(
-  `${src}\nreturn { foldToolRuns, isToolError, toolRunSubtitle };`,
+const { foldToolRuns, isToolError, toolRunSubtitle, feedWindow } = new Function(
+  `${src}\nreturn { foldToolRuns, isToolError, toolRunSubtitle, feedWindow };`,
 )() as {
   foldToolRuns: (msgs: any[], minRun?: number) => any[];
   isToolError: (m: any) => boolean;
   toolRunSubtitle: (msgs: any[], live: boolean) => string;
+  feedWindow: (feed: any[], limit: number) => { hidden: number; items: any[] };
 };
 
 const tool = (name: string, text = "") => ({ role: "tool", name, text });
@@ -120,5 +121,23 @@ describe("isToolError", () => {
     expect(isToolError(tool("⚠️ 出错", "boom"))).toBe(true);
     expect(isToolError(tool("⛔ 已拒绝", "denied"))).toBe(true);
     expect(isToolError(tool("Edit", "a.ts"))).toBe(false);
+  });
+});
+
+describe("feedWindow", () => {
+  test("只留最后 limit 项，组整体保留、index 不变（展开态 key 稳定）", () => {
+    const msgs = [user("a"), tool("Bash"), tool("Bash"), tool("Bash"), assistant("b"), user("c"), assistant("d")];
+    const feed = foldToolRuns(msgs);
+    const { hidden, items } = feedWindow(feed, 3);
+    expect(hidden).toBe(feed.length - 3);
+    expect(items).toEqual(feed.slice(-3));
+    expect(items.map((it) => it.index)).toEqual([4, 5, 6]);
+    expect(flatten(feedWindow(feed, 4).items)[0]).toEqual(tool("Bash"));   // 窗口起点落在组上就整组带上
+  });
+
+  test("没超限或 limit 非法就全铺", () => {
+    const feed = foldToolRuns([user("a"), assistant("b")]);
+    expect(feedWindow(feed, 5)).toEqual({ hidden: 0, items: feed });
+    expect(feedWindow(feed, 0)).toEqual({ hidden: 0, items: feed });
   });
 });

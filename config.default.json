@@ -105,7 +105,8 @@
       "version": "1.0.0",
       "command": [
         "codex"
-      ]
+      ],
+      "fork": false
     },
     "codebuddy": {
       "enabled": false,

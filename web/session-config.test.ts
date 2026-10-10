@@ -38,9 +38,11 @@ describe("dispatch and live session model configuration", () => {
     expect(app).toContain('effort: $("#w-effort").value || undefined');
   });
 
-  test("explicit dispatch defaults are applied before the Codex fallback", () => {
-    expect(app).toContain('model: d.model || "", effort: d.effort || "", useProviderDefault: !d.model');
-    expect(app).toContain('providerId === "codex" && selection.useProviderDefault !== false ? capability.defaultModel');
+  test("explicit dispatch defaults go straight into the dialog; an unset model stays 「默认」 instead of a forced Codex model", () => {
+    // 2026-09-22：没配型号时曾一律替人选 gpt-5.6-sol，~/.codex/config.toml 里配的默认型号从没被派发用上
+    expect(app).toContain('fillWorkProviderOptions({ model: d.model || "", effort: d.effort || "" });');
+    expect(app).not.toContain("useProviderDefault");
+    expect(app).toContain("const c = workDialogChoice(providerId, selection, { model: $(\"#w-model\").value, effort: $(\"#w-effort\").value });");
   });
 
   test("one dialog handles cross-provider handoff and same-provider reconfiguration", () => {
@@ -136,8 +138,19 @@ describe("dispatch and live session model configuration", () => {
     const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
     // 独立 profile + 关掉首次运行/崩溃上报：用用户默认 profile 起 headless 在忙机器上会卡住几十秒到几分钟
     const proc = Bun.spawn([chrome, "--headless=new", "--disable-gpu", "--no-sandbox", "--allow-file-access-from-files", `--user-data-dir=${join(root, "chrome-profile")}`, "--no-first-run", "--no-default-browser-check", "--disable-crash-reporter", "--disable-breakpad", "--disable-extensions", "--disable-background-networking", "--disable-component-update", "--dump-dom", `file://${fixture}`], { stdout: "pipe", stderr: "pipe" });
-    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    expect(code, err).toBe(0);
+    // Chrome 153 起：独立 profile 下 --dump-dom 把页面吐完后进程不退出（实测挂到被杀，默认 profile 则 2s 退）。
+    // 不等进程自己退：读到完整文档（</html>）就收工并结束它；stderr 照读，拿不到文档时把它带进断言信息
+    const errText = new Response(proc.stderr).text();
+    const reader = proc.stdout.getReader(), decoder = new TextDecoder();
+    let out = "";
+    while (!out.includes("</html>")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += decoder.decode(value, { stream: true });
+    }
+    proc.kill("SIGKILL");
+    await proc.exited;
+    expect(out.includes("</html>"), await errText).toBe(true);
     const encoded = out.match(/data-runtime="([^"]+)"/)?.[1].replaceAll("&quot;", '"');
     expect(encoded).toBeTruthy();
     expect(JSON.parse(encoded!)).toEqual({

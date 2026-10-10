@@ -16,13 +16,17 @@ import {
 type EventInput = ProviderEventInput;
 type ControlWait = { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; onAck?: () => void };
 type PendingApproval = { requestId: string; runId: string; input: Record<string, unknown>; reserved: boolean };
-type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; model?: string /* 本轮最近一个主线程 assistant 帧的模型 id：result.modelUsage 按它取窗口 */; toolNames?: Map<string, string> };
+type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; model?: string /* 本轮最近一个主线程 assistant 帧的模型 id：result.modelUsage 按它取窗口 */; toolNames?: Map<string, string>; held?: { since: number; timer: ReturnType<typeof setInterval> } };
 type ClaudeSession = {
   sessionId: string; cwd: string; options: ClaudeSessionOptions; nativeRef?: string; proc?: Bun.Subprocess; generation: number;
+  /** 分叉来源：拿到自己的 init session_id 之前每次 spawn 都带 --resume <forkFrom> --fork-session；init 回来即清 */
+  forkFrom?: string;
   turn?: Turn; operation?: string; controlOperation?: string; pending: Map<string, PendingApproval>; controls: Map<string, ControlWait>; mutex: AsyncMutex;
   stderrTail: string; invalidLines: number; consecutiveInvalidLines: number; droppedFrames: number; droppedByReason: Map<string, number>;
+  // 后台子代理：awaitedAgents = 已派出、汇报伪 turn 还没到的 run_id；liveAgents = CLI 最近一次 background_tasks_changed 报的在跑子代理
+  awaitedAgents?: Set<string>; liveAgents?: Set<string>; lastFrameAt?: number; subagentTasks?: Set<string>; ownTasks?: Set<string> /* 当前 CLI 进程起的后台任务：它们的通知不是「上一轮」遗留 */;
 };
-export type ClaudeProviderOptions = { controlAckTimeoutMs?: number; maxInvalidLines?: number; maxStdoutBufferBytes?: number; stderrRingBytes?: number; dataRoot?: string; providerId?: string };
+export type ClaudeProviderOptions = { controlAckTimeoutMs?: number; maxInvalidLines?: number; maxStdoutBufferBytes?: number; stderrRingBytes?: number; dataRoot?: string; providerId?: string; backgroundHoldMaxMs?: number; backgroundReportGraceMs?: number; backgroundCheckMs?: number };
 
 /** 丢帧日志的采样阶梯：每个 reason 在这些累计数上各落一行，之后每 10 万帧再落一行 */
 const DROP_LOG_MILESTONES = [1, 10, 100, 1_000, 10_000, 100_000];
@@ -70,7 +74,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   constructor(private readonly claudeCommand: readonly string[] = ["claude"], private readonly env: Record<string, string | undefined> = process.env, options: ClaudeProviderOptions = {}) {
     if (!claudeCommand.length || claudeCommand.some((part) => !part)) throw new Error("Claude command 非法");
     this.id = options.providerId ?? CLAUDE_PROVIDER_ID;
-    this.options = { controlAckTimeoutMs: options.controlAckTimeoutMs ?? 5_000, maxInvalidLines: options.maxInvalidLines ?? 3, maxStdoutBufferBytes: options.maxStdoutBufferBytes ?? AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, stderrRingBytes: options.stderrRingBytes ?? 16 * 1024, dataRoot: options.dataRoot };
+    this.options = { controlAckTimeoutMs: options.controlAckTimeoutMs ?? 5_000, maxInvalidLines: options.maxInvalidLines ?? 3, maxStdoutBufferBytes: options.maxStdoutBufferBytes ?? AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES, stderrRingBytes: options.stderrRingBytes ?? 16 * 1024, dataRoot: options.dataRoot, backgroundHoldMaxMs: options.backgroundHoldMaxMs ?? 4 * 60 * 60_000, backgroundReportGraceMs: options.backgroundReportGraceMs ?? 60_000, backgroundCheckMs: options.backgroundCheckMs ?? 5_000 };
   }
   readHistory(input: { nativeRef: string }) {
     // codebuddy 的 transcript 是自有格式（~/.codebuddy/projects/，非 CC 帧结构）——
@@ -138,8 +142,19 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   private async *start(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> {
     const parsed = parseClaudeStartInput(input), existing = this.sessions.get(command.sessionId);
     if (existing) { await this.awaitTerminalCleanup(existing); await existing.mutex.run(async () => { if (existing.turn || existing.operation) throw providerError("PROVIDER_SESSION_BUSY", "Claude session 正在执行"); await this.stopProcess(existing, false); }); }
-    const session = this.makeSession(command.sessionId, parsed.cwd, parsed.options); this.sessions.set(command.sessionId, session);
+    const session = this.makeSession(command.sessionId, parsed.cwd, parsed.options); session.forkFrom = parsed.forkFrom; this.sessions.set(command.sessionId, session);
+    if (parsed.forkFrom) yield* this.awaitForkOrigin(command, parsed.forkFrom);
     yield* this.runTurn(session, command, claudeUserFrame(parsed.text, this.materializeImages(parsed.images)));
+  }
+  /** 原会话本轮还在跑：transcript 尾巴可能停在 tool_use 还没有 tool_result 的半截，分叉过去 API 会拒。
+   *  只等它**这一轮**结束（不碰它的 mutex，原会话的下一轮/队列照常走）；轮间再追加的完整消息无害。
+   *  原会话若是终端里外部驱动的，这里看不见——那种情况照常分叉。 */
+  private async *awaitForkOrigin(command: RunnerCommandRecord, forkFrom: string): AsyncIterable<EventInput> {
+    const origin = [...this.sessions.values()].find((candidate) => candidate.sessionId !== command.sessionId && candidate.nativeRef === forkFrom && candidate.turn && !candidate.turn.terminal);
+    // 先把这一轮攥住：yield 期间原会话这轮可能已收尾、session.turn 被清空
+    const originTurn = origin?.turn; if (!originTurn) return;
+    yield this.event(command, "provider-notice", { payload: JSON.stringify({ category: "fork_waiting" }) }, "best-effort");
+    await originTurn.completion;
   }
   private async *send(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> {
     const parsed = parseClaudeSendInput(input); let session = this.sessions.get(command.sessionId);
@@ -175,6 +190,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       queue.push(this.event(command, "started", session.nativeRef ? { nativeRef: session.nativeRef } : {})); turn.started = true; this.emitSessionUpdate(session, turn);
       yield* queue.iterate();
     } finally {
+      if (turn.held) clearInterval(turn.held.timer);
       try {
         if (turn.terminal) await this.stopTurnProcess(session, turn);
         await session.mutex.run(() => { if (session.turn === turn) { session.turn = undefined; session.operation = undefined; } for (const [id, pending] of session.pending) if (pending.runId === command.runId) session.pending.delete(id); });
@@ -185,9 +201,14 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     const session = this.requireSession(command); let turn!: Turn, requestId!: string, ack!: Promise<void>;
     await session.mutex.run(() => {
       turn = session.turn!; if (!turn || turn.terminal || turn.command.runId !== command.runId) throw providerError("PROVIDER_RUN_NOT_ACTIVE", "目标 run 不在执行");
-      if (session.controlOperation) throw providerError("PROVIDER_SESSION_BUSY", "Claude control command 正在处理"); session.controlOperation = command.commandId;
+      if (session.controlOperation) throw providerError("PROVIDER_SESSION_BUSY", "Claude control command 正在处理");
+      // 挂起等后台子代理的 turn：CLI 自己可能是空闲的，interrupt control 没有可打断的对象。
+      // 直接收尾成 interrupted，runTurn 的 finally 会连同后台子代理一起杀掉 CLI
+      if (turn.held) { turn.interruptRequested = true; requestId = ""; return; }
+      session.controlOperation = command.commandId;
       requestId = `ownward-${crypto.randomUUID()}`; ack = this.controlWait(session, requestId, () => { turn.interruptRequested = true; });
     });
+    if (!requestId) { yield this.event(command, "started", session.nativeRef ? { nativeRef: session.nativeRef } : {}); this.finishTurn(turn, "interrupted"); yield this.event(command, "completed"); return; }
     try { yield this.event(command, "started", session.nativeRef ? { nativeRef: session.nativeRef } : {}); if (!this.write(session, JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "interrupt" } }) + "\n")) { this.rejectControl(session, requestId, providerError("PROVIDER_UNAVAILABLE", "Claude interrupt 写入失败")); throw providerError("PROVIDER_UNAVAILABLE", "Claude interrupt 写入失败"); } await ack; yield this.event(command, "completed"); }
     finally { await session.mutex.run(() => { if (session.controlOperation === command.commandId) session.controlOperation = undefined; }); }
   }
@@ -228,7 +249,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   }
   private async *newSession(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> {
     parseClaudeNewSession(input); const session = this.requireSession(command);
-    await this.reserveIdle(session, "new-session"); try { yield this.event(command, "started"); await this.stopProcess(session, false); session.nativeRef = undefined; session.pending.clear(); yield this.event(command, "session-updated", { payload: JSON.stringify({ nativeRef: null }) }); yield this.event(command, "completed"); } finally { await session.mutex.run(() => { if (session.operation === "new-session") session.operation = undefined; }); }
+    await this.reserveIdle(session, "new-session"); try { yield this.event(command, "started"); await this.stopProcess(session, false); session.nativeRef = undefined; session.forkFrom = undefined; session.pending.clear(); yield this.event(command, "session-updated", { payload: JSON.stringify({ nativeRef: null }) }); yield this.event(command, "completed"); } finally { await session.mutex.run(() => { if (session.operation === "new-session") session.operation = undefined; }); }
   }
   private async *reconfigure(command: RunnerCommandRecord, operation: string, mutate: (session: ClaudeSession) => Promise<void>): AsyncIterable<EventInput> {
     const session = this.requireSession(command); await this.reserveIdle(session, operation);
@@ -270,7 +291,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     this.assertEffortForProvider(session.options.effort);
     if(session.options.effort&&!supportsEffort){this.metrics.effortUnsupported++;throw providerError("PROVIDER_CAPABILITY_UNSUPPORTED",capability.state==="failed"?`${this.id} CLI 无法确认 --effort 支持，已拒绝启动`:`${this.id} CLI 不支持 --effort，已拒绝启动`);}
     const supportsPermissionPromptTool=capability.state!=="ready"||capability.permissionPromptTool;
-    let proc: Bun.Subprocess; try { proc = Bun.spawn(buildClaudeProviderArgs(this.claudeCommand, session.options, session.nativeRef,supportsEffort,supportsPermissionPromptTool), { cwd: session.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe", env: cleanEnv }); } catch { throw providerError("PROVIDER_UNAVAILABLE", "无法启动 Claude CLI"); }
+    let proc: Bun.Subprocess; try { proc = Bun.spawn(buildClaudeProviderArgs(this.claudeCommand, session.options, session.nativeRef,supportsEffort,supportsPermissionPromptTool,session.nativeRef?undefined:session.forkFrom), { cwd: session.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe", env: cleanEnv }); } catch { throw providerError("PROVIDER_UNAVAILABLE", "无法启动 Claude CLI"); }
     session.proc = proc; void this.readStdout(session, proc, generation); void this.readStderr(session, proc, generation); void proc.exited.then((code) => this.onExit(session, proc, generation, code));
   }
   private async readStdout(session: ClaudeSession, proc: Bun.Subprocess, generation: number): Promise<void> {
@@ -301,8 +322,22 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     if (!plain(raw)) return this.dropFrame(session, "not-object");
     if (raw.isSidechain === true || raw.parent_tool_use_id) return this.dropFrame(session, "sidechain");
     if (raw.type === "control_response") { const id = this.controlResponseId(raw); if (id && session.controls.has(id)) { const wait = session.controls.get(id)!; clearTimeout(wait.timer); session.controls.delete(id); wait.onAck?.(); wait.resolve(); return; } return this.dropFrame(session, "unmatched-control-response"); }
+    session.lastFrameAt = Date.now();
+    if (raw.type === "system" && raw.subtype === "background_tasks_changed") {
+      session.liveAgents = new Set((Array.isArray(raw.tasks) ? raw.tasks : []).filter((t: any) => plain(t) && t.task_type === "local_agent" && typeof t.run_id === "string").map((t: any) => t.run_id as string)); return;
+    }
+    // 只认主线程派出的后台子代理：子代理内部再起的任务（owned_by_subagent）由子代理自己等，CLI 不会为它单独汇报
+    if (raw.type === "system" && raw.subtype === "task_started") {
+      if (raw.task_type === "local_agent" && raw.is_backgrounded === true && raw.owned_by_subagent !== true && typeof raw.run_id === "string") (session.awaitedAgents ??= new Set()).add(raw.run_id);
+      if (raw.owned_by_subagent === true && typeof raw.task_id === "string") (session.subagentTasks ??= new Set()).add(raw.task_id);
+      else if (typeof raw.task_id === "string") (session.ownTasks ??= new Set()).add(raw.task_id);
+      return;
+    }
     const turn = session.turn; if (!turn) return this.dropFrame(session, "no-active-turn"); const command = turn.command;
-    if (raw.type === "system" && raw.subtype === "init") { if (typeof raw.session_id !== "string" || !raw.session_id) return this.failTurn(session, "provider_protocol_error", "Claude init 缺 session_id"); session.nativeRef = raw.session_id; turn.initMeta = { ...(typeof raw.model === "string" ? { model: raw.model } : {}), commands: Array.isArray(raw.slash_commands) ? raw.slash_commands.filter((v): v is string => typeof v === "string").slice(0, 300) : [] }; this.emitSessionUpdate(session, turn); return; }
+    if (raw.type === "system" && raw.subtype === "init") { if (typeof raw.session_id !== "string" || !raw.session_id) return this.failTurn(session, "provider_protocol_error", "Claude init 缺 session_id");
+      // 分叉没换出新 id：CLI 在原会话上续写了——绑定它会让两条 Session 抢同一个原生会话，必须当场失败
+      if (session.forkFrom && !session.nativeRef && raw.session_id === session.forkFrom) return this.failTurn(session, "provider_protocol_error", "Claude 分叉未生成新会话（--fork-session 未生效）");
+      session.nativeRef = raw.session_id; session.forkFrom = undefined; turn.initMeta = { ...(typeof raw.model === "string" ? { model: raw.model } : {}), commands: Array.isArray(raw.slash_commands) ? raw.slash_commands.filter((v): v is string => typeof v === "string").slice(0, 300) : [] }; this.emitSessionUpdate(session, turn); return; }
     // status 帧只认压缩语义（legacy 同款：其余 status 一律忽略）。以前把未知 status 误标成
     // api_error（空详情）——每个任务开头蹦一条「⚠️ API 错误」，用户以为坏了，实际什么都没坏
     if (raw.type === "system" && raw.subtype === "status") {
@@ -314,9 +349,11 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     // resume 时 CLI 会补发上一轮遗留的后台任务通知（background shell 没有完成记录）。必须透出：
     // agent 上一轮往往承诺了「后台跑完自动怎样」，而那个进程早随上一轮的 CLI 一起没了
     if (raw.type === "system" && raw.subtype === "task_notification") {
+      if (typeof raw.task_id === "string" && session.subagentTasks?.delete(raw.task_id)) return this.dropFrame(session, "subagent-task-notification");  // 子代理内部的任务，汇报归子代理自己
       const taskId = typeof raw.task_id === "string" ? raw.task_id : "?", status = typeof raw.status === "string" ? raw.status : "unknown";
       const summary = typeof raw.summary === "string" ? raw.summary.replace(/\s+/g, " ").slice(0, 200) : "";
-      return this.notice(turn, "background_task", { message: `上一轮的后台任务 ${taskId} → ${status}${summary ? `：${summary}` : ""}` });
+      const current = !!turn.held || (typeof raw.run_id === "string" && !!session.awaitedAgents?.has(raw.run_id)) || (typeof raw.task_id === "string" && !!session.ownTasks?.delete(raw.task_id));
+      return this.notice(turn, "background_task", { message: `${current ? "后台任务" : "上一轮的后台任务"} ${taskId} → ${status}${summary ? `：${summary}` : ""}` });
     }
     if (raw.type === "control_request" && plain(raw.request) && raw.request.subtype === "can_use_tool") {
       const requestId = typeof raw.request_id === "string" ? raw.request_id : ""; if (!requestId) return this.failTurn(session, "provider_protocol_error", "Claude approval request 缺 request_id");
@@ -365,16 +402,47 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       // 跟用户这条消息无关。认它作 turn 终结 → runTurn 立刻 SIGKILL CLI，而用户的消息还没被 CLI 从
       // stdin 读走，随进程一起蒸发；run 却记成 completed，前端连个提示都没有
       // （2026-08-31 实撞：会话上一轮留了个活着的后台任务，此后每条消息都被静默吞掉，且永久复发）
-      if (plain(raw.origin) && raw.origin.kind === "task-notification") return this.dropFrame(session, "task-notification-result");
+      // 本轮派出的后台子代理的汇报伪 turn（origin.runId = 子代理 run_id）不一样：那是用户在等的结果。
+      // turn 挂起时它就是这一轮的延续；所有子代理都汇报完才算这一轮结束
+      if (plain(raw.origin) && raw.origin.kind === "task-notification") {
+        const awaited = typeof raw.origin.runId === "string" && !!session.awaitedAgents?.delete(raw.origin.runId);
+        if (!turn.held) return this.dropFrame(session, awaited ? "task-notification-result-early" : "task-notification-result");
+      }
       this.flushDelta(turn); const contextWindow = contextWindowOf(raw.modelUsage, [turn.model, turn.initMeta?.model]); turn.queue.push(this.event(command, "usage", { payload: JSON.stringify({ scope: "turn", ...normalizeUsage(raw.usage), ...(contextWindow ? { contextWindow } : {}) }) }, "best-effort"));
+      // 还有后台子代理没汇报：不收尾、不杀 CLI，把 turn 挂起等汇报伪 turn（2026-10-08：以前 result 一到就
+      // SIGKILL，后台子代理跑几秒就跟着 CLI 一起死，agent 承诺的「跑完自动汇报」永远不会来）
+      if (session.awaitedAgents?.size && !turn.interruptRequested) { if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined }); return this.holdTurn(session, turn); }
+      if (turn.held) { if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined }); return this.finishTurn(turn, "completed"); }
       const type = raw.is_error ? (turn.interruptRequested ? "interrupted" : "failed") : "completed"; if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined });
       turn.terminal = true; turn.queue.push(this.event(command, type, type === "interrupted" ? { reason: "user_interrupt" } : type === "failed" ? { reason: "provider_result_error" } : {})); turn.queue.end(); return;
     }
     this.dropFrame(session, "unsupported-frame");
   }
+  private holdTurn(session: ClaudeSession, turn: Turn): void {
+    if (turn.held) return;
+    const count = session.awaitedAgents?.size ?? 0;
+    this.notice(turn, "background_waiting", { message: `还有 ${count} 个后台子代理在跑，跑完会自动汇报；期间发的消息会排到汇报之后（点中断可连同子代理一起停掉）` });
+    const since = Date.now();
+    const check = () => {
+      if (session.turn !== turn || turn.terminal) { if (turn.held) clearInterval(turn.held.timer); return; }
+      const awaited = session.awaitedAgents ?? new Set<string>(), now = Date.now();
+      if (turn.interruptRequested) return this.finishTurn(turn, "interrupted");
+      if (!awaited.size) return this.finishTurn(turn, "completed");
+      if (now - since > this.options.backgroundHoldMaxMs) { this.notice(turn, "background_task", { message: `后台子代理 ${Math.round(this.options.backgroundHoldMaxMs / 60_000)} 分钟仍未汇报，已停止` }); awaited.clear(); return this.finishTurn(turn, "completed"); }
+      // CLI 已不再报这些子代理在跑，又迟迟没有汇报伪 turn：别无限挂着
+      if (![...awaited].some((id) => session.liveAgents?.has(id)) && now - (session.lastFrameAt ?? since) > this.options.backgroundReportGraceMs) { this.notice(turn, "background_task", { message: "后台子代理已结束，但没有收到汇报" }); awaited.clear(); return this.finishTurn(turn, "completed"); }
+    };
+    turn.held = { since, timer: setInterval(check, this.options.backgroundCheckMs) };
+  }
+  /** 后台任务状态只对当前 CLI 进程有效：进程一换（杀掉/崩溃/新会话），旧 run_id 永远等不到汇报 */
+  private resetBackground(session: ClaudeSession): void { session.awaitedAgents = undefined; session.liveAgents = undefined; session.subagentTasks = undefined; session.ownTasks = undefined; session.lastFrameAt = undefined; }
+  private finishTurn(turn: Turn, type: "completed" | "interrupted"): void {
+    if (turn.terminal) return; if (turn.held) clearInterval(turn.held.timer);
+    this.flushDelta(turn); turn.terminal = true; turn.queue.push(this.event(turn.command, type, type === "interrupted" ? { reason: "user_interrupt" } : {})); turn.queue.end();
+  }
   private flushDelta(turn: Turn): void { if (!turn.delta) return; const text = turn.delta; turn.delta = ""; this.metrics.aggregatedDeltas++; turn.queue.push(this.event(turn.command, "delta", { payload: JSON.stringify({ role: "assistant", text }) }, "best-effort")); }
   private emitSessionUpdate(session: ClaudeSession, turn: Turn): void { if (!turn.started || turn.sessionUpdateEmitted || !session.nativeRef || !turn.initMeta) return; turn.sessionUpdateEmitted = true; turn.queue.push(this.event(turn.command, "session-updated", { nativeRef: session.nativeRef, payload: JSON.stringify({ nativeRef: session.nativeRef, ...turn.initMeta }) })); }
-  private notice(turn: Turn, category: "rate_limited" | "auth_expired" | "api_error" | "compacting" | "compact_failed" | "compact_ok" | "stderr" | "background_task", detail: Record<string, unknown>): void { this.metrics.notices++; turn.queue.push(this.event(turn.command, "provider-notice", { payload: JSON.stringify({ category, ...detail }) }, "best-effort")); }
+  private notice(turn: Turn, category: "rate_limited" | "auth_expired" | "api_error" | "compacting" | "compact_failed" | "compact_ok" | "stderr" | "background_task" | "background_waiting", detail: Record<string, unknown>): void { this.metrics.notices++; turn.queue.push(this.event(turn.command, "provider-notice", { payload: JSON.stringify({ category, ...detail }) }, "best-effort")); }
   // 丢帧必须可观测（SELF.md 规则 9），但「每帧一行」把可观测性做成了噪音：预期内的 partial 帧
   // 一天写 7 万行，真正值钱的「没见过的帧」信号反而淹死在里面。改成按 reason 分桶计数 +
   // 里程碑采样：类型和量级都还在，体积降三个数量级。计数器本身仍是每帧都涨的，不受采样影响。
@@ -385,7 +453,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     emitCoreLog({ event: "claude-frame-dropped", moduleType: "provider", moduleId: this.id, operation: "decode-frame", runId: session.turn?.command.runId, sessionId: session.sessionId, eventId: session.turn?.command.commandId, errorClass: "PROVIDER_FRAME_DROPPED", msg: `reason=${reason} seen=${seen} total=${session.droppedFrames}` });
   }
   private onExit(session: ClaudeSession, proc: Bun.Subprocess, generation: number, code: number): void {
-    if (session.proc !== proc || session.generation !== generation) return; session.proc = undefined; const turn = session.turn; if (!turn || turn.terminal) return;
+    if (session.proc !== proc || session.generation !== generation) return; session.proc = undefined; this.resetBackground(session); const turn = session.turn; if (!turn || turn.terminal) return;
     if (session.stderrTail) this.notice(turn, "stderr", { tail: session.stderrTail }); turn.terminal = true; turn.queue.push(this.event(turn.command, turn.interruptRequested ? "interrupted" : "failed", turn.interruptRequested ? { reason: "user_interrupt", exitCode: code } : { reason: "provider_exit", exitCode: code })); turn.queue.end();
   }
   private failTurn(session: ClaudeSession, reason: RunnerReasonCode, detail: string): void { const turn = session.turn; if (!turn || turn.terminal) return; this.notice(turn, "api_error", { message: detail.slice(0, 2_000) }); turn.terminal = true; turn.queue.push(this.event(turn.command, "failed", { reason })); turn.queue.end(); }
@@ -397,10 +465,10 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
   private rejectControl(session: ClaudeSession, requestId: string, error: Error): void { const wait = session.controls.get(requestId); if (!wait) return; clearTimeout(wait.timer); session.controls.delete(requestId); wait.reject(error); }
   private rejectControls(session: ClaudeSession, error: Error): void { for (const id of [...session.controls.keys()]) this.rejectControl(session, id, error); }
   private write(session: ClaudeSession, value: string): boolean { try { const stdin = session.proc?.stdin as any; if (!stdin) return false; const result = stdin.write(value); stdin.flush?.(); return result !== false && result !== 0; } catch { return false; } }
-  private async stopProcess(session: ClaudeSession, settleActive: boolean): Promise<void> { if (session.turn && !settleActive) throw providerError("PROVIDER_SESSION_BUSY", "不能停止 active Claude turn"); const proc = session.proc; if (!proc) return; session.proc = undefined; session.generation++; try { proc.kill("SIGKILL"); } catch {} await proc.exited.catch(() => -1); }
+  private async stopProcess(session: ClaudeSession, settleActive: boolean): Promise<void> { if (session.turn && !settleActive) throw providerError("PROVIDER_SESSION_BUSY", "不能停止 active Claude turn"); const proc = session.proc; if (!proc) return; session.proc = undefined; session.generation++; this.resetBackground(session); try { proc.kill("SIGKILL"); } catch {} await proc.exited.catch(() => -1); }
   private async stopTurnProcess(session: ClaudeSession, turn: Turn): Promise<void> {
     const proc = turn.proc; if (!proc || session.turn !== turn || session.proc !== proc || session.generation !== turn.generation) return;
-    session.proc = undefined; session.generation++; try { proc.kill("SIGKILL"); } catch {} await proc.exited.catch(() => -1);
+    session.proc = undefined; session.generation++; this.resetBackground(session); try { proc.kill("SIGKILL"); } catch {} await proc.exited.catch(() => -1);
   }
   private sessionHash(sessionId: string): string { return new Bun.CryptoHasher("sha256").update(sessionId).digest("hex").slice(0, 12); }
 }

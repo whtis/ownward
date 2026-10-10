@@ -12,11 +12,13 @@ import { clearInitialHistory, initialHistorySignature, readInitialHistory, readI
 import { buildCodexResumeCommand } from "../../sessions/provider-home.ts";
 import { commandSessionImages } from "./session-images.ts";
 import { validateImageInputs } from "../../image-input.ts";
-import { assertProviderOptions, DEFAULT_CODEX_MODEL } from "../../session-options.ts";
+import { assertProviderOptions, defaultCodexModel } from "../../session-options.ts";
 import { addRule, logDecision } from "../../approval.ts";
 import { approvalRuleToRemember } from "./approval-sweep.ts";
 
 export type SessionMigrationMode = "off" | "runner";
+/** 分叉时拷进新会话界面的历史上限：只影响显示，原生上下文由 Provider 完整分叉 */
+const FORK_HISTORY_LIMIT = 2_000;
 export interface SessionServiceOptions { mode?: SessionMigrationMode; roots?: string[]; taskIds?: string[]; }
 const ACTIVE_SESSION_CONSUMERS = new Map<string, Promise<void>>();
 // consume 循环是 daemon 向 Runner 拉事件的**唯一**节奏源：turn 跑着的整段时间它都在转。
@@ -90,7 +92,7 @@ export class KernelSessionService implements SessionService {
   private validateAccessGrant(access: KernelGrantedAccess): void { if ((access === "full-access" || access === "bypass") && cfg.architecture?.allowFullAccess !== true) throw new KernelSessionPolicyError("SESSION_ACCESS_NOT_GRANTED", "Kernel 配置未授予 full access"); }
   private providerHome(providerId:"claude"|"codex"|"codebuddy",value:string|undefined,roots:string[]):string|undefined { if(value===undefined)return undefined;if(providerId!=="codex")throw new KernelSessionPolicyError("SESSION_PROVIDER_HOME_INVALID","仅 Codex 支持 providerHome");return validateDirectoryGrant(expandCodexHome(value),roots); }
   private providerOptions(providerId:"claude"|"codex"|"codebuddy",model?:string,effort?:string):void{try{assertProviderOptions(providerId,model,effort);}catch(error){throw new KernelSessionPolicyError("PROVIDER_INPUT_INVALID",error instanceof Error?error.message:"options 非法");}}
-  private effectiveOptions(providerId:"claude"|"codex"|"codebuddy",model?:string,effort?:string,previous?:SessionRecord):{model?:string;effort?:string}{const same=previous?.providerId===providerId,effectiveModel=model??(same?previous.model:undefined)??(providerId==="codex"?(cfg.llm?.codexModel||DEFAULT_CODEX_MODEL):undefined),effectiveEffort=effort??(same?previous.effort:undefined);this.providerOptions(providerId,effectiveModel,effectiveEffort);return{...(effectiveModel?{model:effectiveModel}:{}),...(effectiveEffort?{effort:effectiveEffort}:{})};}
+  private effectiveOptions(providerId:"claude"|"codex"|"codebuddy",model?:string,effort?:string,previous?:SessionRecord):{model?:string;effort?:string}{const same=previous?.providerId===providerId,effectiveModel=model??(same?previous.model:undefined)??(providerId==="codex"?defaultCodexModel(cfg.llm?.codexModel):undefined),effectiveEffort=effort??(same?previous.effort:undefined);this.providerOptions(providerId,effectiveModel,effectiveEffort);return{...(effectiveModel?{model:effectiveModel}:{}),...(effectiveEffort?{effort:effectiveEffort}:{})};}
   private async ensureInitialHistory(s: SessionRecord,force=false): Promise<void> {
     const prior=readInitialHistorySnapshot(this.dataRoot,s.id);if(!s.nativeRef||(prior?.status==="ok"&&prior.nativeRef===s.nativeRef)||s.source==="native")return;if(!force&&prior?.nextRetryAt&&prior.nativeRef===s.nativeRef&&Date.now()<Date.parse(prior.nextRetryAt)){this.historyMarkers.set(s.id,{role:"system",text:"历史会话暂时无法读取；稍后自动重试。",ts:new Date().toISOString()});return;}
     let messages: import("./types.ts").DevMsg[] = [];
@@ -323,6 +325,32 @@ inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?
     let moved:ReturnType<SessionRepository["handoff"]>;try{moved=this.repo.handoff({taskId,expectedSessionId:old.id,providerId:input.providerId,...options,reason});}catch(error){if(error instanceof SessionRepositoryError&&error.message==="SESSION_HANDOFF_STALE")throw new KernelSessionPolicyError("SESSION_HANDOFF_STALE","会话已被另一个接力请求更新，请刷新后重试");throw error;}
     try{const receipt=await this.submitTurn(moved.current,taskId,{text:prompt,clientMutationId:`handoff:${moved.previous.id}:${input.providerId}`});this.stateCache.delete(moved.previous.id);this.stateCache.delete(moved.current.id);return{...receipt,sessionId:moved.current.id,providerId:input.providerId};}
     catch(error:any){if(error?.outcomeUnknown!==true){if(typeof error?.commandId==="string")this.bridge.abandon(error.commandId,String(error?.code||"RUNNER_SUBMIT_REJECTED"));this.repo.rollbackHandoff(moved.current.id);}throw error;}
+  }
+  /** 分叉：新开一条独立 Session，带着原会话的完整上下文与配置（Provider/模型/深度/权限/目录）继续。
+   *  原会话**只读不写**——不判忙、不 reconcile、不抢输入权、不动它的队列和审批：用户要的就是两边各干各的。
+   *  原生上下文的分叉推迟到新会话首轮（inputForRunner 带 forkFrom）：claude 用 --resume <ref> --fork-session，
+   *  原会话本轮在跑时 adapter 先等它这一轮结束，免得把半截工具调用分叉过去；codex 复制 rollout 截到最后一个完整轮次。
+   *  界面历史这里当场拷一份（初始历史快照），新会话打开就能看到分叉前聊过什么。 */
+  async fork(id:string,input:{taskId:string},grants:KernelSessionGrants):Promise<KernelSessionDto>{
+    if(this.mode!=="runner")throw new KernelSessionPolicyError("SESSION_RUNNER_DISABLED","会话分叉只支持 Runner Session");
+    const origin=this.recoverHistoryReset(this.session(id));this.assertOperable(origin);
+    if(origin.pendingHistoryReset)throw new KernelSessionPolicyError("SESSION_HISTORY_RESET_PENDING","原会话正在切换新会话，稍后再分叉");
+    if(!origin.nativeRef)throw new KernelSessionPolicyError("SESSION_FORK_NATIVE_REF_REQUIRED","原会话还没有可分叉的原生会话（至少要跑完一轮）");
+    this.runner.require(origin.providerId,"fork");
+    // codex 没有原生分叉：复制 rollout 依赖 `codex exec resume` 仍按文件找线程，未在真 CLI 上验证前默认关
+    if(origin.providerId==="codex"&&cfg.providers?.codex?.fork!==true)throw new KernelSessionPolicyError("SESSION_FORK_UNSUPPORTED","Codex 会话分叉尚未启用（config.json 设 providers.codex.fork=true 开启）");
+    const access=origin.access??"workspace";this.validateAccessGrant(access);
+    // 新会话同样过目录授权：原会话的目录可能已经不在允许范围里了
+    validateDirectoryGrant(origin.cwd,grants.roots);for(const dir of origin.extraDirs??[])validateDirectoryGrant(dir,grants.roots);
+    if(origin.providerHome)this.providerHome(origin.providerId,origin.providerHome,grants.roots);
+    const history=this.projectHandoffChain(origin,this.runnerState(origin)).messages,kept=history.slice(-FORK_HISTORY_LIMIT),at=new Date().toISOString();
+    let created:SessionRecord;
+    try{created=this.repo.fork({taskId:input.taskId,originId:origin.id});}
+    catch(error){if(error instanceof SessionRepositoryError&&/^SESSION_FORK_/.test(error.message))throw new KernelSessionPolicyError(error.message,error.message==="SESSION_FORK_TASK_EXISTS"?"分叉目标任务已存在":"原会话还没有可分叉的原生会话");throw error;}
+    writeInitialHistory(this.dataRoot,{sessionId:created.id,providerId:created.providerId,nativeRef:origin.nativeRef,messages:[
+      ...(history.length>kept.length?[{role:"system" as const,name:"history",text:`（更早的 ${history.length-kept.length} 条历史未拷贝显示，分叉后的上下文仍是完整的）`,ts:kept[0]?.ts??at}]:[]),
+      ...kept,{role:"system",name:"fork",text:"已从原会话分叉：以上是分叉时的历史，之后的对话与原会话互不影响",ts:at}]});
+    return this.dto(this.session(created.id));
   }
   /** 同 Provider 就地改模型/思考深度。两家 CLI 原生都支持带着新参数续聊（claude --resume 加 --model/--effort；
    *  codex exec -m … resume <thread>，2026-09-05 实测 rollout 里逐轮记录的 model 随之切换），所以不走跨 Provider 的
