@@ -77,7 +77,7 @@ function onFrame(frame: any) {
     if (text === "APPROVAL") { waiting = "approval"; write({ type: "control_request", request_id: "approval-1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "git push" } } }); return; }
     // 后台子代理（2026-10-08 真 CLI 抓帧）：task_started + background_tasks_changed → 主线程 result；
     // 子代理跑完 → task_notification + background_tasks_changed[] → 独立的汇报伪 turn（init + result(origin.runId)）
-    if (text === "BG_AGENT" || text === "BG_AGENT_SILENT" || text === "BG_AGENT_HANG") {
+    if (text === "BG_AGENT" || text === "BG_AGENT_SILENT" || text === "BG_AGENT_HANG" || text === "BG_AGENT_SLOW_REPORT") {
       const runId = `bg-run-${text}`, task = { task_id: "agent-1", run_id: runId, task_type: "local_agent", subagent_type: "general-purpose", description: "fake subagent" };
       write({ type: "system", subtype: "background_tasks_changed", tasks: [task] });
       write({ type: "system", subtype: "task_started", ...task, tool_use_id: "toolu_agent", is_backgrounded: true, spawn_depth: 1 });
@@ -91,7 +91,9 @@ function onFrame(frame: any) {
         write({ type: "system", subtype: "background_tasks_changed", tasks: [] });
         initialized = false; init();
         write({ type: "assistant", message: { model: "fake-claude", usage: { input_tokens: 1, output_tokens: 1 }, content: [{ type: "text", text: `report:PONG:pid:${process.pid}` }] } });
-        write({ type: "result", subtype: "success", is_error: false, origin: { kind: "task-notification", producer: "session-task", runId }, usage: { input_tokens: 1, output_tokens: 1 } });
+        const finish = () => write({ type: "result", subtype: "success", is_error: false, origin: { kind: "task-notification", producer: "session-task", runId }, usage: { input_tokens: 1, output_tokens: 1 } });
+        // 汇报伪 turn 里主线程接着跑一个长时间静默的工具（真 CLI 里 verify.sh 一跑一分多钟不出帧）
+        if (text === "BG_AGENT_SLOW_REPORT") setTimeout(finish, Number(process.env.FAKE_CLAUDE_SLOW_REPORT_MS ?? 600)); else finish();
       }, 300);
       return;
     }

@@ -3,7 +3,7 @@
 // （第一条停在第 3 分钟的「还在读代码」，最后一条才是真结果）——取材时先看到哪条全凭运气。
 // 覆盖语义：按 key 找到旧条目整块换掉；找不到 key、或 key 不在任何 `## ` 块里，都退化成追加。
 import { describe, expect, test } from "bun:test";
-import { upsertEntry } from "./capture.ts";
+import { removeEntry, upsertEntry } from "./capture.ts";
 
 const HEAD = "---\ndate: 2026-08-11\nscope: work\ntype: inbox\n---\n\n# 2026-08-11\n\n";
 
@@ -127,5 +127,19 @@ describe("resolveScope", () => {
   });
   test("没触达任何仓库 → 原样", () => {
     expect(resolveScope("private", "home", null, [])).toEqual({ scope: "private", slug: "home", repos: [] });
+  });
+});
+
+describe("removeEntry（upsertEntry 的反操作）", () => {
+  test("删掉含 key 的整块，前后邻居与 frontmatter 不动；找不到 key 原样返回", () => {
+    const before = HEAD + entry("20260811-aaaa", "前一条", "A") + entry("20260811-63ka", "要撤走的", "X") + entry("20260811-zzzz", "后一条", "Z");
+    const out = removeEntry(before, "`20260811-63ka`");
+    expect(out).not.toContain("要撤走的");
+    expect(out).toContain("前一条");
+    expect(out).toContain("后一条");
+    expect(out.startsWith(HEAD)).toBe(true);
+    expect(out.match(/^## /gm)?.length).toBe(2);
+    expect(removeEntry(before, "`nope`")).toBe(before);
+    expect(removeEntry("没有标题的内容 `20260811-63ka`\n", "`20260811-63ka`")).toBe("没有标题的内容 `20260811-63ka`\n");
   });
 });

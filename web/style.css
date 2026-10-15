@@ -597,6 +597,13 @@ textarea { resize: vertical; }
 .rl-group { margin: 12px 3px 2px; padding: 0 8px; font-size: 11.5px; font-weight: 600; color: var(--text-tertiary); }
 .tag[data-kind="lead"] { color: var(--accent); background: var(--accent-soft); }
 .tag[data-kind="expert"] { color: var(--success); background: color-mix(in srgb, var(--success) 13%, transparent); }
+.tag[data-kind="auto"] { color: var(--text-secondary); background: var(--surface-2); }
+/* 角色页顶部的跨项目建议：人点「建」才建，所以做成安静的卡片，不抢列表的视线 */
+.rl-suggest { margin: 4px 3px 10px; padding: 10px 11px; border-radius: var(--radius-row); background: var(--accent-soft); }
+.rl-suggest-head { font-size: 11.5px; font-weight: 650; color: var(--accent); margin-bottom: 6px; }
+.rl-suggest-item + .rl-suggest-item { margin-top: 9px; padding-top: 9px; border-top: 1px solid color-mix(in srgb, var(--accent) 18%, transparent); }
+.rl-suggest-item .t { font-size: 13px; font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
+.rl-suggest-item .foot { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
 .role-item-main { min-width: 0; flex: 1; }
 .role-item .t { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .role-item .m { font-size: 11.5px; color: var(--text-secondary); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -821,6 +828,9 @@ textarea { resize: vertical; }
 .page-head p { margin-top: 4px; color: var(--text-tertiary); font-size: 11.5px; }
 .page-head.compact { min-height: 62px; }
 .page-head .tools { display: flex; gap: 6px; margin-top: 8px; }
+/* 角色列表头三个按钮（含归档 / 新建领域角色 / 新建角色）：列窄时整颗换行，别把字拆成两行 */
+.roles-list-col .page-head .tools { flex-wrap: wrap; justify-content: flex-end; }
+.roles-list-col .page-head .tools .button { white-space: nowrap; }
 .page-count { margin-top: 18px; color: var(--text-tertiary); font: 11px/1 var(--font-mono); }
 .layout-feed { display: block; overflow: hidden; }
 .feed-page { width: min(100%, 1120px); height: 100%; margin: 0 auto; display: flex; flex-direction: column; min-height: 0; }
@@ -840,6 +850,8 @@ textarea { resize: vertical; }
 .tasks-detail-kicker { color: var(--text-tertiary); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
 .tasks-back { display: none; flex: none; }
 .task-project { color: var(--text-tertiary); font-size: 11.5px; }
+.task-role { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.handoff-divider[data-kind="role"] { color: var(--text-tertiary); font-weight: 560; }
 .session-dirs,.dir-chips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .dir-chip { display:inline-flex; align-items:center; gap:5px; max-width:280px; padding:3px 8px; border:1px solid var(--border-subtle); border-radius:999px; background:var(--surface-1); color:var(--text-secondary); font-size:11px; white-space:nowrap; }
 .dir-chip.primary { border-color:var(--accent); color:var(--text-primary); }
@@ -850,6 +862,18 @@ textarea { resize: vertical; }
 .extra-dir-row > .label-hint { flex:none; }
 .extra-dir-row .dir-chips { flex:1 1 140px; min-width:0; }
 .extra-dir-row .dir-chip { max-width:100%; box-sizing:border-box; }
+/* 派发弹窗「谁来接」：一行选择 + 一句话说明会带上谁的记忆；跨项目时下面多一块询问 */
+.work-role-row { display:flex; align-items:center; gap:8px; min-width:0; margin-top:8px; flex-wrap:wrap; }
+.work-role-row > .label-hint { flex:none; }
+.work-role-row select { width:auto; min-width:150px; max-width:240px; margin:0; }
+.work-role-hint { flex:1 1 160px; min-width:0; font-size:11.5px; color:var(--text-tertiary); overflow-wrap:anywhere; }
+.work-role-hint[data-tone="new"] { color:var(--accent); }
+.work-role-hint[data-tone="warn"] { color:var(--warning); }
+.work-role-cross { margin-top:8px; padding:9px 11px; border-radius:var(--radius-row); background:var(--accent-soft, var(--surface-2)); color:var(--text-secondary); font-size:12px; line-height:1.5; }
+.work-role-cross .row { margin-top:7px; gap:6px; flex-wrap:wrap; }
+.work-role-cross .quiet { color:var(--text-tertiary); }
+.work-role-pick { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.work-role-pick[hidden] { display:none; }
 /* 派任务弹窗的「最近目录」：横向一行可滚，点即填入目录框；不随目录框里已有的值过滤 */
 .recent-dirs { flex-wrap:nowrap; overflow-x:auto; margin-top:6px; padding-bottom:2px; scrollbar-width:none; }
 .recent-dirs::-webkit-scrollbar { display:none; }

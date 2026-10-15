@@ -46,15 +46,17 @@ switch (cmd) {
     break;
   }
   case "work": {
-    // own work <项目目录> <任务描述> [--bg] [--codex] [--worktree|--no-worktree] [--branch <名>]
+    // own work <项目目录> <任务描述> [--bg] [--codex] [--worktree|--no-worktree] [--branch <名>] [--role <角色id>|--no-role]
     const rest = process.argv.slice(3);
     const flags = new Set(rest.filter((a) => a.startsWith("--")));
-    const branchIdx = rest.indexOf("--branch");
-    const branch = branchIdx >= 0 ? rest[branchIdx + 1] : undefined;
-    const pos = rest.filter((a, i) => !a.startsWith("--") && (branchIdx < 0 || i !== branchIdx + 1));
+    const valueOf = (flag: string) => { const i = rest.indexOf(flag); return i >= 0 ? rest[i + 1] : undefined; };
+    const branch = valueOf("--branch");
+    const roleArg = valueOf("--role");
+    const takesValue = new Set(["--branch", "--role"].map((f) => rest.indexOf(f)).filter((i) => i >= 0).map((i) => i + 1));
+    const pos = rest.filter((a, i) => !a.startsWith("--") && !takesValue.has(i));
     const [dir, ...taskParts] = pos;
     if (!dir || !taskParts.length) {
-      console.error('用法: own work <项目目录> "<任务描述>" [--bg] [--codex] [--worktree|--no-worktree] [--branch <名>]');
+      console.error('用法: own work <项目目录> "<任务描述>" [--bg] [--codex] [--worktree|--no-worktree] [--branch <名>] [--role <角色id>|--no-role]');
       process.exit(1);
     }
     const t = await startWork(dir, taskParts.join(" "), {
@@ -62,8 +64,12 @@ switch (cmd) {
       codex: flags.has("--codex"),
       worktree: flags.has("--worktree") ? true : flags.has("--no-worktree") ? false : undefined,
       branch,
+      // 与工作台派发同一套：缺省按目录找项目 Owner（没有就建），--no-role 不带
+      role: flags.has("--no-role") ? "none" : roleArg || "auto",
     });
     console.log(`✅ [${t.id}] ${t.mode} @ ${t.cwd}${t.branch ? ` (${t.branch})` : ""}`);
+    if (t.roleName) console.log(`   角色: ${t.roleName}（${t.roleId}）`);
+    else if (t.roleNote) console.log(`   没带上角色: ${t.roleNote}`);
     if (t.mode !== "terminal") console.log(`   日志: ${t.logFile}\n   结束后 daemon 会自动通知并收割`);
     else console.log(`   结束后跑: own done ${t.id}`);
     break;

@@ -7,8 +7,22 @@
 //   type=lead    职能负责人，管跨项目的原则/决策，不绑主项目、不挂上级；
 //   type=project 项目专家，一线开发入口，必须有主项目（且必在关联项目里），可选挂一个同 scope 的 lead。
 // 旧 role.json 没有 type 字段 → 按 lead 读（V1 的角色就是职能视角，语义不变）。
-// 项目知识不复制进角色：项目专家的 Context Pack 只是「强制注入主项目 README」，
+// 项目知识不复制进角色：项目专家的 Context Pack 只是「强制注入主项目的记忆摘要」，
 // 项目自己的正式记忆与候选都归 project-memory.ts 管（<scope>/projects/<slug>/）。
+//
+// V3（自动角色，见 role-auto.ts）：角色可以由 Ownward 自己建——往一个仓库派任务就有它的项目 Owner，
+// 跨项目的活提示建跨项目角色。为此 manifest 多两个键：
+//   origin = "auto"   Ownward 建的（只用于展示，与手建的角色同一套校验、同一套约束）；
+//   dirs   = 绝对路径   这个角色在本机的工作目录（派任务时第一个当主目录，其余当附加目录）。
+// 两个键都是可选的：旧 role.json 读出来 origin="" / dirs=[]，行为不变。
+//
+// V4（领域角色 + 曾用名）：
+//   origin = "domain"  领域角色——管「没有仓库」的那类活（业务运营、设备运维、本机工具链…）。
+//                      形状上就是一个项目专家：主项目是 vault 里一个没有代码目录的虚拟项目
+//                      （<scope>/projects/<slug>/，README + 收割写进来的 log/），所以记忆包、收割、
+//                      日报全走现成的项目逻辑；scope 建的时候定死，工作的活不会再落进 private。
+//   history = slug[]   曾用名/前身项目（同 scope）：项目改过名（cockpit → ownward），旧名字下的
+//                      README / 决策 / 日志作为「历史记录」进记忆包，与现状冲突时以现状为准。
 //
 // 三条硬约束（与 memory 层同源，别绕）：
 //   1. scope 物理隔离——角色只读自己 scope 下的项目 README，绝不跨 work/private 取材；
@@ -22,8 +36,9 @@
 //      （另一份的记忆会凭空消失，是最难查的一类 bug）。
 import { isStrictlyWithin } from "./path-within.ts";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "fs";
-import { join } from "path";
-import { ALL_SCOPES, projectDir, projectsDir, roleDir, rolesDir, VAULT_ROOT, type Scope } from "./paths.ts";
+import { isAbsolute, join } from "path";
+import { ALL_SCOPES, projectsDir, roleDir, rolesDir, VAULT_ROOT, type Scope } from "./paths.ts";
+import { hasEntries, projectMemoryDigest } from "./project-knowledge.ts";
 import { fmt, log } from "./util.ts";
 
 // ---- 白名单与配额（API 入参一律先过这里，不接受任意路径/任意长度） ----
@@ -38,11 +53,24 @@ export type PromoteTarget = typeof PROMOTE_TARGETS[number];
 /** 组织里的两种角色。顺序即前端展示顺序，别乱调 */
 export const ROLE_TYPES = ["lead", "project"] as const;
 export type RoleType = typeof ROLE_TYPES[number];
+/** 角色来源：空串=人建的，auto=Ownward 自动建的（role-auto.ts），domain=领域角色（没有仓库的那类活）。
+ *  auto 只影响展示；domain 另有一条形状约束（必须是项目专家形状，见 checkShape） */
+export const ROLE_ORIGINS = ["", "auto", "domain"] as const;
+/** 这些段被 /api/roles/<段> 的固定路由占了：同名角色的详情会永远打不开，建的时候就拒 */
+const RESERVED_IDS = new Set(["projects", "suggestions", "resolve", "owner", "cross", "domain"]);
 
-const MAX_NAME = 30, MAX_DESC = 200, MAX_INSTRUCTIONS = 2000, MAX_PROJECTS = 20;
+const MAX_NAME = 30, MAX_DESC = 200, MAX_INSTRUCTIONS = 2000, MAX_PROJECTS = 20, MAX_DIRS = 20;
 const MAX_PARENT_DEPTH = 8;   // 父链走查上限：正常只有两层，纯粹是防人工改文件造出的环/长链
 const MAX_CANDIDATE_TEXT = 1000, MAX_EVIDENCE = 2000, MAX_CANDIDATES = 200;
-const CAP_PRINCIPLES = 4000, CAP_DECISIONS = 4000, CAP_BACKLOG = 2000, CAP_README = 3000;
+
+/** 记忆包的两档预算（字数）。task 档要塞进任务首条消息：太大会把 CC transcript 的首行撑过
+ *  cc-sessions 的 24KB 头部窗口，旁观列表就认不出这是 Ownward 自己的引擎会话。
+ *  project = 所有项目段合计；primaryShare = 有附加项目时主项目占的比例。 */
+const PACK_BUDGETS = {
+  chat: { principles: 4000, decisions: 4000, backlog: 2000, project: 16000, primaryShare: 0.5, history: 6000, pointers: false },
+  task: { principles: 1500, decisions: 1500, backlog: 800, project: 6500, primaryShare: 0.6, history: 1800, pointers: true },
+} as const;
+export type PackAudience = keyof typeof PACK_BUDGETS;
 
 // ---- 类型 ----
 export interface RoleFields {
@@ -58,6 +86,12 @@ export interface RoleFields {
   parentRoleId: string;
   /** 仅项目专家必填：主项目 slug，必在 projects 里；对话强制注入它的 README */
   primaryProject: string;
+  /** 本机工作目录（绝对路径）：派任务时 dirs[0] 是主目录、其余是附加目录。机器相关，用时再校验存在与授权 */
+  dirs: string[];
+  /** ""=人建的 / "auto"=Ownward 自动建的 / "domain"=领域角色 */
+  origin: string;
+  /** 曾用名/前身项目 slug（同 scope，不与 projects 重叠）：记忆包里作为历史记录注入 */
+  history: string[];
 }
 
 /** 落盘的 role.json（不含 scope：目录位置就是 scope，两处记会不一致） */
@@ -111,6 +145,15 @@ export type Result<T> = ({ ok: true } & T) | Fail;
 const fail = (code: Fail["code"], msg: string): Fail => ({ ok: false, code, msg });
 const isFail = (v: unknown): v is Fail => !!v && (v as any).ok === false;
 
+/** 展示叫法（记忆包、派发提示、web/手机都用这一套）：自动建的项目专家就是项目 Owner，自动建的 lead
+ *  管的是几个项目之间的事，领域角色管没有仓库的那类活——都不是人建的「专家 / 职能负责人」 */
+export function roleKindLabel(r: Pick<RoleFields, "type" | "origin">): string {
+  if (r.origin === "domain") return "领域角色";
+  return r.type === "project"
+    ? (r.origin === "auto" ? "项目 Owner" : "项目专家")
+    : (r.origin === "auto" ? "跨项目角色" : "职能负责人");
+}
+
 // ---- 可注入 vault 根（只给单测用；生产恒为 paths.ts 的 VAULT_ROOT） ----
 // 注入的是"根"而不是整套路径推导——测试与生产跑的是同一条 rolesDir/roleDir 代码路径，
 // 不会出现"测试过了但真实目录布局不对"。
@@ -152,7 +195,7 @@ function normTime(v: unknown): string | null {
   return Number.isNaN(t) ? null : new Date(t).toISOString();
 }
 
-const STR_FIELDS = ["name", "description", "icon", "color", "instructions", "type", "parentRoleId", "primaryProject"] as const;
+const STR_FIELDS = ["name", "description", "icon", "color", "instructions", "type", "parentRoleId", "primaryProject", "origin"] as const;
 
 /** null = 这个目录里没有 role.json（不是角色目录，不算丢数据）
  *  Fail = 有但不可用（坏 JSON / 字段越界），调用方必须显式跳过或报错，不许当没看见
@@ -175,6 +218,12 @@ function loadManifest(dir: string, id: string): { ok: true; manifest: RoleManife
   }
   if (raw.projects !== undefined && (!Array.isArray(raw.projects) || raw.projects.some((x: unknown) => typeof x !== "string"))) {
     return fail("invalid", "role.json 的 projects 必须是字符串数组");
+  }
+  if (raw.dirs !== undefined && (!Array.isArray(raw.dirs) || raw.dirs.some((x: unknown) => typeof x !== "string"))) {
+    return fail("invalid", "role.json 的 dirs 必须是字符串数组");
+  }
+  if (raw.history !== undefined && (!Array.isArray(raw.history) || raw.history.some((x: unknown) => typeof x !== "string"))) {
+    return fail("invalid", "role.json 的 history 必须是字符串数组");
   }
 
   const f2 = normalizeFields(raw, DEFAULTS);   // 缺的键取默认值，给了就必须合法
@@ -206,16 +255,32 @@ const fieldsOf = (m: RoleManifest): RoleFields => ({
   name: m.name, description: m.description, icon: m.icon,
   color: m.color, projects: [...(m.projects || [])], instructions: m.instructions,
   type: m.type || "lead", parentRoleId: m.parentRoleId || "", primaryProject: m.primaryProject || "",
+  dirs: [...(m.dirs || [])], origin: m.origin || "", history: [...(m.history || [])],
 });
 
 const DEFAULTS: RoleFields = {
   name: "", description: "", icon: "star", color: "#5b8def", projects: [], instructions: "",
   type: "lead", parentRoleId: "", primaryProject: "",   // 旧 role.json 缺这三个键 → 就是 V1 的职能负责人
+  dirs: [], origin: "",                                 // V2 及以前没有这两个键 → 人建的、没登记工作目录
+  history: [],                                          // V3 及以前没有 → 没有曾用名
 };
+
+/** 项目 slug 列表的统一校验（projects / history 同一套）：白名单、去重、限量 */
+function slugList(raw: unknown, key: string, tooMany: string): string[] | Fail {
+  if (!Array.isArray(raw)) return fail("invalid", `${key} 必须是数组`);
+  const seen = new Set<string>();
+  for (const x of raw) {
+    const slug = String(x ?? "").trim().toLowerCase();
+    if (!SLUG_RE.test(slug)) return fail("invalid", `项目 slug 不合法：${String(x).slice(0, 40)}`);
+    seen.add(slug);   // 多对多关系去重
+  }
+  if (seen.size > MAX_PROJECTS) return fail("invalid", tooMany);
+  return [...seen];
+}
 
 /** 只处理 input 里显式给出的键（update 的 patch 语义）；一处校验，create/update 共用 */
 function normalizeFields(input: any, base: RoleFields): RoleFields | Fail {
-  const out: RoleFields = { ...base, projects: [...base.projects] };
+  const out: RoleFields = { ...base, projects: [...base.projects], dirs: [...base.dirs], history: [...base.history] };
 
   if (input?.name !== undefined) {
     const name = String(input.name ?? "").trim().replace(/\s+/g, " ");
@@ -243,15 +308,14 @@ function normalizeFields(input: any, base: RoleFields): RoleFields | Fail {
     out.instructions = ins;
   }
   if (input?.projects !== undefined) {
-    if (!Array.isArray(input.projects)) return fail("invalid", "projects 必须是数组");
-    const seen = new Set<string>();
-    for (const raw of input.projects) {
-      const slug = String(raw ?? "").trim().toLowerCase();
-      if (!SLUG_RE.test(slug)) return fail("invalid", `项目 slug 不合法：${String(raw).slice(0, 40)}`);
-      seen.add(slug);   // 多对多关系去重
-    }
-    if (seen.size > MAX_PROJECTS) return fail("invalid", `最多关联 ${MAX_PROJECTS} 个项目`);
-    out.projects = [...seen];
+    const list = slugList(input.projects, "projects", `最多关联 ${MAX_PROJECTS} 个项目`);
+    if (isFail(list)) return list;
+    out.projects = list;
+  }
+  if (input?.history !== undefined) {
+    const list = slugList(input.history, "history", `曾用名最多 ${MAX_PROJECTS} 个`);
+    if (isFail(list)) return list;
+    out.history = list;
   }
   if (input?.type !== undefined) {
     const t = String(input.type ?? "").trim();
@@ -269,12 +333,37 @@ function normalizeFields(input: any, base: RoleFields): RoleFields | Fail {
     if (slug && !SLUG_RE.test(slug)) return fail("invalid", `主项目 slug 不合法：${String(input.primaryProject).slice(0, 40)}`);
     out.primaryProject = slug;
   }
+  if (input?.dirs !== undefined) {
+    // 只校验形状不校验存在：vault 会同步到别的机器，那边没这个目录不该让整份 role.json 作废。
+    // 能不能真拿去派任务，由派发入口按 architecture.allowedRoots 再判一次（这里不是授权边界）
+    if (!Array.isArray(input.dirs)) return fail("invalid", "dirs 必须是数组");
+    const seen = new Set<string>();
+    for (const raw of input.dirs) {
+      const d = String(raw ?? "").trim().replace(/[\\/]+$/, "");
+      if (!d || !isAbsolute(d) || d.includes("\0") || d.length > 4096 || /(^|[\\/])\.\.([\\/]|$)/.test(d)) {
+        return fail("invalid", `工作目录必须是绝对路径：${String(raw).slice(0, 60)}`);
+      }
+      seen.add(d);
+    }
+    if (seen.size > MAX_DIRS) return fail("invalid", `最多登记 ${MAX_DIRS} 个工作目录`);
+    out.dirs = [...seen];
+  }
+  if (input?.origin !== undefined) {
+    const o = String(input.origin ?? "").trim();
+    if (!(ROLE_ORIGINS as readonly string[]).includes(o)) return fail("invalid", `origin 只能是 auto / domain 或留空`);
+    out.origin = o;
+  }
   return out;
 }
 
 /** 单份 manifest 内部的结构自洽：只看自己，不读别的角色（loadManifest 也走这条，
  *  递归读角色会在 id 冲突/坏文件上把自己绕死）。磁盘不许比 API 能创建的更宽松。 */
 function checkShape(f: RoleFields, id: string): Fail | null {
+  // 曾用名和关联项目重叠 = 同一份记忆注两遍，还说不清它算「现状」还是「历史」
+  const both = f.history.find((h) => f.projects.includes(h));
+  if (both) return fail("invalid", `${both} 已经是关联项目，不能同时当曾用名`);
+  // 领域角色就是「没有代码目录的项目」的负责人：主项目是它的虚拟项目，所以只能是项目专家形状
+  if (f.origin === "domain" && f.type !== "project") return fail("invalid", "领域角色必须是项目专家形状（主项目 = 它在 vault 里的虚拟项目）");
   if (f.type === "lead") {
     if (f.parentRoleId) return fail("invalid", "职能负责人不能有上级（上级只属于项目专家）——改成职能负责人时请把 parentRoleId 一并清空");
     if (f.primaryProject) return fail("invalid", "职能负责人不能有主项目——改成职能负责人时请把 primaryProject 一并清空");
@@ -516,6 +605,12 @@ export function getRole(id: string): Role | null {
   return isFail(r) ? null : r.role;
 }
 
+/** 这个 id 有没有被占（任何 scope、哪怕 role.json 坏了也算占）：自动起 id 时避让用 */
+export function roleIdInUse(id: string): boolean {
+  const r = locateRole(id);
+  return !isFail(r) || r.code !== "not_found" || RESERVED_IDS.has(id);
+}
+
 /** 可关联的项目 slug：只列本 scope 的（work 角色看不到 private 项目名） */
 export function listProjectSlugs(scope: Scope = defaultScope()): string[] {
   const dir = projectsDir(scope, vault.root);
@@ -531,6 +626,7 @@ export function createRole(input: any): Result<{ role: Role }> {
   // 不做大小写归一：id 就是目录名，静默改写会让"我建的是 Dev，怎么成了 dev"变成谜题
   const id = String(input?.id ?? "").trim();
   if (!ROLE_ID_RE.test(id)) return fail("invalid", "角色 id 只能是小写字母/数字/连字符，2–40 位，且以字母数字开头");
+  if (RESERVED_IDS.has(id)) return fail("invalid", `角色 id 不能用 ${id}（被接口路径占用了），换一个`);
   const scope = pickScope(input?.scope);
   if (scope === null) return fail("invalid", `scope 只能是 ${vault.scopes.map((s) => s || "(不分流)").join(" / ")}`);
   if (input?.name === undefined) return fail("invalid", "缺少角色名称");
@@ -558,7 +654,7 @@ export function createRole(input: any): Result<{ role: Role }> {
   mkdirSync(join(dir, "_candidates"), { recursive: true });
   writeManifest(dir, manifest);
   seedDocs(dir, manifest, scope);
-  log(`roles: created ${scopeTag(scope)}${id}（${manifest.name}·${manifest.type === "project" ? `项目专家/${manifest.primaryProject}` : "职能负责人"}）`);
+  log(`roles: created ${scopeTag(scope)}${id}（${manifest.name}·${roleKindLabel(manifest)}${manifest.type === "project" ? `/${manifest.primaryProject}` : ""}）`);
   return { ok: true, role: { ...manifest, scope } };
 }
 
@@ -631,6 +727,15 @@ export interface PackOptions {
    *  快照项目即便已从角色关联里去掉也照注：它是这个对话成立的前提，不是"现在还关不关联"的问题。
    *  但路径安全照走（slug 白名单 + 同 scope 前缀复核）——快照来自磁盘，一样当外部输入。 */
   forcedProject?: string;
+  /** chat（缺省）/ task：两档预算（见 PACK_BUDGETS）。task 档进任务首条消息，
+   *  额外附上项目记忆目录的绝对路径——任务 agent 能读文件，摘要放不下的细节让它自己去翻 */
+  audience?: PackAudience;
+}
+
+/** 角色自己的三份 markdown：去掉 frontmatter；只有标题和引导语的种子文件不算有内容 */
+function roleDoc(file: string, cap: number): string {
+  const t = readCap(file, cap).replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
+  return t && hasEntries(t) ? t : "";
 }
 
 /** 角色记忆包：角色定义 + 三份 markdown + 「已关联且本次选择」的项目 README（同 scope）。
@@ -648,7 +753,7 @@ export function roleMemoryPack(id: string, selectedProjects?: string[], opts?: P
     ? (role.type === "project" ? role.primaryProject : "")
     : String(opts.forcedProject || "").trim().toLowerCase();
   const isExpertNow = role.type === "project" && !!role.primaryProject;
-  const head = [`### 角色：${role.name}（${role.id}） · ${isExpertNow ? "项目专家" : "职能负责人"}`];
+  const head = [`### 角色：${role.name}（${role.id}） · ${roleKindLabel(role)}`];
   if (forced) {
     // 上级读不到就只写 id：注入不该因为组织关系有瑕疵而失败（真读不到的是记忆，不是这一行字）
     const p = role.parentRoleId ? resolveRole(role.parentRoleId) : null;
@@ -663,14 +768,15 @@ export function roleMemoryPack(id: string, selectedProjects?: string[], opts?: P
   if (role.description) head.push(role.description);
   if (role.instructions) head.push("", "**职责边界**", role.instructions);
   const parts: string[] = [head.join("\n")];
+  const B = PACK_BUDGETS[opts?.audience === "task" ? "task" : "chat"];
 
   const add = (label: string, file: string, cap: number) => {
-    const t = readCap(join(dir, file), cap);
+    const t = roleDoc(join(dir, file), cap);
     if (t) parts.push(`### ${label}\n${t}`);
   };
-  add("原则", "principles.md", CAP_PRINCIPLES);
-  add("决策", "decisions.md", CAP_DECISIONS);
-  add("待办", "backlog.md", CAP_BACKLOG);
+  add("原则", "principles.md", B.principles);
+  add("决策", "decisions.md", B.decisions);
+  add("待办", "backlog.md", B.backlog);
 
   // 选择集与关联集取交集：既不能注入没关联的项目，也不能无视本次的缩小范围
   const wanted = selectedProjects && new Set(selectedProjects.map((x) => String(x ?? "").trim().toLowerCase()));
@@ -680,14 +786,40 @@ export function roleMemoryPack(id: string, selectedProjects?: string[], opts?: P
   const picked = forced ? [forced, ...chosen.filter((s) => s !== forced)] : chosen;
   // 只读角色自己 scope 下的 projects/：跨 scope 查找会让工作角色读到私人项目
   const base = projectsDir(role.scope, vault.root);
-  for (const slug of picked.slice(0, MAX_PROJECTS)) {
-    // manifest 读进来时已经校验过一遍；这里是第二道——slug 是拼路径的唯一变量，
-    // 多查一次的成本是零，漏一次的代价是把 scope 外的文件注进对话
-    if (!SLUG_RE.test(slug)) { log(`roles: 跳过不合法的项目 slug ${scopeTag(role.scope)}${role.id} → ${String(slug).slice(0, 40)}`); continue; }
-    const readmeFile = join(projectDir(slug, role.scope, vault.root), "README.md");
-    if (!isStrictlyWithin(base, readmeFile)) { log(`roles: 项目 README 越界，跳过 ${scopeTag(role.scope)}${role.id} → ${slug}`); continue; }
-    const readme = readCap(readmeFile, CAP_README);
-    if (readme) parts.push(`### ${forced && slug === forced ? "主项目记忆" : "项目记忆"}：${slug}\n${readme}`);
+  // manifest 读进来时已经校验过一遍；这里是第二道——slug 是拼路径的唯一变量，
+  // 多查一次的成本是零，漏一次的代价是把 scope 外的文件注进对话
+  const safeSlug = (slug: string) => {
+    if (!SLUG_RE.test(slug)) { log(`roles: 跳过不合法的项目 slug ${scopeTag(role.scope)}${role.id} → ${String(slug).slice(0, 40)}`); return false; }
+    if (!isStrictlyWithin(base, join(base, slug))) { log(`roles: 项目目录越界，跳过 ${scopeTag(role.scope)}${role.id} → ${slug}`); return false; }
+    return true;
+  };
+  const slugs = picked.slice(0, MAX_PROJECTS).filter(safeSlug);
+  // 预算：主项目（强制项目）多分一份，其余平分；每个至少 800 字——项目再多也保证每个都有个标题级摘要
+  const hasPrimary = !!forced && slugs.includes(forced);
+  for (const slug of slugs) {
+    const primary = hasPrimary && slug === forced;
+    const share = slugs.length === 1 ? 1
+      : hasPrimary ? (primary ? B.primaryShare : (1 - B.primaryShare) / (slugs.length - 1))
+      : 1 / slugs.length;
+    const digest = projectMemoryDigest(base, slug, {
+      budget: Math.max(800, Math.floor(B.project * share)),
+      label: primary ? "主项目记忆" : "项目记忆",
+      pointer: B.pointers,
+    });
+    if (digest) parts.push(digest);
+  }
+
+  // 曾用名：改名前的那段历史（cockpit → ownward）。单独一档预算、排在现状之后，标明是历史——
+  // 老日志里的路径、命令、结论可能早就不成立了，模型不能拿它纠正现在的事实
+  // 每份至少要 500 字才说得清一个项目：曾用名再多也只取预算装得下的那几个（最近改的在前，人按顺序写），总量不超这一档
+  const history = role.history.filter((s) => !slugs.includes(s)).filter(safeSlug).slice(0, Math.max(1, Math.floor(B.history / 500)));
+  const histDigests = history.map((slug) => projectMemoryDigest(base, slug, {
+    budget: Math.floor(B.history / history.length),
+    label: "历史记录",
+    pointer: B.pointers,
+  })).filter(Boolean);
+  if (histDigests.length) {
+    parts.push(`### 曾用名下的历史记录（${history.join("、")}）\n这是改名/迁移之前的记录，帮你了解来龙去脉；与上面的现状冲突时以现状为准。`, ...histDigests);
   }
 
   return `\n=== 角色记忆（vault ${scopeTag(role.scope)}roles/${role.id}/，可能过时，与事实冲突以事实为准）===\n${parts.join("\n\n")}\n`;
@@ -864,7 +996,8 @@ function seedDocs(dir: string, m: RoleManifest, scope: Scope) {
     ...(m.parentRoleId ? [`parent_role: ${m.parentRoleId}`] : []),
     ...(scope ? [`scope: ${scope}`] : []), `updated_at: ${date}`, "---", "",
     `# ${m.name}`, "",
-    `> ${expert ? `项目专家 · 主项目 ${m.primaryProject}` : "职能负责人（跨项目的原则与决策）"}`, "",
+    `> ${m.origin === "domain" ? `领域角色 · 没有代码仓库的那类活，记忆在 projects/${m.primaryProject}/`
+      : expert ? `项目专家 · 主项目 ${m.primaryProject}` : "职能负责人（跨项目的原则与决策）"}`, "",
     m.description || "（写一句这个角色是干什么的）", "",
     "## 职责",
     m.instructions || "（负责什么、不负责什么）", "",

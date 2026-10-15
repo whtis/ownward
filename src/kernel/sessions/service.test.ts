@@ -320,6 +320,51 @@ describe("Kernel SessionService migration modes", () => {
     } finally { server.stop(); }
   });
 
+  test("角色信封：首条消息里的记忆只给 Provider，会话里换成一行 system 提示，用户原话原样保留", async () => {
+    const { wrapRoleContext } = await import("../../role-context.ts");
+    const root = fresh(); seed(root);
+    const text = wrapRoleContext({ id: "owner-x", name: "x Owner", projects: ["x"] }, "SECRET_ROLE_MEMORY") + "修登录页闪退";
+    new RunnerCommandJournal(root).accept({ commandId: "role-cmd", kind: "start-run", runId: "role-run", sessionId: "task", providerId: "claude", input: JSON.stringify({ text, images: [] }) });
+    new RunRepository(root).append({ schemaVersion: 1, eventId: "role-accepted", type: "command-accepted", at: "2026-10-14T00:00:00.000Z", commandId: "role-cmd", runId: "role-run", taskId: "task", sessionId: "task", providerId: "claude" });
+    new SessionRunnerBridgeStore(root).reserve({ taskId: "task", sessionId: "task", providerId: "claude", kind: "start-run", serializedInput: JSON.stringify({ text, images: [] }), identity: { commandId: "role-cmd", runId: "role-run" } });
+    const state = await new KernelSessionService(root, { mode: "runner" }).state("task");
+    expect(state.messages.map((m) => [m.role, m.text])).toEqual([["system", "已带上角色「x Owner」的记忆（项目：x）"], ["user", "修登录页闪退"]]);
+    expect(state.messages[0].name).toBe("role");
+    expect(JSON.stringify(state)).not.toContain("SECRET_ROLE_MEMORY");
+  });
+
+  test("角色信封后面没有正文：不出一条没有下文的「已带上角色记忆」提示", async () => {
+    const { wrapRoleContext } = await import("../../role-context.ts");
+    const root = fresh(); seed(root);
+    const text = wrapRoleContext({ id: "owner-x", name: "x Owner", projects: ["x"] }, "SECRET_ROLE_MEMORY");
+    new RunnerCommandJournal(root).accept({ commandId: "empty-cmd", kind: "start-run", runId: "empty-run", sessionId: "task", providerId: "claude", input: JSON.stringify({ text, images: [] }) });
+    new RunRepository(root).append({ schemaVersion: 1, eventId: "empty-accepted", type: "command-accepted", at: "2026-10-14T00:00:00.000Z", commandId: "empty-cmd", runId: "empty-run", taskId: "task", sessionId: "task", providerId: "claude" });
+    new SessionRunnerBridgeStore(root).reserve({ taskId: "task", sessionId: "task", providerId: "claude", kind: "start-run", serializedInput: JSON.stringify({ text, images: [] }), identity: { commandId: "empty-cmd", runId: "empty-run" } });
+    const state = await new KernelSessionService(root, { mode: "runner" }).state("task");
+    expect(state.messages.filter((m) => m.name === "role")).toEqual([]);
+    expect(JSON.stringify(state)).not.toContain("SECRET_ROLE_MEMORY");
+  });
+
+  test("接力换引擎时角色记忆跟着走：接力 prompt 带上首条消息里的信封，但会话里照样看不到记忆正文", async () => {
+    const { wrapRoleContext } = await import("../../role-context.ts");
+    const root = fresh(), cwd = join(root, "repo"), repo = new SessionRepository(root); mkdirSync(cwd);
+    const original = repo.reserve({ taskId: "task", providerId: "claude", cwd });
+    const text = wrapRoleContext({ id: "owner-x", name: "x Owner", projects: ["x"] }, "SECRET_ROLE_MEMORY") + "修登录页闪退", input = JSON.stringify({ text, images: [] });
+    const identity = { commandId: "first-cmd", runId: "first-run" }, bridge = new SessionRunnerBridgeStore(root);
+    bridge.reserve({ taskId: "task", sessionId: original.id, providerId: "claude", kind: "start-run", serializedInput: input, identity });
+    new RunnerCommandJournal(root).accept({ ...identity, kind: "start-run", sessionId: original.id, providerId: "claude", input });
+    bridge.advance(identity.commandId, 0, true);
+    const sent: string[] = [];
+    const runner: any = { require() {}, submit: async (_task: any, _session: any, _kind: any, payload: any, id: any) => { sent.push(JSON.stringify(payload)); return id; }, waitTerminal: async () => [], syncCommand: async () => [] };
+    const service = new KernelSessionService(root, { mode: "runner", roots: [root] }, runner);
+    await service.handoff("task", { providerId: "codex", reason: "switch" });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("SECRET_ROLE_MEMORY");                    // 新 Provider 拿得到角色记忆
+    expect(sent[0]).toContain("你正在接手另一个 Provider");
+    const state = await service.state("task");
+    expect(JSON.stringify(state)).not.toContain("SECRET_ROLE_MEMORY");  // 人看到的会话里仍然没有记忆正文
+  });
+
   test("Runner read falls back to durable local state when the socket is unavailable", async () => {
     const root = fresh(); seed(root); const commands = new RunnerCommandJournal(root), events = new RunnerEventJournal(root); commands.accept({ commandId: "local", kind: "start-run", runId: "local-run", sessionId: "task", providerId: "claude", input: JSON.stringify({ text: "x" }) }); new RunRepository(root).append({ schemaVersion: 1, eventId: "local-accepted", type: "command-accepted", at: "2026-08-16T00:00:00.000Z", commandId: "local", runId: "local-run", taskId: "task", sessionId: "task", providerId: "claude" }); events.append({ eventId: "local-start", type: "started", at: "2026-08-16T00:00:01.000Z", commandId: "local", runId: "local-run", sessionId: "task", providerId: "claude" }); events.append({ eventId: "local-message", type: "message-completed", at: "2026-08-16T00:00:02.000Z", commandId: "local", runId: "local-run", sessionId: "task", providerId: "claude", payload: JSON.stringify({ text: "durable" }) });
     const bridge = new SessionRunnerBridgeStore(root); bridge.reserve({ taskId: "task", sessionId: "task", providerId: "claude", kind: "start-run", serializedInput: JSON.stringify({ text: "x" }), identity: { commandId: "local", runId: "local-run" } });

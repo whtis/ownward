@@ -6,6 +6,8 @@ enum Route: Hashable, Sendable {
     case chat(String?)                              // nil = 新对话
     case settings
     case dispatch                                   // 派新任务表单
+    case dispatchRole(String)                       // 角色页「派任务给它」：点名角色的派发表单
+    case roles                                      // 角色列表（项目 Owner / 跨项目角色 / 建议）
     case observe(ccId: String?, taskId: String?)    // 旁观外部会话 / terminal 任务
 }
 
@@ -74,8 +76,10 @@ struct MainShell: View {
             case "settings": .settings
             case "newchat": .chat(nil)
             case "dispatch": .dispatch
+            case "roles": .roles
             case "none": nil
-            default: r.hasPrefix("chat:") ? .chat(String(r.dropFirst(5)))
+            default: r.hasPrefix("role:") ? .dispatchRole(String(r.dropFirst(5)))
+                : r.hasPrefix("chat:") ? .chat(String(r.dropFirst(5)))
                 : (r.hasPrefix("task:") ? .task(String(r.dropFirst(5)))
                 : (r.hasPrefix("observe:") ? .observe(ccId: String(r.dropFirst(8)), taskId: nil) : nil))
             }
@@ -117,7 +121,8 @@ struct MainShell: View {
                     AgentListView(client: client,
                                   openTask: { agentPath.append(.task($0)) },
                                   openTerminal: { agentPath.append(.observe(ccId: $1, taskId: $0)) },
-                                  openDispatch: { agentPath.append(.dispatch) })
+                                  openDispatch: { agentPath.append(.dispatch) },
+                                  openRoles: { agentPath.append(.roles) })
                         .navigationDestination(for: Route.self) { destination($0, path: $agentPath) }
                 }
             }
@@ -151,7 +156,8 @@ struct MainShell: View {
         case .task(let id): return "task:\(id)"
         case .chat(let id): return id.map { "chat:\($0)" } ?? "chat:new"
         case .settings: return "settings"
-        case .dispatch: return "dispatch"
+        case .dispatch, .dispatchRole: return "dispatch"
+        case .roles: return "roles"
         case .observe(let ccId, let taskId):
             if let taskId { return "terminal:\(taskId)" }
             return ccId.map { "observe:\($0)" }
@@ -184,6 +190,10 @@ struct MainShell: View {
         case .dispatch:
             // 派完直接进会话（表单页出栈，back 回 Agent 列表）
             DispatchView(client: client) { id in path.wrappedValue = replacingLast(path.wrappedValue, with: .task(id)) }
+        case .dispatchRole(let roleId):
+            DispatchView(client: client, initialRole: roleId) { id in path.wrappedValue = replacingLast(path.wrappedValue, with: .task(id)) }
+        case .roles:
+            RolesView(client: client) { roleId in path.wrappedValue.append(.dispatchRole(roleId)) }
         case .observe(let ccId, let taskId):
             // 接管成功直接进新会话续聊（旁观页出栈，back 回 Agent 列表）
             ObserveView(client: client, ccId: ccId, taskId: taskId) { id in

@@ -76,6 +76,9 @@
         return tpl.en.replace(/\{(\d+)\}/g, (_, n) => { const i = tpl.order.indexOf(Number(n)); return i < 0 ? "" : fragment(caps[i] ?? "", depth); });
       }
     }
+    // 会话里的系统提示带「⚠️ / ⏳ / ✅」前缀（runner-consumer 拼的），词典只收正文：剥掉前缀再翻
+    const lead = depth === 0 ? /^([^\p{L}\p{N}\s]+)\s+(?=\S)/u.exec(key) : null;
+    if (lead) { const rest = translate(key.slice(lead[0].length), 1); if (rest !== null) return `${lead[1]} ${rest}`; }
     // 「A · B」「A / B」这类拼接标签：每个含汉字的段都能整串命中才拼回去，否则不动（避免半翻译用户内容）
     if (depth === 0) for (const sep of [" · ", " / ", " | "]) {
       if (!key.includes(sep)) continue;

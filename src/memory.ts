@@ -5,8 +5,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { llmJson } from "./llm.ts";
-import { ALL_SCOPES, memoryDir, projectDir } from "./paths.ts";
-import { fmt, log } from "./util.ts";
+import { ALL_SCOPES, memoryDir, projectDir, WORK_SCOPE } from "./paths.ts";
+import { fmt, loadState, log, updateState } from "./util.ts";
 
 const MEM = memoryDir();
 
@@ -90,12 +90,32 @@ export function memoryPack(kind: "triage" | "heartbeat" | "routine" | "chat" | "
   return parts.length ? `\n=== 记忆（vault memory/，可能过时，与事实冲突以事实为准）===\n${parts.join("\n\n")}\n` : "";
 }
 
-/** 日报后跑：从当天工作记录提取候选记忆（只进 _candidates，人工确认后合并） */
-export async function extractCandidates(material: string): Promise<string | null> {
+/** 决策候选按项目分流（纯函数）：属于某个有负责角色的项目（项目 Owner / 领域角色的主项目）就进那个项目的
+ *  候选——在角色页审，审的时候有那个项目的上下文；人物/承诺/目标和说不清归属的决策留在当日这份。
+ *  2026-10 生产数据：memory/_candidates 积了 33 天 73 条没人合，其中 49 条决策大多写明了该进哪个项目。 */
+export function routeCandidates(cands: any[], owned: Set<string>): { toProject: Array<{ slug: string; c: any }>; rest: any[] } {
+  const toProject: Array<{ slug: string; c: any }> = [], rest: any[] = [];
+  for (const c of cands) {
+    const slug = String(c?.project ?? "").trim().toLowerCase();
+    if (c?.type === "decision" && owned.has(slug)) toProject.push({ slug, c });
+    else rest.push(c);
+  }
+  return { toProject, rest };
+}
+
+/** 日报后跑：从当天工作记录提取候选记忆（只进 _candidates，人工确认后合并）。
+ *  返回当日候选文件（没有就 null）和分进项目候选的条数——两处都要人审，通知时都得说 */
+export async function extractCandidates(material: string): Promise<{ file: string | null; routed: number }> {
   ensureSeed();
   const today = fmt(new Date(), "date");
   const file = join(MEM, "_candidates", `${today}.md`);
-  if (existsSync(file)) return null; // 每天一份
+  // 每天只提一次：当日文件在、或者当天已经提过（全部分给了项目、一份当日文件都没写）都算。
+  // 只认文件的话，全分出去的那天每次手动重跑日报都会再分一遍，项目候选里攒出一模一样的重复条目
+  if (existsSync(file) || loadState().memoryCandidatesDay === today) return { file: null, routed: 0 };
+  // 有负责角色的项目：决策直接分给它（候选门不变，只是换了个审的地方）
+  const { listRoles } = await import("./roles.ts");
+  const ownedRoles = listRoles().filter((r) => r.scope === WORK_SCOPE && r.type === "project" && !r.conflict && r.primaryProject);
+  const owned = new Set(ownedRoles.map((r) => r.primaryProject));
 
   const res = await llmJson([
     "从下面的当日工作记录中提取值得长期记住的候选记忆。宁缺毋滥，只要会影响未来判断的稳定事实：",
@@ -104,7 +124,8 @@ export async function extractCandidates(material: string): Promise<string | null
     "- 新认识的关键人物/角色关系",
     "- 重要决策及理由",
     "严格要求：每条必须带原文证据（记录里明确说了的），禁止推断和脑补；没有值得记的就输出空数组。",
-    `输出严格 JSON：{"candidates": [{"type": "commitment|goal|person|decision", "text": "<一句话>", "evidence": "<原文引用>", "suggest": "<建议写进哪个文件>"}]}`,
+    `输出严格 JSON：{"candidates": [{"type": "commitment|goal|person|decision", "text": "<一句话>", "evidence": "<原文引用>", "suggest": "<建议写进哪个文件>", "project": "<决策属于下面哪个项目就填它的 slug；跨项目、说不清或不是决策就空串>"}]}`,
+    ...(ownedRoles.length ? ["", "=== 有负责角色的项目（slug：角色）===", ...ownedRoles.map((r) => `- ${r.primaryProject}：${r.name}`)] : []),
     "",
     "=== 当日记录 ===",
     material.slice(0, 30_000),
@@ -114,8 +135,24 @@ export async function extractCandidates(material: string): Promise<string | null
     readCap("goals.md", 1000),
   ].join("\n"));
 
-  const cands = res?.candidates;
-  if (!Array.isArray(cands) || !cands.length) { log("memory: 今天没有候选记忆"); return null; }
+  const all = res?.candidates;
+  if (!Array.isArray(all)) { log("memory: 候选记忆没提出来（模型没给结果），下次日报再试"); return { file: null, routed: 0 }; }
+  updateState((s) => { s.memoryCandidatesDay = today; });
+  if (!all.length) { log("memory: 今天没有候选记忆"); return { file: null, routed: 0 }; }
+
+  const { toProject, rest } = routeCandidates(all.slice(0, 8), owned);
+  let routed = 0;
+  const { createProjectCandidate } = await import("./project-memory.ts");
+  for (const { slug, c } of toProject) {
+    const r = createProjectCandidate(slug, WORK_SCOPE, {
+      text: String(c.text ?? "").slice(0, 1000), evidence: String(c.evidence ?? "").slice(0, 2000), sourceChatId: `digest:${today}`,
+    });
+    if (r.ok) routed++;
+    else { log(`memory: 决策候选分给 ${slug} 没成功，留在当日候选里：${(r as { msg: string }).msg}`); rest.push(c); }
+  }
+  if (routed) log(`memory: ${routed} 条决策候选分进了项目候选（角色页审）`);
+  const cands = rest;
+  if (!cands.length) return { file: null, routed };
 
   const md = [
     "---", `date: ${today}`, "status: pending_review", "---", "",
@@ -132,7 +169,7 @@ export async function extractCandidates(material: string): Promise<string | null
   mkdirSync(join(MEM, "_candidates"), { recursive: true });
   writeFileSync(file, md);
   log(`memory: ${cands.length} 条候选 → ${file}`);
-  return file;
+  return { file, routed };
 }
 
 /** 工作/私人项目范围：公司文档（站会/周会/owner 周报/日报）绝不能出现私人项目。
@@ -178,7 +215,7 @@ function ensureScope() {
  *  2) 新的一周还没定目标 → 从上周目标播种新文件 + Action 让人确认 */
 export async function sweepMemoryChores() {
   ensureSeed();
-  const { openAction, resolveAction } = await import("./actions.ts");
+  const { openAction, resolveAction, resolveActionExact } = await import("./actions.ts");
   const { readdirSync, statSync } = await import("fs");
 
   // 1) 候选记忆待确认
@@ -196,6 +233,43 @@ export async function sweepMemoryChores() {
   } else {
     resolveAction("memory:candidates", "processed");
   }
+
+  // 1b) 项目记忆候选（日报分给项目的决策、对话里存的项目候选）：在角色页审，同样浮到收件箱——
+  //     分出去的候选没人看见，就等于又攒成了一个没人合的堆
+  try {
+    const { listRoles } = await import("./roles.ts");
+    const { listProjectCandidates } = await import("./project-memory.ts");
+    let n = 0, newest = "";
+    const names: string[] = [];
+    for (const r of listRoles()) {
+      if (r.type !== "project" || !r.primaryProject || r.conflict) continue;
+      const c = listProjectCandidates(r.primaryProject, r.scope);
+      if (!c.ok || !c.candidates.length) continue;
+      n += c.candidates.length; names.push(r.name);
+      // 批次标记用最新一条的创建时刻（ISO，按字符串比就是按时间比）——候选 id 是「日期-随机串」，同一天的谁大谁小是随机的
+      for (const x of c.candidates) if (x.createdAt > newest) newest = x.createdAt;
+    }
+    // 行动 id 跟着「高水位」走：来了比上次更新的候选才换新 id（已处理/忽略过的行动不会复活，新来的得能重新浮上来）；
+    // 只处理掉一部分、最新的那条反而比水位旧时沿用当前 id——按「最新一条」算 id 会退回一个早就关掉的旧 id，提醒凭空消失
+    const cur = (loadState().projectCandidatesAction || {}) as { id?: string; hwm?: string };
+    if (!n) {
+      if (cur.id) { resolveActionExact(cur.id, "processed"); updateState((s) => { delete s.projectCandidatesAction; }); }
+    } else {
+      let id = cur.id || "";
+      if (!id || newest > (cur.hwm || "")) {
+        if (id) resolveActionExact(id, "superseded");
+        id = `memory:project-candidates:${newest.replace(/[^0-9]/g, "")}`;
+        const next = { id, hwm: newest };
+        updateState((s) => { s.projectCandidatesAction = next; });
+      }
+      openAction({
+        id, kind: "decide", source: "dispatch",
+        title: `项目记忆候选待审（${n} 条）`,
+        reason: `在「角色」页对应角色下逐条晋升或丢弃：${names.slice(0, 5).join("、")}${names.length > 5 ? ` 等 ${names.length} 个角色` : ""}`,
+        ref: {},
+      });
+    }
+  } catch (e) { log(`memory: 项目记忆候选巡检失败：${e}`); }
 
   // 2) 每周目标：单文件 goals.md 原地滚动（不再按周攒文件）。
   //    新的一周把 week 字段翻新、上周目标留作编辑基线、置顶提示；删掉提示行即算确认。

@@ -20,6 +20,8 @@ class RootNavigationTest {
         assertEquals("inbox", topLevelRootForRoute("settings"))
         assertEquals("agent", topLevelRootForRoute("agent"))
         assertEquals("agent", topLevelRootForRoute("dispatch"))
+        assertEquals("agent", topLevelRootForRoute("dispatchRole/{role}"))   // 角色页「派任务给它」
+        assertEquals("agent", topLevelRootForRoute("roles"))
         assertEquals("agent", topLevelRootForRoute("task/{id}"))
         assertEquals("agent", topLevelRootForRoute("observe?id={id}&task={task}"))
         assertEquals("chat", topLevelRootForRoute("chat"))

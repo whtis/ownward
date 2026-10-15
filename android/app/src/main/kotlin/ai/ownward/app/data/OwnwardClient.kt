@@ -321,6 +321,7 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
     suspend fun dispatchWork(
         dir: String, task: String, provider: String, worktree: Boolean,
         model: String?, effort: String? = null, permission: String?, images: List<OutImage> = emptyList(),
+        role: String? = null, extraDirs: List<String> = emptyList(),
     ): DispatchResult = post("/api/work", buildJsonObject {
         put("dir", dir); put("task", task); put("bg", true)
         put("provider", provider); put("worktree", worktree)
@@ -332,7 +333,36 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
                 add(buildJsonObject { put("media_type", img.media_type); put("data", img.data) })
             }
         })
+        // role 只在点名（角色 id / none，或按描述匹配上的领域角色）时才发：缺省 = 服务端自动匹配；
+        // 老 daemon 的白名单不认这个键（见 roleSubmit）
+        if (!role.isNullOrBlank()) put("role", role)
+        if (extraDirs.isNotEmpty()) put("extraDirs", buildJsonArray { extraDirs.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
     })
+
+    // ---- 角色（src/role-auto.ts）：派任务由角色接，项目 Owner 自动生成，跨项目时问要不要建跨项目角色 ----
+    suspend fun roles(): RolesResponse = get("/api/roles")
+
+    /**
+     * 「自动」会落到谁、是不是跨项目：只读预览，服务端不建任何东西。目录要在 allowedRoots 里，不然 403。
+     * task 总是带上（空串也发）：主目录不是仓库时服务端按任务描述匹配领域角色；老 daemon 不认这个键会直接忽略
+     */
+    suspend fun resolveRoles(dir: String, extraDirs: List<String> = emptyList(), task: String = ""): RolePreview =
+        post("/api/roles/resolve", buildJsonObject {
+            put("dir", dir)
+            put("extraDirs", buildJsonArray { extraDirs.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+            put("task", task)
+        })
+
+    /** 人点了「建」才调：几个项目已有角色同时管就直接返回它（created=false） */
+    suspend fun createCrossRole(dirs: List<String>): RoleMutation =
+        post("/api/roles/cross", buildJsonObject {
+            put("dirs", buildJsonArray { dirs.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+        })
+
+    suspend fun roleSuggestions(): RoleSuggestions = get("/api/roles/suggestions")
+
+    suspend fun dismissRoleSuggestion(key: String): OkMsg =
+        post("/api/roles/suggestions/dismiss", buildJsonObject { put("key", key) })
 
     suspend fun projects(): List<ProjectDir> = get("/api/projects")
 

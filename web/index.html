@@ -137,6 +137,15 @@
       <span class="label-hint extra-dir-disabled" id="w-extra-disabled" hidden>terminal 模式不支持</span>
       <button class="icon-btn extra-dir-add" id="w-extra-browse" title="添加附加目录" aria-label="添加附加目录" type="button">＋</button>
     </div>
+    <!-- 谁来接：缺省按目录自动匹配项目 Owner（没有就建）；角色的记忆随首条消息带给 agent（role-auto.ts） -->
+    <div class="work-role-row" id="w-role-wrap">
+      <span class="label-hint">角色</span>
+      <select id="w-role" aria-label="接这个任务的角色"><option value="auto">自动匹配（推荐）</option><option value="none">不用角色</option></select>
+      <span class="work-role-hint" id="w-role-hint"></span>
+    </div>
+    <div class="work-role-cross" id="w-role-cross" hidden></div>
+    <!-- 主目录不是仓库、按任务描述拿不准由哪个领域角色接：列候选让人手选（派发时「自动」不替人挑） -->
+    <div class="work-role-pick" id="w-role-pick" hidden></div>
     <label>任务描述</label>
     <textarea id="w-task" placeholder="修复登录页闪退…（可粘贴/拖入图片或文件，仅后台任务）"></textarea>
     <div class="composer-imgs" id="w-imgs" style="padding:6px 0 0"></div>

@@ -163,6 +163,7 @@ function taskCardHtml(t) {
   return `<div class="card clickable" ${tone ? `data-tone="${tone}"` : ""} data-selected="${Tasks.sel === t.id}" onclick="Tasks.select('${jsq(t.id)}')"
     title="${esc(provider)}${t.branch ? ` · ${esc(t.branch)}` : ""}">
     <div class="top task-card-meta">${st}<span class="task-project">${esc(t.project)}</span>${evolve}
+      ${t.roleName ? `<span class="tag task-role" title="接这个任务的角色">${esc(t.roleName)}</span>` : ""}
       <span class="right mono">${fmtDur(t)}</span></div>
     <div class="body task-card-title">${esc(t.title || t.task)}</div>
     <div class="foot"><span class="mono" style="font-size:11.5px;color:var(--text-tertiary)">${hhmm(t.startedAt)}</span>
@@ -215,6 +216,7 @@ function rcCardHtml(s) {
     <div class="top">${sessionStateHtml(state)}
       <span class="task-project">${esc(s.project)}</span>
       <span class="tag">${esc(engineTag(s.mode, s.backend, s.providerId))}</span>
+      ${s.roleName ? `<span class="tag task-role" title="接这个任务的角色">${esc(s.roleName)}</span>` : ""}
       <span class="right mono">${ageText(new Date(s.lastAt).toISOString())}</span></div>
     <div class="body task-card-title">${esc(s.title)}</div>
     ${s.last ? `<div class="body" style="color:var(--text-tertiary);-webkit-line-clamp:1;display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden">${esc(s.last)}</div>` : ""}
@@ -955,6 +957,10 @@ function msgHtml(m, i) {
   }
   if (m.role === "system" && m.name === "handoff") {
     return `<div class="handoff-divider"><span>${esc(m.text || "已切换引擎，旧会话历史保留")}</span></div>`;
+  }
+  // 角色记忆随首条消息发给了 agent（服务端已拆掉信封）：这里只说一句带上了谁的记忆
+  if (m.role === "system" && m.name === "role") {
+    return `<div class="handoff-divider" data-kind="role"><span>${esc(m.text || "已带上角色记忆")}</span></div>`;
   }
   if (m.role === "tool") {
     if (m.name === "image" && imgs) return `<div class="msg" data-role="tool">${imgs}</div>`;

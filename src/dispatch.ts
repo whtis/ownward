@@ -1,6 +1,6 @@
 // 编码调度台：派任务给 claude/codex，terminal 可见模式或 bg 后台模式。
 // 任务注册表 data/tasks.json；bg 任务默认 worktree 隔离，由 daemon 看护退出。
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { fsyncSync } from "./fs-durable.ts";
 import { basename, join } from "path";
 import { DATA, ROOT, SOURCE_ROOT, cfg, ensureDir, expandHome, fmt, log, run } from "./util.ts";
@@ -45,6 +45,9 @@ export interface WorkTask {
   status: "running" | "exited" | "done";
   harvested?: boolean;
   harvestedAt?: string;   // 上次收割时刻：日志比它新就说明追问轮又干了活，sweepHarvest 据此重收
+  harvestSlug?: string;   // 根目录任务第一次收割定下的归属（领域角色的虚拟项目，或留在原处）：多轮重收不再改判
+  harvestScope?: string;  // 同上，归属的 scope
+  harvestFinal?: boolean; // true=归到了领域角色，定死；false=暂时留在原处（第一轮常常只是待命开场，后面重收还会再判一次）
   flightState?: "pending" | "written" | "failed";  // 飞行记录状态（客户端只在 written 时给按钮）
   flightPath?: string;    // 已写飞行记录的绝对路径
   flightAttempts?: number; // 写失败重试计数（durable 重试上限用）
@@ -53,6 +56,12 @@ export interface WorkTask {
   uncertain?: boolean;     // submit 响应丢失：保持 running，由 durable journal/recovery 收敛
   launchState?: "pending" | "accepted";
   launchAcceptedAt?: string;
+  // ---- 角色绑定（role-auto.ts）：派发那一刻定死，之后角色怎么改都不回头改这条任务 ----
+  roleId?: string;        // 接这个任务的角色；首条消息前面带着它的记忆
+  roleName?: string;      // 绑定当时的角色名（列表展示用，角色后来改名也不影响历史）
+  roleProject?: string;   // 收割写日志的项目 slug：项目 Owner 的主项目——记忆写在哪、角色下次就从哪读
+  roleScope?: string;     // roleProject 所在的 scope：领域角色的 scope 是建角色时定的，不跟派发目录（~/workspace 判出来是私人）
+  roleNote?: string;      // 自动匹配没成功的原因（任务照常派，但要让人看见）
 }
 
 const TASKS_FILE = join(DATA, "tasks.json");
@@ -108,6 +117,12 @@ export interface WorkOptions {
   permission?: "safe" | "bypass";  // safe=高危 Bash 走审批（默认），bypass=全放行
   extraDirs?: string[];  // 附加项目目录（跨仓库任务，引擎任务生效）
   images?: { media_type: string; data: string }[];  // 首轮附图（base64）；仅 bg 引擎任务支持
+  /** 谁来接：auto=按目录匹配/自动建项目 Owner；none=不带角色；其余是角色 id。
+   *  缺省 = 不带（routine/evolve 这类内部调用方不吃角色记忆）；人派的入口（/api/work、own work）缺省传 auto */
+  role?: string;
+  /** 拿去匹配领域角色的文字：缺省就是任务正文。/api/work 带附件时正文后面拼了一串上传路径，
+   *  拿它匹配会和预览对不上（预览只有人写的那段），所以由调用方传人写的原文 */
+  roleText?: string;
 }
 
 export async function startWork(projectDir: string, task: string, opts: WorkOptions): Promise<WorkTask> {
@@ -122,6 +137,9 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
   // terminal 模式给不了图（交互式 claude 只吃 argv 文本）——显式报错，不许静默丢（守则 9）
   if (opts.images?.length && mode === "terminal") throw new Error("terminal 模式不支持图片，请勾选「后台运行」");
   if (opts.extraDirs?.length && mode === "terminal") throw new Error("terminal 模式不支持附加目录，请勾选「后台运行」");
+
+  // 角色在建 worktree 之前定：点名的角色不可用要直接失败，不能先白建一个 worktree 再报错
+  const bound = await bindDispatchRole(opts.role, dir, (opts.extraDirs ?? []).map((d) => expandHome(d)), opts.roleText ?? task);
 
   // worktree：bg 默认开（保护主 checkout），terminal 默认原地
   const useWorktree = opts.worktree ?? !!opts.bg;
@@ -162,6 +180,11 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
     model, effort: opts.effort, startHead, gitIdentity,
     extraDirs: extraDirs.length ? extraDirs : undefined,
     startedAt: new Date().toISOString(), status: "running",
+    ...(bound.role ? {
+      roleId: bound.role.id, roleName: bound.role.name,
+      ...(bound.project ? { roleProject: bound.project, ...(bound.scope !== undefined ? { roleScope: bound.scope } : {}) } : {}),
+    } : {}),
+    ...(bound.note ? { roleNote: bound.note } : {}),
   };
 
   let terminalLaunch: { launchId: string; tokenFile: string; expiresAt: string } | undefined;
@@ -171,7 +194,9 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
     t.terminalLaunchId = terminalLaunch.launchId;
     // SessionStart 可能在 osascript 返回前到达；先 durable 登记任务，避免合法 hook 看到“不存在”。
     addTask(t);
-    try { await launchTerminal(cwd, task, id, terminalLaunch); }
+    // terminal 是交互式 claude：记忆走 --append-system-prompt（不进 transcript 首条消息，
+    // 「首条 user 消息 == 任务原文」的兜底认领照样成立）
+    try { await launchTerminal(cwd, task, id, terminalLaunch, bound.context ? writeRoleContextFile(id, bound.context) : undefined); }
     catch (error) { revokeTerminalAdoptLaunch(DATA, terminalLaunch.launchId); removeTask(id); throw error; }
   } else {
     // 后台 Agent 的唯一写路径：Kernel SessionService → 独立 Runner → Provider Registry。
@@ -186,7 +211,8 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
     const sessions = createNewSessionService(roots);
     try {
       const session = await sessions.create({ taskId: id, providerId, cwd, control: "ownward", extraDirs, model, effort: opts.effort }, { roots, access });
-      const accepted=await sessions.send(session.id, { text: task, images: opts.images ?? [], clientMutationId: `dispatch:${id}` });
+      // 角色记忆拼在首条消息最前面（为什么不走 system prompt 见 role-context.ts）；t.task 仍是用户原话
+      const accepted=await sessions.send(session.id, { text: bound.context + task, images: opts.images ?? [], clientMutationId: `dispatch:${id}` });
       updateTask(id,{launchState:"accepted",launchAcceptedAt:new Date().toISOString(),commandId:accepted.commandId,runId:accepted.runId});
     } catch (error: any) {
       let durable:{commandId:string;runId:string}|null=null;try{durable=await durableLaunchReceipt(DATA,id);}catch{/* 原错误仍决定结果 */}
@@ -201,13 +227,43 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
   // Provider 首次 persist 可能早于 tasks.json 登记；任务表落稳后再补一次统一身份，失败留给 daemon 重试。
   try { (await import("./sessions/repository.ts")).reconcileLegacySessions(DATA); }
   catch (e) { log(`session repository reconcile failed [${t.id}]: ${e}`); }
-  log(`work dispatched: [${t.id}] ${project} (${mode}${branch ? ", " + branch : ""})`);
+  log(`work dispatched: [${t.id}] ${project} (${mode}${branch ? ", " + branch : ""})${t.roleId ? ` · 角色 ${t.roleId}${bound.created ? "（新建）" : ""}` : ""}`);
   titleFor(id, task).catch(() => {});   // 异步补精炼标题，不阻塞派发
   if (mode === "terminal") {
     // 认领这个任务自己拉起的 CC 会话（据首条 user 消息），冻结 id 供旁观/接管/沉寂收尾用
     import("./terminal-tasks.ts").then((m) => m.linkTerminalSessionSoon(id).catch(() => {}));
   }
   return t;
+}
+
+/** 派发时定角色并备好它的记忆（role-auto.ts）。choice 缺省/none = 不带角色。
+ *  点名的角色不可用 → 抛（用户要的就是它）；auto 没匹配上 → 不带角色照常派，原因进 note */
+async function bindDispatchRole(choice: string | undefined, dir: string, extraDirs: string[], task: string) {
+  const empty = { role: null as import("./roles.ts").Role | null, created: false, note: "", project: "", scope: undefined as import("./paths.ts").Scope | undefined, context: "" };
+  if (!choice || choice === "none") return empty;
+  const RA = await import("./role-auto.ts");
+  const picked = await RA.pickRoleForDispatch(choice, dir, extraDirs, task);
+  if (!picked.role) return { ...empty, note: picked.note };
+  try {
+    return { ...picked, context: RA.roleTaskContext(picked.role) };
+  } catch (e) {
+    // 选定之后、组装之前角色变得不可用（被归档/起了冲突）：点名的照样失败，自动的降级成不带角色
+    if (choice !== "auto") throw Object.assign(new Error(`角色记忆读不出来：${e instanceof Error ? e.message : e}`), { code: "ROLE_UNAVAILABLE" });
+    log(`work: 角色 ${picked.role.id} 的记忆组装失败，按不带角色派发：${e}`);
+    return { ...empty, note: `角色 ${picked.role.id} 的记忆读不出来：${String(e instanceof Error ? e.message : e).slice(0, 120)}` };
+  }
+}
+
+/** terminal 任务的角色记忆落成文件给 `--append-system-prompt "$(cat …)"` 读：
+ *  几 KB 的记忆直接塞进 AppleScript 字符串，转义出一点错整条命令就起不来。顺手清掉一周前的旧文件 */
+function writeRoleContextFile(taskId: string, context: string): string {
+  const dir = join(DATA, "role-context");
+  ensureDir(dir);
+  const cutoff = Date.now() - 7 * 86400_000;
+  try { for (const f of readdirSync(dir)) { const p = join(dir, f); try { if (statSync(p).mtimeMs < cutoff) unlinkSync(p); } catch { /* 并发清理 */ } } } catch { /* 清不掉不影响本次 */ }
+  const file = join(dir, `${taskId}.md`);
+  writeFileSync(file, context, { mode: 0o600 });
+  return file;
 }
 
 /** 给最近还没有标题的任务补生成（现有任务/生成失败的重试）；每轮限量控成本 */
@@ -263,17 +319,18 @@ function ccHookSettingsFile(): string {
 /** 拉起可见 Terminal.app 窗口跑交互式 claude；过程数据由 Claude Code transcript 记录，事后 harvest。
  *  注入 OWNWARD_TASK_ID + 会话钩子：claude 一启动就把自己的 session_id 报回来，
  *  任务↔会话的链接不再依赖「同 cwd + 首条消息文本匹配」这类事后推断。 */
-export function buildTerminalShellCommand(cwd: string, task: string, taskId: string, launch: { launchId: string; tokenFile: string }, port: number): string {
+export function buildTerminalShellCommand(cwd: string, task: string, taskId: string, launch: { launchId: string; tokenFile: string }, port: number, roleContextFile?: string): string {
   // env -u 剥掉 CLAUDE_CODE_*，保证这是个干净的顶层会话（自己的 transcript 落在自己 cwd 的项目目录）
   const clean = CLAUDE_CHILD_ENVS.map((v) => `-u ${v}`).join(" ");
   const envAssign = `OWNWARD_TASK_ID=${shq(taskId)} OWNWARD_PORT=${shq(String(port))} OWNWARD_ADOPT_LAUNCH_ID=${shq(launch.launchId)} OWNWARD_ADOPT_TOKEN_FILE=${shq(launch.tokenFile)}`;
   let hookArgs = "";
   try { hookArgs = `--settings ${shq(ccHookSettingsFile())} `; } catch { /* 写不了就退回纯文本匹配认领 */ }
-  return `cd ${shq(cwd)} && env ${clean} ${envAssign} claude ${hookArgs}${shq(task)}`;
+  const roleArg = roleContextFile ? `--append-system-prompt "$(cat ${shq(roleContextFile)})" ` : "";
+  return `cd ${shq(cwd)} && env ${clean} ${envAssign} claude ${hookArgs}${roleArg}${shq(task)}`;
 }
 
-async function launchTerminal(cwd: string, task: string, taskId: string, launch: { launchId: string; tokenFile: string }) {
-  const shellCmd = buildTerminalShellCommand(cwd, task, taskId, launch, cfg.dashboard?.port || 4517);
+async function launchTerminal(cwd: string, task: string, taskId: string, launch: { launchId: string; tokenFile: string }, roleContextFile?: string) {
+  const shellCmd = buildTerminalShellCommand(cwd, task, taskId, launch, cfg.dashboard?.port || 4517, roleContextFile);
   const r = await run([
     "osascript",
     "-e", `tell application "Terminal" to activate`,

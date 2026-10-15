@@ -401,6 +401,17 @@ describe("Claude Code Runner Provider contract", () => {
     } finally { client.close(); server.stop(); }
   });
 
+  test("汇报伪 turn 里主线程长时间静默：不当成没收到汇报，等它的 result 再收尾", async () => {
+    // 2026-10-15：汇报到了、agent 接着跑 verify.sh 一分多钟不出帧，宽限期一到就被收尾并杀掉 CLI
+    const { data, server, client } = await fixture({ backgroundCheckMs: 20, backgroundReportGraceMs: 150 }); try {
+      await client.request("submit", startBody("bg-slow", "BG_AGENT_SLOW_REPORT"));
+      const events = await waitTerminal(client, "bg-slow", 5_000), values = payloads(data, events);
+      expect(events.at(-1)).toMatchObject({ type: "completed" });
+      expect(values.some((value) => String(value.message ?? "").includes("没有收到汇报"))).toBe(false);
+      expect(JSON.stringify(values)).toContain("report:PONG");
+    } finally { client.close(); server.stop(); }
+  });
+
   test("挂起等后台子代理时 interrupt：直接收尾 interrupted 并停掉 CLI", async () => {
     const { server, client } = await fixture({ backgroundCheckMs: 20 }); try {
       await client.request("submit", startBody("bg-hang", "BG_AGENT_HANG"));

@@ -10,12 +10,14 @@ import { basename, dirname, isAbsolute, join } from "path";
 import { ccSessionPath, listCcSessions } from "./cc-sessions.ts";
 import { isWithinDataDir } from "./internal-path.ts";
 import { llmJson } from "./llm.ts";
-import { inboxDir, projectDir, SCOPES_ON, scopeForRemote, type Scope } from "./paths.ts";
+import { ALL_SCOPES, inboxDir, projectDir, SCOPES_ON, scopeForRemote, type Scope } from "./paths.ts";
+import { projectReadmeSkeleton } from "./project-knowledge.ts";
 import { DATA, ensureDir, fmt, log } from "./util.ts";
 
 const STATE_FILE = join(DATA, "capture.json");
 
-interface CaptureState { [sessionId: string]: { size: number; at: string } }
+/** slug/scope：根目录会话第一次收割定下的归属（领域角色或留在原处）。会话变大会重收，同一个会话别一会儿归这、一会儿归那 */
+interface CaptureState { [sessionId: string]: { size: number; at: string; slug?: string; scope?: Scope } }
 
 function loadCapState(): CaptureState {
   try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch { return {}; }
@@ -149,6 +151,20 @@ export function resolveScope(cwdScope: Scope, cwdSlug: string, cwdRoot: string |
   return { scope: cwdScope, slug: cwdSlug, repos: names };
 }
 
+/** 根目录（~、~/workspace 这类不是仓库的目录）里干的活、又没有主导仓库：按内容归到领域角色。
+ *  只认有把握的匹配（role-auto 的 matchDomain：拿不准就算没匹配上）——归错 scope 的代价是私人内容进了
+ *  公司文档，宁可留在原处（private/projects/workspace）等人在角色页归类 */
+export async function domainFor(summary: string): Promise<{ slug: string; scope: Scope; roleId: string } | null> {
+  try {
+    const { matchDomain } = await import("./role-auto.ts");
+    const m = await matchDomain(summary);
+    return m.kind === "matched" && m.role ? { slug: m.role.primaryProject, scope: m.role.scope, roleId: m.role.id } : null;
+  } catch (e) {
+    log(`capture: 领域归属判断失败，留在原处：${String(e).slice(0, 160)}`);
+    return null;
+  }
+}
+
 /** ownward 内部机器会话不收割（心跳/分流/AI 对话/routine 写入/顾问咨询等） */
 function isInternal(cwd: string, title: string): boolean {
   if (isWithinDataDir(cwd, DATA)) return true;
@@ -223,13 +239,16 @@ export async function sweepCapture() {
     if (prev && s.size < prev.size * 1.3) continue;         // 已收割且没大变化
 
     budget--;
+    // capture.json 也是磁盘上的外部输入：slug/scope 要拼 vault 路径，形状不对的一律当没记过
+    const kept = prev?.slug && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(prev.slug) && (ALL_SCOPES as string[]).includes(prev.scope ?? "")
+      ? { slug: prev.slug, scope: (prev.scope ?? "") as Scope } : undefined;
     try {
-      await captureOne(s);
-      state[s.id] = { size: s.size, at: new Date().toISOString() };
+      const decided = await captureOne(s, kept);
+      state[s.id] = { size: s.size, at: new Date().toISOString(), ...(decided ?? kept ?? {}) };
       saveCapState(state);
     } catch (e) {
       log(`capture [${s.project}] failed: ${e}`);
-      state[s.id] = { size: s.size, at: new Date().toISOString() }; // 失败也标记，别每轮烧钱重试
+      state[s.id] = { size: s.size, at: new Date().toISOString(), ...(kept ?? {}) }; // 失败也标记，别每轮烧钱重试；定下的归属照留
       saveCapState(state);
     }
   }
@@ -254,6 +273,31 @@ export function upsertEntry(content: string, key: string, entry: string): string
   const block = entry.replace(/\n+$/, "").split("\n");
   const rest = lines.slice(end);
   return [...lines.slice(0, start), ...block, "", ...(rest.length ? rest : [""])].join("\n");
+}
+
+/** upsertEntry 的反操作：删掉含 key 的那一整块；找不到、或 key 不在任何 `## ` 块里就原样返回（不乱剪） */
+export function removeEntry(content: string, key: string): string {
+  const lines = content.split("\n");
+  const hit = lines.findIndex((l) => l.includes(key));
+  if (hit < 0) return content;
+  let start = hit;
+  while (start >= 0 && !lines[start].startsWith("## ")) start--;
+  if (start < 0) return content;
+  let end = start + 1;
+  while (end < lines.length && !lines[end].startsWith("## ")) end++;
+  return [...lines.slice(0, start), ...lines.slice(end)].join("\n");
+}
+
+/** 把一条按 key 写进去的条目从某处整块撤掉（inbox 当天文件 + 项目当月日志）：
+ *  根目录任务第一次暂时留在原处、后来归到了领域角色，原处那条要删，不然两边各一份 */
+export function removeKnowledge(scope: Scope, slug: string, date: string, key: string) {
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(slug) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+  for (const f of [join(inboxDir(scope), `${date}.md`), join(projectDir(slug, scope), "log", `${date.slice(0, 7)}.md`)]) {
+    if (!existsSync(f)) continue;
+    const cur = readFileSync(f, "utf8");
+    const next = removeEntry(cur, key);
+    if (next !== cur) writeFileSync(f, next);
+  }
 }
 
 /** 带 key 就整块覆盖，否则追加（文件不存在时 appendFileSync 会建） */
@@ -286,18 +330,16 @@ export function appendKnowledge(
   const projDir = projectDir(slug, scope);
   mkdirSync(join(projDir, "log"), { recursive: true });
   const readme = join(projDir, "README.md");
-  if (!existsSync(readme)) {
-    writeFileSync(readme, [
-      "---", `type: project_memory`, `project: ${slug}`, ...(scope ? [`scope: ${scope}`] : []), `updated_at: ${date}`, "---", "",
-      `# ${slug}`, "",
-      "## 现状", "(项目当前状态、入口、未决问题——人和 AI 共同维护，这是项目唯一真相)", "",
-      "## 已知陷阱", "", "## 决策", "",
-    ].join("\n"));
-  }
+  // 骨架文本只定义在 project-knowledge.ts：角色记忆包靠同一份占位行判「README 还是空模板」
+  if (!existsSync(readme)) writeFileSync(readme, projectReadmeSkeleton(slug, scope, date));
   writeEntry(join(projDir, "log", `${date.slice(0, 7)}.md`), entry, opts?.key);
 }
 
-async function captureOne(s: { id: string; cwd: string; project: string; title: string; scope?: Scope; read: () => Transcript }) {
+/** 返回根目录会话这次定下的归属（下次重收沿用）；不是根目录会话返回 undefined */
+async function captureOne(
+  s: { id: string; cwd: string; project: string; title: string; scope?: Scope; read: () => Transcript },
+  prev?: { slug: string; scope: Scope },
+): Promise<{ slug: string; scope: Scope } | undefined> {
   const { text: conversation, paths } = s.read();
   if (conversation.length < 500) { log(`capture [${s.project}]: 对话文本不足 500 字，跳过`); return; }
 
@@ -318,7 +360,19 @@ async function captureOne(s: { id: string; cwd: string; project: string; title: 
   const cwdSlug = (s.cwd.split("/").filter(Boolean).pop() || "misc").toLowerCase();
   const cwdScope = s.scope ?? scopeOf(s.cwd);
   const repos = paths.length ? touchedRepos(paths) : [];
-  const { scope, slug, repos: repoNames } = resolveScope(cwdScope, cwdSlug, existsSync(s.cwd) ? repoRootOf(s.cwd) : null, repos);
+  const cwdRoot = existsSync(s.cwd) ? repoRootOf(s.cwd) : null;
+  let { scope, slug, repos: repoNames } = resolveScope(cwdScope, cwdSlug, cwdRoot, repos);
+  // 根目录里开的会话、也没有主导仓库（飞书文档、手机运维、本机排障…）：按内容归到领域角色。
+  // 目录已经不在了的（清掉的 worktree、搬走的仓库）不算根目录——那是仓库会话，不该拿去猜领域
+  // 只记有把握的归属：拿不准的那次不定死（会话还在长，下次重收素材多了再判）
+  let decided: { slug: string; scope: Scope } | undefined;
+  if (!cwdRoot && existsSync(s.cwd) && slug === cwdSlug) {
+    if (prev) { slug = prev.slug; scope = prev.scope; decided = prev; }
+    else {
+      const d = await domainFor([res.title, res.problem, res.solution].filter(Boolean).join("\n"));
+      if (d) { scope = d.scope; slug = d.slug; decided = { slug, scope }; }
+    }
+  }
   const time = fmt(new Date(), "time");
   const entry = [
     `## ${time} | ${slug} | ${String(res.title).slice(0, 60)}`,
@@ -330,5 +384,6 @@ async function captureOne(s: { id: string; cwd: string; project: string; title: 
     "", "",
   ].join("\n");
   appendKnowledge(s.cwd, slug, entry, scope);
-  log(`capture [${scope ? `${scope}/` : ""}${slug}] ${res.title}${slug !== cwdSlug ? `（cwd=${cwdSlug}，按触达仓库归到 ${slug}）` : ""}`);
+  log(`capture [${scope ? `${scope}/` : ""}${slug}] ${res.title}${slug !== cwdSlug ? `（cwd=${cwdSlug}，按${repoNames.includes(slug) ? "触达仓库" : "内容（领域角色）"}归到 ${slug}）` : ""}`);
+  return decided;
 }

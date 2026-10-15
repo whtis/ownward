@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -42,6 +43,7 @@ fun AgentScreen(
     onOpenTask: (String) -> Unit,
     onNewTask: () -> Unit,
     onOpenTerminal: (taskId: String, ccId: String?) -> Unit,
+    onOpenRoles: () -> Unit = {},
 ) {
     var sessions by remember { mutableStateOf<List<RecentSession>>(emptyList()) }
     var tasks by remember { mutableStateOf<List<WorkTask>>(emptyList()) }
@@ -97,6 +99,9 @@ fun AgentScreen(
                 navigationIcon = { if (!searching) DrawerMenuButton() },
                 actions = {
                     if (!searching) {
+                        // 角色：派任务的另一个入口——挑「谁来接」，目录跟着角色走
+                        RoundIconButton(Icons.Filled.Groups, "角色") { onOpenRoles() }
+                        Spacer(Modifier.width(8.dp))
                         RoundIconButton(Icons.Filled.Search, "搜索") { searching = true }
                         Spacer(Modifier.width(12.dp))
                     }
@@ -129,7 +134,7 @@ fun AgentScreen(
                     EntityRow(
                         dot = ownwardColors.Success,
                         title = s.title.ifBlank { s.last }.ifBlank { "会话" },
-                        sub = sessionSub(s.project, engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
+                        sub = sessionSub(s.project, s.roleName.orEmpty(), engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
                     ) { open { onOpenTask(s.id) } }
                 }
                 items(terminalRunning.size, key = { "term-" + terminalRunning[it].id }) { i ->
@@ -150,7 +155,7 @@ fun AgentScreen(
                         dot = if (s.status == "done") ownwardColors.Accent
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                         title = s.title.ifBlank { s.last }.ifBlank { "会话" },
-                        sub = sessionSub(s.project, engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
+                        sub = sessionSub(s.project, s.roleName.orEmpty(), engineLabel(s.mode, s.backend, s.providerId), timeAgo(s.lastAt)),
                     ) { open { onOpenTask(s.id) } }
                 }
             }

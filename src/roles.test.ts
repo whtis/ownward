@@ -18,6 +18,7 @@ import {
   promoteRoleCandidate,
   resolveRole,
   roleMemoryPack,
+  roleKindLabel,
   roleOrg,
   updateRole,
   useVaultForTest,
@@ -941,5 +942,117 @@ describe("同 scope 同主项目多个在岗专家（磁盘旁路）", () => {
     expect(list.find((r) => r.id === "ownward-dev")!.conflictMsg).toContain("改名");
     // 不同 scope 的同名项目互不干扰：private 那份只是被 id 冲突牵连，不算主项目冲突
     expect(list.find((r) => r.id === "ownward-dev2")!.conflictMsg).toContain("在岗专家");
+  });
+});
+
+describe("V3 自动角色字段：dirs / origin", () => {
+  test("dirs 只收绝对路径（去重、去尾斜杠），origin 只能是 auto 或留空；读回来一致", () => {
+    freshVault();
+    const r = ok(createRole({ ...NEW_ROLE, dirs: ["/repo/a/", "/repo/a", "/repo/b"], origin: "auto" }));
+    expect((r as any).role.dirs).toEqual(["/repo/a", "/repo/b"]);
+    expect((r as any).role.origin).toBe("auto");
+    expect(getRole("dev")).toMatchObject({ dirs: ["/repo/a", "/repo/b"], origin: "auto" });
+    for (const dirs of [["relative/dir"], ["/repo/../etc"], ["/a\0b"], Array.from({ length: 21 }, (_, i) => `/d${i}`)]) {
+      bad(updateRole("dev", { dirs }));
+    }
+    bad(updateRole("dev", { origin: "robot" }));
+  });
+
+  test("旧 role.json 没有这两个键：读成人建的、没登记目录；手改坏的整份作废", () => {
+    const root = freshVault();
+    writeRoleJson(root, "", "old", RAW_MANIFEST);
+    expect(getRole("old")).toMatchObject({ dirs: [], origin: "" });
+    writeRoleJson(root, "", "bad-dirs", { ...RAW_MANIFEST, dirs: "/not/an/array" });
+    writeRoleJson(root, "", "bad-dir", { ...RAW_MANIFEST, dirs: ["../../escape"] });
+    writeRoleJson(root, "", "bad-origin", { ...RAW_MANIFEST, origin: 1 });
+    expect(listRoles().map((r) => r.id)).toEqual(["old"]);
+  });
+
+  test("被接口固定路由占用的 id 建不出来（建了详情也永远打不开）", () => {
+    freshVault();
+    for (const id of ["projects", "suggestions", "resolve", "owner", "cross"]) bad(createRole({ ...NEW_ROLE, id }));
+  });
+});
+
+describe("记忆包读整个项目，而不只是 README", () => {
+  test("日志 / 项目决策都进来；只有模板的角色文档与 README 空骨架不进", () => {
+    const root = freshVault();
+    const dir = join(root, "projects", "ownward");
+    mkdirSync(join(dir, "log"), { recursive: true });
+    writeFileSync(join(dir, "README.md"), "---\ntype: project_memory\n---\n\n# ownward\n\n## 现状\n(项目当前状态、入口、未决问题——人和 AI 共同维护，这是项目唯一真相)\n\n## 已知陷阱\n\n## 决策\n");
+    writeFileSync(join(dir, "decisions.md"), "# 项目决策\n- PROJ_DECISION_MARKER\n");
+    writeFileSync(join(dir, "log", "2026-10.md"), "## 10:00 | ownward | 修了 SSE\n- **Problem**: LOG_PROBLEM_MARKER\n- **Solution**: idleTimeout 设 120\n\n");
+    ok(createRole({ ...NEW_ROLE, projects: ["ownward"] }));   // 种子 principles/decisions/backlog 只有标题和引导语
+    const pack = roleMemoryPack("dev");
+    expect(pack).toContain("### 项目记忆：ownward");
+    expect(pack).toContain("PROJ_DECISION_MARKER");
+    expect(pack).toContain("LOG_PROBLEM_MARKER");
+    expect(pack).not.toContain("人和 AI 共同维护");
+    expect(pack).not.toContain("一条一行，写结论不写过程");
+    expect(pack).not.toContain("type: role_principles");
+    // task 档附上记忆目录路径（任务 agent 能自己翻），chat 档不附
+    expect(roleMemoryPack("dev", undefined, { audience: "task" })).toContain(`${dir}/`);
+    expect(pack).not.toContain(`${dir}/`);
+  });
+});
+
+describe("记忆包里的角色叫法", () => {
+  test("自动建的 Owner / 跨项目角色换叫法；人建的仍是项目专家 / 职能负责人", () => {
+    const root = freshVault();
+    seedProject(root, "", "ownward", "OWNWARD_README_MARKER");
+    seedProject(root, "", "desk", "DESK_README_MARKER");
+    ok(createRole({ id: "owner-ownward", name: "ownward Owner", type: "project", primaryProject: "ownward", origin: "auto" }));
+    ok(createRole({ id: "cross-x", name: "ownward + desk", projects: ["ownward", "desk"], origin: "auto" }));
+    ok(createRole({ ...NEW_ROLE, projects: ["desk"] }));
+    expect(roleMemoryPack("owner-ownward")).toContain("· 项目 Owner");
+    expect(roleMemoryPack("cross-x")).toContain("· 跨项目角色");
+    expect(roleMemoryPack("dev")).toContain("· 职能负责人");
+  });
+});
+
+describe("V4 领域角色与曾用名：origin=domain / history", () => {
+  test("领域角色只能是项目专家形状（主项目 = 它的虚拟项目）；叫法统一走 roleKindLabel", () => {
+    const root = freshVault();
+    seedProject(root, "", "biz-ops", "# 业务运营\n");
+    ok(createRole({ id: "domain-biz-ops", name: "业务运营", type: "project", primaryProject: "biz-ops", origin: "domain" }));
+    bad(createRole({ id: "domain-x", name: "x", type: "lead", origin: "domain" }));
+    expect(getRole("domain-biz-ops")).toMatchObject({ origin: "domain", type: "project", primaryProject: "biz-ops", projects: ["biz-ops"] });
+    const table: Array<[string, string, string]> = [
+      ["project", "domain", "领域角色"], ["project", "auto", "项目 Owner"], ["project", "", "项目专家"],
+      ["lead", "auto", "跨项目角色"], ["lead", "", "职能负责人"],
+    ];
+    for (const [type, origin, label] of table) expect(roleKindLabel({ type: type as any, origin })).toBe(label);
+    bad(createRole({ ...NEW_ROLE, id: "domain" }));   // 被 /api/roles/domain 占了
+  });
+
+  test("history 走与 projects 同一套 slug 校验，不许和关联项目重叠；旧 role.json 没这个键读成空", () => {
+    const root = freshVault();
+    const r = ok(createRole({ ...NEW_ROLE, type: "project", primaryProject: "internal", history: ["Cockpit", "cockpit", "cockpit-dist"] }));
+    expect((r as any).role.history).toEqual(["cockpit", "cockpit-dist"]);
+    bad(updateRole("dev", { history: ["../etc"] }));
+    bad(updateRole("dev", { history: "cockpit" }));
+    bad(updateRole("dev", { history: ["internal"] }));                 // 主项目同时当曾用名
+    bad(updateRole("dev", { projects: ["internal", "cockpit"] }));     // 反过来把曾用名加进关联项目也拒
+    writeRoleJson(root, "", "old", RAW_MANIFEST);
+    expect(getRole("old")).toMatchObject({ history: [] });
+    writeRoleJson(root, "", "bad-history", { ...RAW_MANIFEST, history: [1] });
+    expect(listRoles().map((x) => x.id).sort()).toEqual(["dev", "old"]);
+  });
+
+  test("记忆包：曾用名下的记录排在现状之后、标明是历史；读的还是本 scope 的 projects/", () => {
+    const root = freshVault(["work", "private"]);
+    seedProject(root, "private", "internal", "# internal\n\n## 现状\nCURRENT_STATE\n");
+    seedProject(root, "private", "cockpit", "# cockpit\n\n## 现状\nOLD_NAME_STATE\n");
+    seedProject(root, "work", "cockpit", "# cockpit\n\n## 现状\nWORK_SIDE_LEAK\n");
+    ok(createRole({ ...NEW_ROLE, scope: "private", type: "project", primaryProject: "internal", history: ["cockpit"] }));
+    for (const audience of ["chat", "task"] as const) {
+      const pack = roleMemoryPack("dev", undefined, { audience });
+      expect(pack).toContain("CURRENT_STATE");
+      expect(pack).toContain("曾用名下的历史记录（cockpit）");
+      expect(pack).toContain("OLD_NAME_STATE");
+      expect(pack.indexOf("CURRENT_STATE")).toBeLessThan(pack.indexOf("OLD_NAME_STATE"));
+      expect(pack).not.toContain("WORK_SIDE_LEAK");
+    }
+    expect(roleMemoryPack("dev", undefined, { audience: "task" })).toContain(join(root, "private", "projects", "cockpit"));
   });
 });

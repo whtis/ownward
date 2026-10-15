@@ -169,10 +169,12 @@ export function scopedTasks(roots: string[], capabilities: readonly string[]=[])
   return Object.freeze({
     async startWork(input) {
       input={...input,...(["model","effort","permission"] as const).reduce((out,key)=>({...out,[key]:typeof input[key]==="string"&&input[key]!.trim()===""?undefined:typeof input[key]==="string"?input[key]!.trim():input[key]}),{})};
-      const keys=["dir","task","bg","codex","provider","worktree","model","effort","permission","extraDirs","images","uploadScope"], imageOk=(image:unknown)=>!!image&&typeof image==="object"&&!Array.isArray(image)&&Object.keys(image).every((key)=>["media_type","data"].includes(key))&&typeof (image as any).media_type==="string"&&typeof (image as any).data==="string";
+      const keys=["dir","task","bg","codex","provider","worktree","model","effort","permission","extraDirs","images","uploadScope","role"], imageOk=(image:unknown)=>!!image&&typeof image==="object"&&!Array.isArray(image)&&Object.keys(image).every((key)=>["media_type","data"].includes(key))&&typeof (image as any).media_type==="string"&&typeof (image as any).data==="string";
       if (!input || typeof input!=="object"||Object.keys(input).some((k)=>!keys.includes(k))||typeof input.dir !== "string" || typeof input.task !== "string" || !input.task.trim()||input.task.length>100_000||["bg","codex","worktree"].some((key)=>(input as any)[key]!==undefined&&typeof (input as any)[key]!=="boolean")||["model","effort"].some((key)=>(input as any)[key]!==undefined&&typeof (input as any)[key]!=="string")||(input.images!==undefined&&(!Array.isArray(input.images)||!input.images.every(imageOk)))) throw new Error("VERTICAL_TASK_INPUT_INVALID");
       if (input.permission !== undefined && !["safe","bypass"].includes(input.permission)) throw new Error("VERTICAL_TASK_INPUT_INVALID");if(input.provider!==undefined&&!["claude","codex","codebuddy"].includes(input.provider))throw new Error("VERTICAL_TASK_INPUT_INVALID");if(input.permission==="bypass"&&(!capabilities.includes("tasks:full-access")||cfg.architecture?.allowFullAccess!==true))throw Object.assign(new Error("SESSION_ACCESS_NOT_GRANTED: Vertical capability 与 architecture.allowFullAccess 必须同时授权"),{code:"SESSION_ACCESS_NOT_GRANTED"}); if(input.extraDirs!==undefined&&(!Array.isArray(input.extraDirs)||input.extraDirs.some((x)=>typeof x!=="string")))throw new Error("VERTICAL_TASK_INPUT_INVALID");
       if (input.uploadScope !== undefined && (typeof input.uploadScope !== "string" || !input.uploadScope)) throw new Error("VERTICAL_TASK_INPUT_INVALID");
+      // role：auto（缺省）/ none / 角色 id。id 只认角色 id 白名单——它要拼 vault 目录去读记忆
+      if (input.role !== undefined && (typeof input.role !== "string" || !/^(?:auto|none|[a-z0-9][a-z0-9-]{1,39})$/.test(input.role))) throw new Error("VERTICAL_TASK_INPUT_INVALID: role 只能是 auto / none / 角色 id");
       if (input.bg === false && input.extraDirs?.length) throw new Error("VERTICAL_TASK_INPUT_INVALID: terminal 模式不支持附加目录");
       const dir = grant(input.dir);
       let extraDirs = canonicalTaskExtraDirs(input.extraDirs, dir, grant), task = input.task;
@@ -194,7 +196,8 @@ export function scopedTasks(roots: string[], capabilities: readonly string[]=[])
           }
         }
       }
-      return startWork(dir, task, { bg: input.bg, codex: input.codex, provider: input.provider, worktree: input.worktree, model: input.model, effort: input.effort, permission: input.permission??"safe", extraDirs, images: input.images });
+      // 人派的任务缺省就找角色接（自动匹配/建项目 Owner）；手机端等老客户端不传 role 也一样
+      return startWork(dir, task, { bg: input.bg, codex: input.codex, provider: input.provider, worktree: input.worktree, model: input.model, effort: input.effort, permission: input.permission??"safe", extraDirs, images: input.images, role: input.role ?? "auto", roleText: input.task });
     },
     list: () => structuredClone(loadTasks().filter((task) => {
       try { grant(task.cwd); return true; } catch { return false; }

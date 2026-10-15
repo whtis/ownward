@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { isAbsolute, join, normalize, relative, sep } from "path";
 import type { RunnerHistoryMessage } from "../runner/server.ts";
 import { AGENT_IMAGE_PROVIDER_LINE_MAX_BYTES } from "../runner/agent-images.ts";
+import { stripRoleContext } from "../role-context.ts";
 
 const MAX_READ_BYTES = 8 * 1024 * 1024, CODEX_SEMANTIC_BYTES = 8 * 1024 * 1024, CODEX_SEMANTIC_LINES = 4_000, MAX_MESSAGES = 100, MAX_TEXT = 2000;
 const marker = (text: string): RunnerHistoryMessage[] => [{ role: "system", name: "history", text }];
@@ -32,12 +33,13 @@ export class CodexRolloutDecoder {
     if (entry?.type === "event_msg" && (payload.type === "user_message" || payload.type === "agent_message") && typeof payload.message === "string") {
       decoded = {
         role: payload.type === "user_message" ? "user" : "assistant",
-        text: payload.message.slice(0, this.maxText),
+        // 角色信封要在截断之前拆：截断后找不到闭合标签，几千字的记忆就原样冒充成用户的第一句话
+        text: (payload.type === "user_message" ? stripRoleContext(payload.message) : payload.message).slice(0, this.maxText),
         ...(typeof entry.timestamp === "string" ? { ts: entry.timestamp } : {}),
         variant: "event_msg",
       };
     } else if (entry?.type === "response_item" && payload.type === "message" && (payload.role === "user" || payload.role === "assistant")) {
-      const value = codexContentText(payload.content);
+      const raw = codexContentText(payload.content), value = payload.role === "user" ? stripRoleContext(raw) : raw;
       if (value) decoded = {
         role: payload.role,
         text: value.slice(0, this.maxText),
@@ -92,7 +94,7 @@ function oneFile(root: string, accept: (path: string) => boolean): string {
 export function readClaudeTranscript(nativeRef: string, home = homedir()): RunnerHistoryMessage[] {
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(nativeRef)) throw new Error("Claude nativeRef 非法");
   try { const path = oneFile(join(home, ".claude", "projects"), (p) => p.endsWith(`/${nativeRef}.jsonl`)); const out: RunnerHistoryMessage[] = []; let invalid = 0;
-    for (const line of boundedLines(path)) { let e: any; try { e = JSON.parse(line); } catch { invalid++; continue; } if (e.isSidechain || e.parent_tool_use_id || e.isMeta) continue; const value = text(e.message?.content).trim(); if ((e.type === "user" || e.type === "assistant") && value) out.push({ role: e.type, text: value.slice(0, MAX_TEXT), ...(typeof e.timestamp === "string" ? { ts: e.timestamp } : {}) }); }
+    for (const line of boundedLines(path)) { let e: any; try { e = JSON.parse(line); } catch { invalid++; continue; } if (e.isSidechain || e.parent_tool_use_id || e.isMeta) continue; const raw = text(e.message?.content).trim(), value = e.type === "user" ? stripRoleContext(raw) : raw; if ((e.type === "user" || e.type === "assistant") && value) out.push({ role: e.type, text: value.slice(0, MAX_TEXT), ...(typeof e.timestamp === "string" ? { ts: e.timestamp } : {}) }); }
     if (!out.length) return marker(invalid ? "⚠️ Claude 历史记录损坏，未能恢复可显示消息" : "Claude 历史记录中没有可显示消息"); return out.slice(-MAX_MESSAGES);
   } catch (error) { return marker(`⚠️ Claude 历史读取失败：${error instanceof Error ? error.message : "未知错误"}`); }
 }

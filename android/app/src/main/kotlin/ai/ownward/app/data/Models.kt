@@ -133,6 +133,8 @@ data class WorkTask(
     val endedAt: String? = null,
     val exitCode: Int? = null,
     val ccSessionId: String? = null, // terminal 任务认领到的底层 Claude 会话（旁观/接管到引擎用）
+    val roleId: String? = null,      // 接这个任务的角色（src/role-auto.ts，派发时定死）
+    val roleName: String? = null,
 )
 
 @Serializable
@@ -149,6 +151,7 @@ data class RecentSession(
     val last: String = "",
     val backend: String? = null,
     val providerId: String? = null,
+    val roleName: String? = null, // 接这个任务的角色；老 daemon 不下发
 )
 
 @Serializable
@@ -399,6 +402,104 @@ data class OkMsg(
 data class ProjectDir(
     val name: String = "",
     val dir: String = "",
+)
+
+// ---- 角色（src/roles.ts + src/role-auto.ts）----
+
+/** 角色：type=project 是项目 Owner / 项目专家，type=lead 是跨项目角色 / 职能负责人；origin=auto 是 Ownward 自动建的，
+ *  origin=domain 是领域角色（管没有仓库的那类活，形状上是 type=project，primaryProject 是 vault 里的虚拟项目） */
+@Serializable
+data class AgentRole(
+    val id: String,
+    val name: String = "",
+    val description: String = "",
+    val type: String = "lead",          // lead | project
+    val origin: String = "",            // "" = 人建的 | auto | domain
+    val status: String = "active",      // active | archived
+    val scope: String = "",             // work | private | ""（不分流）
+    val primaryProject: String = "",
+    val projects: List<String> = emptyList(),
+    val dirs: List<String> = emptyList(), // 本机工作目录：派任务时第一个当主目录，其余当附加目录
+    val conflict: Boolean = false,      // 同 id 两份 / 同项目两个在岗专家：服务端一概拒绝操作
+    val conflictMsg: String = "",
+)
+
+/** GET /api/roles。dispatchRole=true 才说明 /api/work 收 role 键——老 daemon 也有这个接口，但给它发 role 会整包 400 */
+@Serializable
+data class RolesResponse(
+    val ok: Boolean = false,
+    val roles: List<AgentRole> = emptyList(),
+    val dispatchRole: Boolean = false,
+    val autoRole: Boolean = false,
+)
+
+/** POST /api/roles/resolve：「自动」会落到谁（只读预览，不建任何东西）。
+ *  by 往后四个是领域角色带来的，老 daemon 不下发：by="task" = 主目录不是仓库、按任务描述匹配领域角色；
+ *  needsTask = 还没写任务描述；candidates = 拿不准，要人从这几个里手选（派发时服务端不替人挑）；why = 匹配上的一句依据 */
+@Serializable
+data class RoleAutoPick(
+    val roleId: String = "",
+    val name: String = "",
+    val willCreate: Boolean = false,
+    val reason: String = "",
+    val by: String = "",
+    val needsTask: Boolean = false,
+    val candidates: List<RoleRefLite> = emptyList(),
+    val why: String = "",
+)
+
+/** 只带 id 和名字的角色引用（预览里的候选） */
+@Serializable
+data class RoleRefLite(
+    val id: String,
+    val name: String = "",
+)
+
+/** 跨了 ≥2 个项目且没有角色同时管它们：possible=false 时 reason 说为什么建不成（工作/私人混搭） */
+@Serializable
+data class RoleCross(
+    val possible: Boolean = false,
+    val reason: String = "",
+    val name: String = "",
+    val labels: List<String> = emptyList(),
+    val slugs: List<String> = emptyList(),
+    val dirs: List<String> = emptyList(),
+)
+
+@Serializable
+data class RolePreview(
+    val ok: Boolean = false,
+    val msg: String = "",
+    val auto: RoleAutoPick = RoleAutoPick(),
+    val cross: RoleCross? = null,
+)
+
+/** GET /api/roles/suggestions 的一条：近 90 天同时动过这几个项目、又没有角色同时管它们 */
+@Serializable
+data class RoleSuggestion(
+    val key: String,
+    val scope: String = "",
+    val slugs: List<String> = emptyList(),
+    val labels: List<String> = emptyList(),
+    val dirs: List<String> = emptyList(),
+    val count: Int = 0,
+    val lastAt: String = "",
+    val name: String = "",
+)
+
+@Serializable
+data class RoleSuggestions(
+    val ok: Boolean = false,
+    val suggestions: List<RoleSuggestion> = emptyList(),
+)
+
+/** POST /api/roles/cross 等建角色接口：{ok, msg, role, created} */
+@Serializable
+data class RoleMutation(
+    val ok: Boolean = false,
+    val msg: String = "",
+    val role: AgentRole? = null,
+    val created: Boolean = false,
 )
 
 /** GET /api/fs/dirs：目录浏览严格限制在服务端 architecture.allowedRoots 内。 */

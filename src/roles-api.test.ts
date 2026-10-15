@@ -130,3 +130,53 @@ describe("Role 路由的状态码映射", () => {
     expect(okp.body.msg).toContain("ownward/decisions.md");
   });
 });
+
+describe("GET /api/roles 的客户端能力字段", () => {
+  test("声明 /api/work 收 role 键（手机端据此决定画不画「角色」那一节、发不发 role）", async () => {
+    freshVault();
+    const r = await call("GET", "/api/roles");
+    expect(r.status).toBe(200);
+    expect(r.body.dispatchRole).toBe(true);
+    expect(typeof r.body.autoRole).toBe("boolean");
+  });
+
+  test("没匹配上的 /api/roles/* 固定段一律显式 404，不落到「按 id 读角色」", async () => {
+    freshVault();
+    const r = await call("POST", "/api/roles/suggestions");   // suggestions 只收 GET
+    expect(r.status).toBe(404);
+  });
+});
+
+describe("领域角色接口：POST /api/roles/domain 与按任务描述的预览", () => {
+  test("建（目录要过授权根）、重复建复用、短名不合法 400；根目录预览带上任务描述就按描述匹配", async () => {
+    freshVault();
+    const ws = mkdtempSync(join(tmpdir(), "ownward-roles-api-ws-"));
+    const outside = mkdtempSync(join(tmpdir(), "ownward-roles-api-out-"));
+    roots.push(ws, outside);
+    const { cfg } = await import("./util.ts");
+    const { useRoleAutoForTest } = await import("./role-auto.ts");
+    const saved = cfg.architecture;
+    cfg.architecture = { ...(saved || {}), allowedRoots: [ws] };
+    const prompts: string[] = [];
+    useRoleAutoForTest({ llm: async (p) => { prompts.push(p); return { roleId: "domain-device-ops", confidence: "high", candidates: [], why: "云客手机" }; } });
+    try {
+      const made = await call("POST", "/api/roles/domain", { name: "手机设备运维", scope: "", slug: "device-ops", description: "云客手机与平板", dirs: [ws] });
+      expect(made.status).toBe(200);
+      expect(made.body).toMatchObject({ ok: true, created: true, role: { id: "domain-device-ops", origin: "domain", primaryProject: "domain-device-ops" } });
+      expect((await call("POST", "/api/roles/domain", { name: "手机设备运维", scope: "", slug: "device-ops" })).body).toMatchObject({ ok: true, created: false });
+      expect((await call("POST", "/api/roles/domain", { name: "x", scope: "", slug: "Bad Slug" })).status).toBe(400);
+      expect((await call("POST", "/api/roles/domain", { name: "x", scope: "", slug: "ok-slug", dirs: [outside] })).status).toBe(403);
+      // 通用建角色/改角色接口不许把角色标成领域角色（领域角色要走上面那条，负责建虚拟项目）
+      expect((await call("POST", "/api/roles", { id: "sneaky", name: "x", type: "project", primaryProject: "p", origin: "domain" })).status).toBe(400);
+
+      const pending = await call("POST", "/api/roles/resolve", { dir: ws });
+      expect(pending.body.auto).toMatchObject({ by: "task", needsTask: true });
+      const hit = await call("POST", "/api/roles/resolve", { dir: ws, task: "云客手机老是半夜重启" });
+      expect(hit.body.auto).toMatchObject({ roleId: "domain-device-ops", name: "手机设备运维", by: "task" });
+      expect(prompts).toHaveLength(1);
+    } finally {
+      cfg.architecture = saved;
+      useRoleAutoForTest(null);
+    }
+  });
+});

@@ -16,7 +16,7 @@ import {
 type EventInput = ProviderEventInput;
 type ControlWait = { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; onAck?: () => void };
 type PendingApproval = { requestId: string; runId: string; input: Record<string, unknown>; reserved: boolean };
-type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; model?: string /* 本轮最近一个主线程 assistant 帧的模型 id：result.modelUsage 按它取窗口 */; toolNames?: Map<string, string>; held?: { since: number; timer: ReturnType<typeof setInterval> } };
+type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; model?: string /* 本轮最近一个主线程 assistant 帧的模型 id：result.modelUsage 按它取窗口 */; toolNames?: Map<string, string>; held?: { since: number; timer: ReturnType<typeof setInterval>; busy?: boolean /* 主线程正在跑汇报伪 turn（init 之后、result 之前）*/ } };
 type ClaudeSession = {
   sessionId: string; cwd: string; options: ClaudeSessionOptions; nativeRef?: string; proc?: Bun.Subprocess; generation: number;
   /** 分叉来源：拿到自己的 init session_id 之前每次 spawn 都带 --resume <forkFrom> --fork-session；init 回来即清 */
@@ -334,6 +334,8 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       return;
     }
     const turn = session.turn; if (!turn) return this.dropFrame(session, "no-active-turn"); const command = turn.command;
+    // 汇报伪 turn 进行中：主线程可能正跑一个长时间不出帧的工具（verify.sh 之类），不能拿「静默」当子代理没汇报
+    if (turn.held && (raw.type === "assistant" || raw.type === "user" || raw.type === "stream_event" || raw.type === "control_request" || (raw.type === "system" && raw.subtype === "init"))) turn.held.busy = true;
     if (raw.type === "system" && raw.subtype === "init") { if (typeof raw.session_id !== "string" || !raw.session_id) return this.failTurn(session, "provider_protocol_error", "Claude init 缺 session_id");
       // 分叉没换出新 id：CLI 在原会话上续写了——绑定它会让两条 Session 抢同一个原生会话，必须当场失败
       if (session.forkFrom && !session.nativeRef && raw.session_id === session.forkFrom) return this.failTurn(session, "provider_protocol_error", "Claude 分叉未生成新会话（--fork-session 未生效）");
@@ -398,6 +400,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       return;
     }
     if (raw.type === "result") {
+      if (turn.held) turn.held.busy = false;
       // 上面那条后台任务通知在 CLI 里是一个独立的伪 turn（init + result(origin.kind="task-notification")），
       // 跟用户这条消息无关。认它作 turn 终结 → runTurn 立刻 SIGKILL CLI，而用户的消息还没被 CLI 从
       // stdin 读走，随进程一起蒸发；run 却记成 completed，前端连个提示都没有
@@ -429,8 +432,10 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       if (turn.interruptRequested) return this.finishTurn(turn, "interrupted");
       if (!awaited.size) return this.finishTurn(turn, "completed");
       if (now - since > this.options.backgroundHoldMaxMs) { this.notice(turn, "background_task", { message: `后台子代理 ${Math.round(this.options.backgroundHoldMaxMs / 60_000)} 分钟仍未汇报，已停止` }); awaited.clear(); return this.finishTurn(turn, "completed"); }
-      // CLI 已不再报这些子代理在跑，又迟迟没有汇报伪 turn：别无限挂着
-      if (![...awaited].some((id) => session.liveAgents?.has(id)) && now - (session.lastFrameAt ?? since) > this.options.backgroundReportGraceMs) { this.notice(turn, "background_task", { message: "后台子代理已结束，但没有收到汇报" }); awaited.clear(); return this.finishTurn(turn, "completed"); }
+      // CLI 已不再报这些子代理在跑，又迟迟没有汇报伪 turn：别无限挂着。主线程正在处理汇报时不算——
+      // 汇报伪 turn 的 result 要等主线程把活干完才来（2026-10-15 实撞：汇报后 agent 跑 verify.sh 静默 60s+，
+      // 被当成「没收到汇报」收尾，CLI 连同正在跑的命令一起被杀）
+      if (!turn.held?.busy && ![...awaited].some((id) => session.liveAgents?.has(id)) && now - (session.lastFrameAt ?? since) > this.options.backgroundReportGraceMs) { this.notice(turn, "background_task", { message: "后台子代理已结束，但没有收到汇报" }); awaited.clear(); return this.finishTurn(turn, "completed"); }
     };
     turn.held = { since, timer: setInterval(check, this.options.backgroundCheckMs) };
   }

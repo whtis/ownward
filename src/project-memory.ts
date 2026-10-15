@@ -13,6 +13,7 @@ import { isStrictlyWithin } from "./path-within.ts";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { projectDir, projectsDir, type Scope } from "./paths.ts";
+import { projectReadmeSkeleton } from "./project-knowledge.ts";
 import { activeVault, type Fail, type Result } from "./roles.ts";
 import { fmt, log } from "./util.ts";
 
@@ -68,6 +69,31 @@ function projectHome(slug: string, scope: Scope): { ok: true; dir: string } | Fa
     return fail("invalid", `项目 ${s} 的目录读不到（软链断了？）：${String(e).slice(0, 80)}`);
   }
   return { ok: true, dir };
+}
+
+/** 给自动角色用：项目目录不存在就建出 README 骨架（与收割建的同一份），已存在一律不碰。
+ *  自动建的 Owner 一出生就能存项目候选——候选写入要求项目目录已存在（见 projectHome），
+ *  而第一次收割要等任务结束，这中间对话里点「存为项目候选」会莫名 404。 */
+export function ensureProjectHome(slug: string, scope: Scope): { ok: true; dir: string; created: boolean } | Fail {
+  const s = String(slug ?? "").trim().toLowerCase();
+  if (!SLUG_RE.test(s)) return fail("invalid", `项目 slug 不合法：${String(slug).slice(0, 40)}`);
+  const { root, scopes } = activeVault();
+  if (!scopes.includes(scope)) return fail("invalid", `scope 不合法：${String(scope).slice(0, 20)}`);
+  const base = projectsDir(scope, root);
+  const dir = projectDir(s, scope, root);
+  if (!isStrictlyWithin(base, dir)) return fail("invalid", "项目路径越界");
+  if (existsSync(dir)) {
+    const home = projectHome(s, scope);   // 已存在的目录照样过软链复核：不往 vault 外面认项目
+    return isFail(home) ? home : { ok: true, dir: home.dir, created: false };
+  }
+  try {
+    mkdirSync(join(dir, "log"), { recursive: true });
+    writeFileSync(join(dir, "README.md"), projectReadmeSkeleton(s, scope, fmt(new Date(), "date")), { flag: "wx" });
+  } catch (e: any) {
+    if (e?.code !== "EEXIST") return fail("conflict", `建项目目录失败：${String(e).slice(0, 120)}`);
+  }
+  log(`project-memory: 建了项目骨架 ${scope ? scope + "/" : ""}${s}/（自动角色）`);
+  return { ok: true, dir, created: true };
 }
 
 function candidatesDir(projectHomeDir: string): string {

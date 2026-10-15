@@ -671,7 +671,10 @@ function bindTopbar() {
     if (fresh) S.projects = fresh;
     paintProjectCandidates();
   };
+  // 目录一变就重新匹配角色；真正的实现在下面的角色段里赋值（先占位，免得 const 暂时性死区）
+  let onWorkDirsChanged = () => {};
   const renderWorkExtraDirs = () => {
+    onWorkDirsChanged();
     $("#w-extra-chips").innerHTML = workExtraDirs.map((dir, i) => {
       const name = dir.split("/").filter(Boolean).at(-1) || dir;
       const removeLabel = `移除附加目录：${name}`;
@@ -686,6 +689,151 @@ function bindTopbar() {
     if (!workExtraDirs.includes(dir)) workExtraDirs.push(dir);
     renderWorkExtraDirs();
   };
+
+  // ---- 谁来接（role-auto.ts）：缺省自动匹配项目 Owner（没有就在派发时建）；跨了几个项目时问一句；
+  //      主目录不是仓库时按任务描述匹配领域角色，拿不准就列候选让人手选 ----
+  let workRoles = [];                // /api/roles 的角色（每次开弹窗重拉：角色页刚建/刚归档的要立刻反映）
+  let workPreview = null;            // /api/roles/resolve 最近一次结果：「自动」会落到谁、是不是跨项目
+  let workPreviewTask = "";          // 上面那次预览用的任务描述（按描述匹配时，描述改了预览就过期了）
+  let workPreviewDirs = "";          // 上面那次预览对应的目录组合（主目录 + 附加目录）：目录改了预览也过期
+  let workPendingRetries = 0;        // 模型还在判断（pending）时自动再问的次数，换描述/目录清零
+  /** 当前要派的目录组合，与预览请求同口径（terminal 模式不带附加目录） */
+  const workDirsKey = () => {
+    const dir = $("#w-dir").value.trim();
+    return JSON.stringify([dir, $("#w-bg").checked ? workExtraDirs.filter((d) => d !== dir) : []]);
+  };
+  let rolePreviewSeq = 0, rolePreviewTimer = null;
+  const crossSkipped = new Set();    // 这次弹窗里点过「不用」的组合，别反复问
+  let openWithRole = "";             // openWorkForRole 点名的角色：openWork 读一次就清
+  const workRoleKind = (r) => r.origin === "domain" ? "领域角色" : r.type === "project" ? (r.origin === "auto" ? "项目 Owner" : "项目专家") : (r.origin === "auto" ? "跨项目角色" : "职能负责人");
+  const WORK_PICK_MSG = "拿不准由哪个领域角色接，先在「角色」里选一个（或选「不用角色」）";
+  const WORK_MATCHING_MSG = "正在按新的任务描述匹配角色，稍等一下再派";
+  const WORK_DIR_MATCHING_MSG = "正在匹配这个目录的角色，稍等一下再派";
+  /** 提交时 role 键的最终值（与手机端 roleSubmit 同口径）：按描述匹配上的就点名发过去——预览给人看的是谁，
+   *  派出去就是谁（服务端重判可能因描述多了附件、模型超时而落到别处）；描述改了还没重新匹配完、或拿不准，就先拦下 */
+  const workRoleSubmit = (task) => {
+    const choice = $("#w-role").value || "auto";
+    if (choice !== "auto") return { role: choice };
+    // 目录刚改、预览还没跟上：上一个目录的预览（比如按描述匹配到的工作领域角色）不能拿来点名
+    if (workPreviewDirs !== workDirsKey()) return { block: WORK_DIR_MATCHING_MSG };
+    if (workPreview?.auto?.by !== "task" || !task) return { role: choice };
+    if (workPreviewTask !== task) return { block: WORK_MATCHING_MSG };
+    if (workPreview.auto.candidates?.length) return { block: WORK_PICK_MSG };
+    return { role: workPreview.auto.roleId || "auto" };
+  };
+  /** 「自动」拿不准、要人手选的候选（只在选择还是「自动」时算数：人已经点了一个，就不用再问） */
+  const workPickCandidates = () => ($("#w-role").value === "auto" && workPreview?.auto?.candidates?.length ? workPreview.auto.candidates : []);
+  const fillWorkRoles = (keep) => {
+    const sel = $("#w-role");
+    const cur = keep ?? sel.value ?? "auto";
+    const usable = workRoles.filter((r) => r.status !== "archived" && !r.conflict);
+    const group = (label, list) => list.length
+      ? `<optgroup label="${esc(label)}">${list.map((r) => `<option value="${esc(r.id)}">${esc(r.name || r.id)}</option>`).join("")}</optgroup>` : "";
+    sel.innerHTML = `<option value="auto">自动匹配（推荐）</option>`
+      + group("项目 Owner", usable.filter((r) => r.type === "project" && r.origin !== "domain"))
+      + group("领域角色", usable.filter((r) => r.origin === "domain"))
+      + group("跨项目角色", usable.filter((r) => r.type !== "project"))
+      + `<option value="none">不用角色</option>`;
+    sel.value = [...sel.options].some((o) => o.value === cur) ? cur : "auto";
+  };
+  const loadWorkRoles = async (keep) => {
+    const r = await getJSON("/api/roles").catch(() => null);
+    if (r?.ok) workRoles = r.roles || [];
+    fillWorkRoles(keep);
+  };
+  const renderWorkRoleHint = () => {
+    const hint = $("#w-role-hint"), box = $("#w-role-cross");
+    const choice = $("#w-role").value, p = workPreview;
+    let text = "", tone = "";
+    if (choice === "none") text = "不带角色记忆，agent 从零了解项目";
+    else if (choice !== "auto") {
+      const r = workRoles.find((x) => x.id === choice);
+      text = r ? `由「${r.name || r.id}」接手 · ${workRoleKind(r)}` : "这个角色读不到了，刷新一下";
+    } else if (!p) text = $("#w-dir").value.trim() ? "正在匹配…" : "选好目录后自动匹配这个项目的 Owner";
+    else if (p.auto.roleId && p.auto.by === "task") text = `由「${p.auto.name}」接手 · 按任务描述匹配${p.auto.why ? `（${p.auto.why}）` : ""}`;
+    else if (p.auto.roleId) text = `由「${p.auto.name}」接手`;
+    else if (p.auto.willCreate) { text = `将自动生成「${p.auto.name}」接手——这个项目还没有 Owner`; tone = "new"; }
+    else if (p.auto.candidates?.length) { text = p.auto.reason || "拿不准由哪个领域角色接，手选一个"; tone = "warn"; }
+    else text = p.auto.reason || "这次不带角色";
+    hint.textContent = text;
+    hint.dataset.tone = tone;
+    // 拿不准：候选一字排开，点一个就由它接；「不用角色」也给一个出口
+    const pick = $("#w-role-pick"), cands = workPickCandidates();
+    pick.hidden = !cands.length;
+    pick.innerHTML = cands.length
+      ? cands.map((c) => `<button type="button" class="button secondary sm" data-pick="${esc(c.id)}">${esc(c.name || c.id)}</button>`).join("")
+        + `<button type="button" class="button ghost sm" data-pick="none">不用角色</button>` : "";
+    pick.querySelectorAll("button[data-pick]").forEach((b) => b.addEventListener("click", () => chooseWorkRole(b.dataset.pick)));
+    // 跨项目只在「自动」时问：用户已经点名了某个角色，就别再劝他换
+    const c = p?.cross, key = c ? c.slugs.join("+") : "";
+    if (choice !== "auto" || !c || crossSkipped.has(key)) { box.hidden = true; box.innerHTML = ""; return; }
+    box.hidden = false;
+    box.innerHTML = c.possible
+      ? `<div>这次任务跨了 ${c.labels.length} 个项目（${esc(c.labels.join("、"))}），还没有角色同时管它们。要建一个能同时读这几个项目记忆的角色来接吗？</div>
+         <div class="row"><button type="button" class="button secondary sm" id="w-cross-create">建「${esc(c.name)}」并由它接手</button>
+         <button type="button" class="button ghost sm" id="w-cross-skip">不用，只带主项目的</button></div>`
+      : `<div class="quiet">${esc(c.reason)}，这次只带主项目的记忆</div>`;
+    $("#w-cross-create")?.addEventListener("click", createWorkCrossRole);
+    $("#w-cross-skip")?.addEventListener("click", () => { crossSkipped.add(key); renderWorkRoleHint(); });
+  };
+  const refreshRolePreview = (delay = 0) => {
+    clearTimeout(rolePreviewTimer);
+    rolePreviewTimer = setTimeout(async () => {
+      if (overlay.dataset.open !== "true") return;   // 关弹窗时清附加目录也会触发到这里，没人看就不问了
+      const dir = $("#w-dir").value.trim(), seq = ++rolePreviewSeq;
+      if (!dir) { workPreview = null; renderWorkRoleHint(); return; }
+      // 还没有任何预览（刚打开）：先说「正在匹配…」——按描述匹配要问模型，几秒钟里提示行不能是空的
+      if (!workPreview) renderWorkRoleHint();
+      const extraDirs = $("#w-bg").checked ? workExtraDirs.filter((d) => d !== dir) : [];
+      // 任务描述总带上：主目录不是仓库时服务端按它匹配领域角色（是仓库就忽略）
+      const taskText = $("#w-task").value.trim(), dirsKey = JSON.stringify([dir, extraDirs]);
+      if (taskText !== workPreviewTask || dirsKey !== workPreviewDirs) workPendingRetries = 0;
+      const r = await post("/api/roles/resolve", { dir, extraDirs, task: taskText });
+      if (seq !== rolePreviewSeq) return;   // 用户又改了目录：只认最后一次
+      workPreview = r?.ok ? r : null;
+      workPreviewTask = taskText;
+      workPreviewDirs = dirsKey;
+      // 模型这会儿还没判完（服务端预览只等十来秒）：过几秒再问一次，判完了提示行会更新；最多问三次，别一直烧模型
+      if (r?.auto?.pending && workPendingRetries < 3) { workPendingRetries++; refreshRolePreview(4000); }
+      if (!r?.ok) { $("#w-role-hint").textContent = r?.msg || "匹配角色失败"; $("#w-role-hint").dataset.tone = "warn"; $("#w-role-cross").hidden = true; $("#w-role-pick").hidden = true; return; }
+      renderWorkRoleHint();
+    }, delay);
+  };
+  onWorkDirsChanged = () => refreshRolePreview(250);
+  // 最近目录 chip 改的是 value（不触发 input 事件）：在容器上冒泡接一下，chip 自己的点击先把值填好
+  $("#w-dir-recent")?.addEventListener("click", (e) => { if (e.target.closest("button")) onWorkDirsChanged(); });
+  const createWorkCrossRole = async () => {
+    const c = workPreview?.cross;
+    if (!c) return;
+    const btn = $("#w-cross-create");
+    if (btn) btn.disabled = true;
+    const r = await post("/api/roles/cross", { dirs: c.dirs });
+    toast(r.msg || (r.ok ? "已建角色" : "没建成"));
+    if (!r.ok) { if (btn) btn.disabled = false; return; }
+    await loadWorkRoles(r.role.id);
+    refreshRolePreview();
+  };
+  /** 点名一个角色：它登记了工作目录就替人填好（第一个当主目录，其余当附加目录）——派给角色，不用再找目录。
+   *  领域角色不绑目录（登记的一般就是 ~/workspace）：主目录已经填了就别改；角色页「派任务给它」进来时 force */
+  const applyRoleDirs = (role, force = false) => {
+    const dirs = (role?.dirs || []).filter(Boolean);
+    if (!dirs.length) return;
+    if (role.origin === "domain" && !force && $("#w-dir").value.trim()) return;
+    $("#w-dir").value = dirs[0];
+    if ($("#w-bg").checked) { workExtraDirs = dirs.slice(1); renderWorkExtraDirs(); }
+    else if (dirs.length > 1) toast("terminal 模式不支持附加目录，只填了主目录");
+    onWorkDirsChanged();
+  };
+  const chooseWorkRole = (v) => {
+    $("#w-role").value = v;
+    if (v !== "auto" && v !== "none") applyRoleDirs(workRoles.find((r) => r.id === v));
+    renderWorkRoleHint();
+  };
+  $("#w-role").addEventListener("change", () => chooseWorkRole($("#w-role").value));
+  // 按描述匹配时，描述改了要重新匹配（服务端会调一次模型：防抖放长一点，别每敲一个字问一次）
+  $("#w-task").addEventListener("input", () => { if (workPreview?.auto?.by === "task") refreshRolePreview(800); });
+  $("#w-dir").addEventListener("input", () => refreshRolePreview(500));
+  $("#w-dir").addEventListener("change", () => refreshRolePreview());
   const syncWorkMode = () => {
     const enabled = $("#w-bg").checked;
     $("#w-extra-browse").disabled = !enabled;
@@ -711,6 +859,18 @@ function bindTopbar() {
   };
   const openWork = (dir) => {
     overlay.dataset.open = "true";
+    // 角色：新开（描述为空）回到「自动」；角色页点「派任务给它」走 openWorkForRole，点名角色并按它登记的目录填好
+    const freshOpen = !$("#w-task").value, wantRole = openWithRole;
+    openWithRole = "";
+    crossSkipped.clear();
+    workPreview = null; workPreviewTask = ""; workPreviewDirs = ""; workPendingRetries = 0;
+    loadWorkRoles(wantRole || (freshOpen ? "auto" : $("#w-role").value)).then(() => {
+      if (wantRole) {
+        const role = workRoles.find((r) => r.id === wantRole);
+        if (role) applyRoleDirs(role, true); else toast("这个角色读不到了（可能刚被归档）");
+      }
+      refreshRolePreview();
+    });
     // 默认值由服务端下发（config dispatch.defaults）：目录/引擎/模型/思考深度/权限预填好，
     // 描述可留空直接派——开一个"待命会话"再慢慢说要干啥
     const d = S.state?.dispatchDefaults || {};
@@ -737,6 +897,7 @@ function bindTopbar() {
   };
   const closeWork = () => { overlay.dataset.open = "false"; workExtraDirs = []; renderWorkExtraDirs(); };
   window.openWork = openWork;
+  window.openWorkForRole = (roleId) => { openWithRole = String(roleId || ""); openWork(); };
   $("#btn-work").addEventListener("click", () => openWork());
   $("#w-cancel").addEventListener("click", closeWork);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) closeWork(); });
@@ -744,7 +905,7 @@ function bindTopbar() {
   // 浏览目录：浏览器内弹窗（/api/fs/dirs，圈在授权根内）——旧版弹本机 Finder，
   // 远程打开 web 时弹窗在 daemon 那台机器的屏幕上，这边只会挂死
   $("#w-browse").addEventListener("click", () =>
-    openDirPicker((dir) => { $("#w-dir").value = dir; $("#w-task").focus(); }, $("#w-dir").value.trim() || null));
+    openDirPicker((dir) => { $("#w-dir").value = dir; onWorkDirsChanged(); $("#w-task").focus(); }, $("#w-dir").value.trim() || null));
   $("#w-extra-browse").addEventListener("click", () =>
     openDirPicker((dir) => addWorkExtraDir(dir), $("#w-dir").value.trim() || null));
   $("#w-bg").addEventListener("change", syncWorkMode);
@@ -841,6 +1002,9 @@ function bindTopbar() {
     if (!dir || !task) { toast(dir ? "terminal 模式必须写任务描述" : "先选项目目录"); return; }
     if (workImgs.length && !$("#w-bg").checked) { toast("terminal 模式不支持图片——勾选「后台运行」"); return; }
     if (workExtraDirs.length && !$("#w-bg").checked) { toast("terminal 模式不支持附加目录——勾选「后台运行」"); return; }
+    // 「自动」按描述匹配：拿不准先让人选、还在匹配就等一下（派出去服务端也不会替人挑，只会不带角色）
+    const roleSubmit = workRoleSubmit($("#w-task").value.trim());
+    if (roleSubmit.block) { toast(roleSubmit.block); if (roleSubmit.block !== WORK_PICK_MSG) refreshRolePreview(0); return; }
     const selectedProvider = $("#w-engine").value, selectedModel = $("#w-model").value, selectedEffort = $("#w-effort").value;
     if (selectedEffort && !workProviderEfforts(selectedProvider, selectedModel).includes(selectedEffort)) {
       toast("所选模型不支持这个思考深度，请重新选择"); return;
@@ -856,6 +1020,7 @@ function bindTopbar() {
       extraDirs: submitExtraDirs.length ? submitExtraDirs : undefined,
       images: workImgs.length ? workImgs.map(({ media_type, data }) => ({ media_type, data })) : undefined,
       uploadScope: ComposerFiles.payloadScope("work"),
+      role: roleSubmit.role,
     });
     $("#w-submit").disabled = false;
     toast(res.msg);

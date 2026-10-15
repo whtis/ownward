@@ -57,6 +57,7 @@ import ai.ownward.app.ui.LocalBottomBarPadding
 import ai.ownward.app.ui.LocalDrawer
 import ai.ownward.app.ui.LocalHazeState
 import ai.ownward.app.ui.ObserveScreen
+import ai.ownward.app.ui.RolesScreen
 import ai.ownward.app.ui.SettingsScreen
 import ai.ownward.app.ui.SetupScreen
 import ai.ownward.app.ui.TaskDetailScreen
@@ -99,7 +100,7 @@ private data class Tab(val route: String, val label: String, val icon: @Composab
 
 internal fun topLevelRootForRoute(route: String?): String? = when (route) {
     "inbox", "settings" -> "inbox"
-    "agent", "dispatch", "task/{id}", "observe?id={id}&task={task}" -> "agent"
+    "agent", "dispatch", "dispatchRole/{role}", "roles", "task/{id}", "observe?id={id}&task={task}" -> "agent"
     "chat", "chatDetail?id={id}" -> "chat"
     else -> null
 }
@@ -252,6 +253,25 @@ private fun MainShell(
                                 onOpenTerminal = { taskId, ccId ->
                                     nav.navigate("observe?task=$taskId" + (ccId?.let { "&id=${Uri.encode(it)}" } ?: ""))
                                 },
+                                onOpenRoles = { nav.navigate("roles") },
+                            )
+                        }
+                        composable("roles") {
+                            RolesScreen(
+                                client = client,
+                                onBack = { nav.popBackStack() },
+                                onDispatchRole = { nav.navigate("dispatchRole/${Uri.encode(it)}") },
+                            )
+                        }
+                        // 角色页「派任务给它」：同一个派发页，点名角色进来（目录按角色登记的填好）
+                        composable("dispatchRole/{role}") { entry ->
+                            DispatchScreen(
+                                client = client,
+                                onBack = { nav.popBackStack() },
+                                onDispatched = { id ->
+                                    nav.navigate("task/$id") { popUpTo("dispatchRole/{role}") { inclusive = true } }
+                                },
+                                initialRole = entry.arguments?.getString("role"),
                             )
                         }
                         composable("observe?id={id}&task={task}") { entry ->

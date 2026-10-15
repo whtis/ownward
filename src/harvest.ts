@@ -153,11 +153,40 @@ export async function harvestTask(t: WorkTask): Promise<string | null> {
   const res = await llmJson(prompt);
   if (!res?.title) { log(`harvest [${t.id}]: AI 总结失败（任务保持待收尾，稍后自动重试）`); return null; }
 
-  const { appendKnowledge } = await import("./capture.ts");
+  const { appendKnowledge, domainFor, removeKnowledge, repoRootOf, scopeOf } = await import("./capture.ts");
+  const { ALL_SCOPES } = await import("./paths.ts");
+  // role.json / tasks.json 都是磁盘上的外部输入：scope 要拼 vault 路径，不认识的值一律不用
+  const validScope = (v: unknown): v is import("./paths.ts").Scope => typeof v === "string" && (ALL_SCOPES as string[]).includes(v);
+  // 归属：带角色的任务记进角色的项目（项目 Owner 的主项目 / 领域角色的虚拟项目，scope 跟角色走）；
+  // 人点名了角色却没有项目（跨项目角色等）→ 照旧按派发目录记，绝不拿模型的判断顶掉人选的角色；
+  // 没带角色、又是在根目录（不是仓库）派的 → 按总结内容归到领域角色，拿不准就留在原处
+  let slug = (t.roleProject || t.project).toLowerCase();
+  let scope = t.roleProject && validScope(t.roleScope) ? t.roleScope : undefined;
+  let moveFrom: { slug: string; scope: import("./paths.ts").Scope } | null = null;
+  const SLUG_OK = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+  if (t.harvestFinal && t.harvestSlug && SLUG_OK.test(t.harvestSlug) && validScope(t.harvestScope)) {
+    // 已经归到领域角色：定死。多轮重收时总结换了措辞，模型可能改口，条目会在两个项目各留一份
+    slug = t.harvestSlug; scope = t.harvestScope;
+  } else if (!t.roleId && !t.roleProject && existsSync(t.projectDir) && !repoRootOf(t.projectDir)) {
+    const d = await domainFor([res.title, res.problem, res.solution].filter(Boolean).join("\n"));
+    const { updateTask } = await import("./dispatch.ts");
+    if (d) {
+      // 之前暂时留在原处（第一轮素材太薄）的：这次归过去，原处那条按任务 id 删掉，不留两份
+      if (t.harvestSlug && SLUG_OK.test(t.harvestSlug) && validScope(t.harvestScope) && (t.harvestSlug !== d.slug || t.harvestScope !== d.scope)) {
+        moveFrom = { slug: t.harvestSlug, scope: t.harvestScope };
+      }
+      slug = d.slug; scope = d.scope;
+      log(`harvest [${t.id}]: 根目录任务按内容归到领域角色 ${d.roleId}`);
+      updateTask(t.id, { harvestSlug: slug, harvestScope: scope, harvestFinal: true });
+    } else {
+      // 拿不准就先留在原处，但不定死——第一轮常常只是待命开场，等真干了活的那次重收再判
+      updateTask(t.id, { harvestSlug: slug, harvestScope: scopeOf(t.projectDir), harvestFinal: false });
+    }
+  }
   // 标题时间固定用任务开始时间：重收时条目仍停在它该在的时间点上，覆盖也不会把顺序搅乱
   const started = new Date(t.startedAt);
   const entry = [
-    `## ${fmt(started, "time")} | ${t.project} | ${String(res.title).slice(0, 60)}`,
+    `## ${fmt(started, "time")} | ${slug} | ${String(res.title).slice(0, 60)}`,
     `- **Problem**: ${res.problem || t.task}`,
     ...(res.failed_attempts ? [`- **Failed attempt**: ${res.failed_attempts}`] : []),
     `- **Solution**: ${res.solution || "(见过程记录)"}`,
@@ -165,7 +194,9 @@ export async function harvestTask(t: WorkTask): Promise<string | null> {
     `- 来源: Ownward 任务 \`${t.id}\`（${t.mode}${t.branch ? `，分支 ${t.branch}` : ""}）· 收割于 ${fmt(new Date(), "time")}`,
     "", "",
   ].join("\n");
-  appendKnowledge(t.projectDir, t.project.toLowerCase(), entry, undefined, {
+  if (moveFrom) removeKnowledge(moveFrom.scope, moveFrom.slug, fmt(started, "date"), `\`${t.id}\``);
+  // 记忆写在哪、角色下次就从哪读（派发目录名与主项目不一定同名）
+  appendKnowledge(t.projectDir, slug, entry, scope, {
     key: `\`${t.id}\``, date: fmt(started, "date"),
   });
   log(`harvest [${t.id}]: [${t.project}] ${res.title}`);

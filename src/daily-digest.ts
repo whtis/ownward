@@ -134,8 +134,9 @@ export async function runDailyDigest(force = false, dateOverride?: string): Prom
   log(`digest → ${file}`);
 
   // 顺带提取候选记忆（只进 _candidates/，人工确认后合并进正式记忆）
-  extractCandidates(prompt).then((f) => {
-    if (f) notify("🧠 今日记忆候选已生成，笔记 tab → memory/_candidates 确认", { source: "heartbeat", level: "fyi", key: "memory-candidates" });
+  extractCandidates(prompt).then(({ file: f, routed }) => {
+    const where = [f ? "笔记 tab → memory/_candidates" : "", routed ? `角色页（${routed} 条决策已分给对应项目）` : ""].filter(Boolean).join("；");
+    if (where) notify(`🧠 今日记忆候选已生成，去确认：${where}`, { source: "heartbeat", level: "fyi", key: "memory-candidates" });
   }).catch((e) => log(`memory candidates failed: ${e}`));
   return file;
 }

@@ -57,6 +57,9 @@ func foldToolRuns(_ msgs: [DevMsg], minRun: Int = 3) -> [FeedItem] {
 extension DevMsg {
     /// ⚠️ 出错 / ⛔ 已拒绝：服务端用这两个前缀标失败的工具行（agent-session.ts、runner-consumer.ts）
     var isToolError: Bool { name.map { $0.hasPrefix("⚠️") || $0.hasPrefix("⛔") } ?? false }
+    /// 角色记忆提示：服务端把任务首条消息里的角色信封拆掉，换成这一条 system(name=role)（src/role-context.ts）。
+    /// 它不是过程也不是工具行：不进折叠组，单独画成一条分隔线（web 的 handoff-divider 同款，android isRoleNotice 同口径）
+    var isRoleNotice: Bool { role == "system" && name == "role" }
 
     /// 显示用的工具名：空名一律当 "tool"，口径必须和 web/feed.js 的 `m.name || "tool"` 一字不差
     var toolLabel: String { name.flatMap { $0.isEmpty ? nil : $0 } ?? "tool" }

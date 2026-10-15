@@ -37,6 +37,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -59,6 +60,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -66,12 +68,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import ai.ownward.app.data.AgentRole
 import ai.ownward.app.data.ImageEncoder
 import ai.ownward.app.data.FsDirListing
 import ai.ownward.app.data.OutImage
 import ai.ownward.app.data.OwnwardClient
 import ai.ownward.app.data.ProjectDir
+import ai.ownward.app.data.RoleCross
+import ai.ownward.app.data.RolePreview
 import ai.ownward.app.ui.theme.ownwardColors
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /** /api/work 只认这三个引擎（src/verticals.ts 白名单）；chat 的 codex-alt 之类第二账号键派任务不可用 */
@@ -156,10 +164,17 @@ private const val STANDBY_PROMPT = "你是常驻结对助手。本条只是开�
  * 默认值由服务端下发（state.dispatchDefaults），候选目录来自 /api/projects，
  * 型号表复用 /api/chat/providers（同一台机器能用的模型是同一批，不另维护）。
  * 派发成功直接进会话（onDispatched），不停在列表。
+ *
+ * 谁来接（src/role-auto.ts）：缺省「自动」——按目录匹配这个仓库的项目 Owner，没有就在派发时建；
+ * 也可以点名一个角色（它登记的工作目录直接填好）或不用角色。跨了几个项目又没有角色同时管时，
+ * 问一句要不要建跨项目角色。主目录不是仓库时按任务描述匹配领域角色，拿不准就摆出候选让人手选
+ * （没手选不许提交）；匹配上了就点名发它——预览给人看的是谁，派出去就是谁，不交给服务端重判。
+ * 规则在 Roles.kt（与 web / iOS 同一张预期表）。
+ * initialRole：角色页「派任务给它」点名进来的角色 id。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (String) -> Unit) {
+fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (String) -> Unit, initialRole: String? = null) {
     var projects by remember { mutableStateOf<List<ProjectDir>>(emptyList()) }
     var providers by remember { mutableStateOf(mapOf<String, List<String>>()) }
     var allowFullAccess by remember { mutableStateOf(false) }
@@ -177,6 +192,21 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
     var browsing by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    // ---- 谁来接 ----
+    var roles by remember { mutableStateOf<List<AgentRole>>(emptyList()) }
+    var rolesSupported by remember { mutableStateOf(false) }      // 服务端声明 /api/work 收 role 键才画这一节
+    var roleChoice by rememberSaveable { mutableStateOf(initialRole ?: ROLE_AUTO) }
+    var initialRoleApplied by rememberSaveable { mutableStateOf(false) }
+    var roleMenu by remember { mutableStateOf(false) }
+    var extraDirs by rememberSaveable { mutableStateOf(listOf<String>()) }
+    var browsingExtra by remember { mutableStateOf(false) }
+    var preview by remember { mutableStateOf<RolePreview?>(null) }
+    var previewError by remember { mutableStateOf<String?>(null) }
+    var byTask by remember { mutableStateOf(false) }        // 上一次预览是不是 by=task（重新预览清空期间仍是 true：提交要拦的就是这段）
+    var previewTask by remember { mutableStateOf("") }      // 最近一次完成的预览请求带的描述（发请求那一刻的，trim 后）
+    var previewKick by remember { mutableStateOf(0) }       // 提交被「还在匹配」拦下就 +1：立刻重新预览，不等 800ms 防抖
+    var crossSkipped by remember { mutableStateOf(setOf<String>()) }
+    var creatingCross by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -200,6 +230,91 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
             // 服务端没开全权限时 bypass 不可选（与 web 的双门一致）
             if (permission == "bypass" && !s.allowFullAccess) permission = "safe"
         }.onFailure { error = it.message }
+        // 角色放在默认值之后：点名的角色带着自己的工作目录，要盖过 dispatch.defaults.dir
+        runCatching { client.roles() }.onSuccess { r ->
+            roles = r.roles
+            rolesSupported = r.ok && r.dispatchRole
+            if (!rolesSupported) roleChoice = ROLE_AUTO
+            if (rolesSupported && initialRole != null && !initialRoleApplied) {
+                val role = r.roles.firstOrNull { it.id == initialRole }
+                if (role == null) { roleChoice = ROLE_AUTO; error = "这个角色读不到了（可能刚被归档）" }
+                else roleDirs(role)?.let { (d, extras) -> dir = d; extraDirs = extras }
+                initialRoleApplied = true
+            }
+        }
+    }
+
+    // 「自动」会落到谁、是不是跨项目：目录一变就重新问（LaunchedEffect 换 key 会取消上一次，天然防抖）。
+    // 预览总带上当前任务描述：主目录不是仓库时服务端按描述匹配领域角色（by=task，要调一次模型）。
+    // 所以描述变了，只有上一次预览是 by=task 才重新问，防抖 800ms；byTask 跟着这组目录走，目录一变就复位
+    LaunchedEffect(dir, extraDirs, rolesSupported) {
+        preview = null
+        previewError = null
+        byTask = false
+        previewTask = ""
+        val d = dir.trim()
+        if (!rolesSupported || d.isBlank()) return@LaunchedEffect
+        val extras = extraDirs.filter { it != d }
+        var asked: String? = null     // 眼下这份预览（或错误）是按哪段描述问的；null = 还没问出来
+        suspend fun ask(t: String) {
+            preview = null
+            previewError = null
+            asked = null
+            try {
+                val p = client.resolveRoles(d, extras, t)
+                preview = p
+                byTask = previewByTask(p)
+                previewTask = t   // 记发请求那一刻的描述：请求在路上时人又改了描述，也不会被新输入盖掉
+            } catch (e: CancellationException) {
+                throw e   // 目录或描述又变了、这一轮被取消：别把「…was cancelled」当错误写进提示（新一轮会重新问）
+            } catch (e: Exception) {
+                previewError = e.message ?: "匹配角色失败"
+            }
+            asked = t
+        }
+        delay(400)   // 手输目录时别每敲一个字都问一次
+        ask(task.trim())
+        // 描述又变了（或提交被「还在匹配」拦下、要立刻重问）：collectLatest 会取消还没回来的上一轮（连同它的防抖），只认最后一次
+        var kicked = previewKick
+        snapshotFlow { task.trim() to previewKick }.collectLatest { (t, kick) ->
+            val now = kick != kicked
+            kicked = kick
+            if (!byTask || (t == asked && !now)) return@collectLatest
+            if (!now) delay(800)   // 改描述要服务端调一次模型：别每敲一个字都问
+            ask(t)
+        }
+    }
+
+    fun pickRole(choice: String) {
+        roleChoice = choice
+        roleMenu = false
+        if (error == ROLE_PICK_REQUIRED || error == ROLE_MATCHING_MSG) error = null   // 被拦下后已经手选了：那句提示不再成立
+        val role = roles.firstOrNull { it.id == choice } ?: return
+        // 领域角色不绑目录（它登记的一般就是 ~/workspace）：主目录已经填了就不动，空着才替人填
+        if (role.origin == "domain" && dir.isNotBlank()) return
+        // 点名一个角色：它登记了工作目录就替人填好（第一个当主目录，其余当附加目录）——派给角色，不用再找目录
+        roleDirs(role)?.let { (d, extras) -> dir = d; extraDirs = extras }
+    }
+
+    fun createCross(cross: RoleCross) {
+        if (creatingCross) return
+        creatingCross = true
+        scope.launch {
+            try {
+                val r = client.createCrossRole(cross.dirs)
+                val role = r.role
+                if (!r.ok || role == null) {
+                    error = r.msg.ifBlank { "没建成" }
+                    return@launch
+                }
+                runCatching { client.roles() }.onSuccess { roles = it.roles }
+                roleChoice = role.id
+            } catch (e: Exception) {
+                error = e.message
+            } finally {
+                creatingCross = false
+            }
+        }
     }
 
     val models = workProviderModels(provider, providers)
@@ -221,6 +336,15 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
         if (effort.isNotBlank() && effort !in workProviderEfforts(provider, model)) {
             error = "所选模型不支持这个思考深度"; return
         }
+        // 派出去的角色 = 预览给人看的角色：按描述匹配时点名发预览里的那个；拿不准 / 新描述的预览还没回来就先拦下
+        val role = when (val s = roleSubmit(roleChoice, preview, byTask, previewTask, task.trim(), rolesSupported)) {
+            is RoleSubmit.Block -> {
+                error = s.msg
+                if (s.msg == ROLE_MATCHING_MSG) previewKick++   // 别等 800ms 防抖，立刻按现在的描述重问
+                return
+            }
+            is RoleSubmit.Send -> s.role
+        }
         if (submitting) return
         submitting = true
         error = null
@@ -235,6 +359,8 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
                     effort = effort.ifBlank { null },
                     permission = permission,
                     images = pendingImages.map { it.second },
+                    role = role,
+                    extraDirs = extraDirs.filter { it != d },
                 )
                 if (!r.ok) error = r.msg.ifBlank { "派发失败" }
                 else {
@@ -311,6 +437,102 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
                             onClick = { dir = p.dir },
                             label = { Text(p.name.ifBlank { p.dir }) },
                         )
+                    }
+                }
+            }
+
+            // 附加目录：agent 能同时读写这几个仓库；跨项目时下面「角色」一节会问要不要建跨项目角色
+            if (extraDirs.isNotEmpty()) Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                extraDirs.forEach { x ->
+                    FilterChip(
+                        selected = true,
+                        onClick = { extraDirs = extraDirs - x },
+                        label = { Text(x.trimEnd('/').substringAfterLast('/').ifBlank { x }) },
+                        trailingIcon = { Icon(Icons.Filled.Close, "移除附加目录", modifier = Modifier.size(16.dp)) },
+                    )
+                }
+            }
+            TextButton(onClick = { browsingExtra = true }) { Text("添加附加目录") }
+
+            if (rolesSupported) {
+                Spacer(Modifier.height(12.dp))
+                SectionHeader("角色")
+                Box {
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.fillMaxWidth().clickable { roleMenu = true },
+                    ) {
+                        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("谁来接", style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                roleChoiceLabel(roleChoice, roles),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                            )
+                            Icon(Icons.Filled.ArrowDropDown, null, tint = ownwardColors.TextDim, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    DropdownMenu(expanded = roleMenu, onDismissRequest = { roleMenu = false }) {
+                        val groups = dispatchableRoles(roles)
+                        DropdownMenuItem(text = { Text("自动匹配（推荐）") }, onClick = { pickRole(ROLE_AUTO) })
+                        groups.projects.forEach { r -> RoleMenuItem(r) { pickRole(r.id) } }
+                        // 领域角色单独一组、夹在项目角色和跨项目角色之间：上下各一道分隔线，免得后面的跨项目角色看着也归这组
+                        if (groups.domains.isNotEmpty()) {
+                            HorizontalDivider()
+                            Text(
+                                "领域角色",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            )
+                            groups.domains.forEach { r -> RoleMenuItem(r) { pickRole(r.id) } }
+                            HorizontalDivider()
+                        }
+                        groups.cross.forEach { r -> RoleMenuItem(r) { pickRole(r.id) } }
+                        DropdownMenuItem(text = { Text("不用角色") }, onClick = { pickRole(ROLE_NONE) })
+                    }
+                }
+                val hint = roleHint(roleChoice, preview, roles, dir.isBlank())
+                Text(
+                    previewError ?: hint.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = when {
+                        previewError != null || hint.tone == HintTone.Warn -> MaterialTheme.colorScheme.error
+                        hint.tone == HintTone.New -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.padding(top = 6.dp, start = 4.dp),
+                )
+                // 拿不准由哪个领域角色接：候选摆成一排让人手选（点了就是点名它），或者干脆不用角色
+                val candidates = rolePickCandidates(roleChoice, preview)
+                if (candidates.isNotEmpty()) Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    candidates.forEach { c ->
+                        FilterChip(selected = false, onClick = { pickRole(c.id) }, label = { Text(c.name.ifBlank { c.id }) })
+                    }
+                    FilterChip(selected = false, onClick = { pickRole(ROLE_NONE) }, label = { Text("不用角色") })
+                }
+                crossPrompt(roleChoice, preview, crossSkipped)?.let { cross ->
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(crossPromptText(cross), style = MaterialTheme.typography.bodySmall)
+                            if (cross.possible) Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { createCross(cross) }, enabled = !creatingCross) { Text("建「${cross.name}」并由它接手") }
+                                TextButton(onClick = { crossSkipped = crossSkipped + crossKey(cross) }) { Text("不用") }
+                            }
+                        }
                     }
                 }
             }
@@ -485,6 +707,30 @@ fun DispatchScreen(client: OwnwardClient, onBack: () -> Unit, onDispatched: (Str
         startPath = dir.trim().ifBlank { null },
         onDismiss = { browsing = false },
         onPick = { dir = it; browsing = false },
+    )
+    if (browsingExtra) DirectoryPicker(
+        client = client,
+        startPath = dir.trim().ifBlank { null },
+        onDismiss = { browsingExtra = false },
+        onPick = { picked ->
+            if (picked == dir.trim()) error = "附加目录不能和主目录相同"
+            else if (picked !in extraDirs) extraDirs = extraDirs + picked
+            browsingExtra = false
+        },
+    )
+}
+
+/** 角色下拉的一项：名字 + 叫法（项目 Owner / 领域角色 / 跨项目角色…） */
+@Composable
+private fun RoleMenuItem(role: AgentRole, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = {
+            Column {
+                Text(role.name.ifBlank { role.id }, maxLines = 1)
+                Text(roleKindLabel(role), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        onClick = onClick,
     )
 }
 

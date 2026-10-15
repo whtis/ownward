@@ -2,6 +2,26 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.6.0] - 2026-10-15
+
+### Added
+
+- Roles are generated and maintained automatically. Dispatching a task into a git repository gives that repository a project owner role on first use, and the task goes to it with the project's memory attached to the first message: README, decisions, operations notes and the recent work log. An owner you archive is not recreated.
+- When a task spans several projects and no role covers all of them, the dispatch dialog and the Roles page offer to create a cross-project role that reads the memory of every project involved. The Roles page also suggests such roles from recent work that touched several projects.
+- Domain roles cover work that has no repository, such as operations or device maintenance done from a workspace root. When a task is dispatched from a directory that is not a git repository, its description is matched against the domain roles: a role is attached only when the match is confident, otherwise the dialog lists the likely candidates and asks you to pick one. Work done in such directories is filed under the matched domain role when it is harvested.
+- A role can record former project names, so the notes of a renamed project are read as history next to the current memory.
+- The iOS and Android apps support roles. The dispatch form shows which role will take the task and offers cross-project roles and domain-role candidates, and a Roles screen lists project owners, domain roles, cross-project roles and suggestions.
+- Decisions that the daily digest extracts for a specific project are filed as that project's memory candidates and reviewed on the Roles page. Promotion is still manual.
+
+### Changed
+
+- `llm.roleMatchModel` (default `haiku`) chooses the model for domain-role matching. Matches are cached per description, concurrent requests for the same description share one call, and both the dispatch preview and the dispatch itself stop waiting for the model after a few seconds.
+
+### Fixed
+
+- Claude sessions no longer report a missing result when the main thread stays silent during a background report, and session notices are translated in the English interface.
+- The mobile dispatch form no longer shows a stale error or applies a stale role preview after the directory or description changes.
+
 ## [1.5.0] - 2026-10-10
 
 ### Added

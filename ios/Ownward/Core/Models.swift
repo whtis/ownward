@@ -104,6 +104,123 @@ struct ProjectDir: Decodable, Sendable, Equatable, Hashable, Identifiable {
     var id: String { dir }
 }
 
+// MARK: - 角色（src/roles.ts + src/role-auto.ts，字段与 android data/Models.kt 一致）
+
+/// 角色：type=project 是项目 Owner / 项目专家，type=lead 是跨项目角色 / 职能负责人；origin=auto 是 Ownward 自动建的。
+/// origin=domain 是领域角色（管没有仓库的那类活，形状上是 type=project，primaryProject 是 vault 里的虚拟项目，对人没意义）
+struct AgentRole: Decodable, Sendable, Equatable, Hashable, Identifiable {
+    var id: String
+    @Defaulted var name: String
+    @Defaulted var description: String
+    var type: String = "lead"            // lead | project
+    @Defaulted var origin: String        // "" = 人建的 | auto | domain
+    var status: String = "active"        // active | archived
+    @Defaulted var scope: String         // work | private | ""（不分流）
+    @Defaulted var primaryProject: String
+    @Defaulted var projects: [String]
+    @Defaulted var dirs: [String]        // 本机工作目录：派任务时第一个当主目录，其余当附加目录
+    @Defaulted var conflict: Bool        // 同 id 两份 / 同项目两个在岗专家：服务端一概拒绝操作
+    @Defaulted var conflictMsg: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, description, type, origin, status, scope, primaryProject, projects, dirs, conflict, conflictMsg
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        _name = try c.decode(Defaulted<String>.self, forKey: .name)
+        _description = try c.decode(Defaulted<String>.self, forKey: .description)
+        type = (try? c.decodeIfPresent(String.self, forKey: .type)) ?? nil ?? "lead"
+        _origin = try c.decode(Defaulted<String>.self, forKey: .origin)
+        status = (try? c.decodeIfPresent(String.self, forKey: .status)) ?? nil ?? "active"
+        _scope = try c.decode(Defaulted<String>.self, forKey: .scope)
+        _primaryProject = try c.decode(Defaulted<String>.self, forKey: .primaryProject)
+        _projects = try c.decode(Defaulted<[String]>.self, forKey: .projects)
+        _dirs = try c.decode(Defaulted<[String]>.self, forKey: .dirs)
+        _conflict = try c.decode(Defaulted<Bool>.self, forKey: .conflict)
+        _conflictMsg = try c.decode(Defaulted<String>.self, forKey: .conflictMsg)
+    }
+    /// 单测 / 预览用
+    init(id: String, name: String = "", description: String = "", type: String = "lead", origin: String = "",
+         status: String = "active", scope: String = "", primaryProject: String = "", projects: [String] = [],
+         dirs: [String] = [], conflict: Bool = false, conflictMsg: String = "") {
+        self.id = id; self.name = name; self.description = description; self.type = type; self.origin = origin
+        self.status = status; self.scope = scope; self.primaryProject = primaryProject; self.projects = projects
+        self.dirs = dirs; self.conflict = conflict; self.conflictMsg = conflictMsg
+    }
+}
+
+/// GET /api/roles。dispatchRole=true 才说明 /api/work 收 role 键——老 daemon 也有这个接口，但给它发 role 会整包 400
+struct RolesResponse: Decodable, Sendable {
+    @Defaulted var ok: Bool = false
+    @Defaulted var roles: [AgentRole] = []
+    @Defaulted var dispatchRole: Bool = false
+    @Defaulted var autoRole: Bool = false
+}
+
+/// POST /api/roles/resolve：「自动」会落到谁（只读预览，不建任何东西）。
+/// by 往后四个是领域角色带来的，老 daemon 不下发：主目录不是仓库时按任务描述匹配领域角色，
+/// 没匹配上的几种情况（还没写描述 / 都不像 / 拿不准 / 模型失败）给人看的话在 reason 里
+struct RoleAutoPick: Decodable, Sendable, Equatable {
+    @Defaulted var roleId: String = ""
+    @Defaulted var name: String = ""
+    @Defaulted var willCreate: Bool = false
+    @Defaulted var reason: String = ""
+    @Defaulted var by: String = ""                   // "task" = 按任务描述匹配
+    @Defaulted var needsTask: Bool = false           // by=task 但还没写任务描述
+    @Defaulted var candidates: [RoleRefLite] = []    // by=task 且拿不准：要人从这几个里手选（派发时 auto 不会替人挑）
+    @Defaulted var why: String = ""                  // 匹配上时的一句依据
+}
+
+/// 预览里点到的角色：只有 {id, name}
+struct RoleRefLite: Decodable, Sendable, Equatable, Hashable, Identifiable {
+    @Defaulted var id: String = ""
+    @Defaulted var name: String = ""
+}
+
+/// 跨了 ≥2 个项目且没有角色同时管它们：possible=false 时 reason 说为什么建不成（工作/私人混搭）
+struct RoleCross: Decodable, Sendable, Equatable {
+    @Defaulted var possible: Bool = false
+    @Defaulted var reason: String = ""
+    @Defaulted var name: String = ""
+    @Defaulted var labels: [String] = []
+    @Defaulted var slugs: [String] = []
+    @Defaulted var dirs: [String] = []
+}
+
+struct RolePreview: Decodable, Sendable, Equatable {
+    @Defaulted var ok: Bool = false
+    @Defaulted var msg: String = ""
+    var auto: RoleAutoPick? = nil
+    var cross: RoleCross? = nil
+}
+
+/// GET /api/roles/suggestions 的一条：近 90 天同时动过这几个项目、又没有角色同时管它们
+struct RoleSuggestion: Decodable, Sendable, Equatable, Identifiable {
+    var key: String
+    @Defaulted var scope: String = ""
+    @Defaulted var slugs: [String] = []
+    @Defaulted var labels: [String] = []
+    @Defaulted var dirs: [String] = []
+    @Defaulted var count: Int = 0
+    @Defaulted var lastAt: String = ""
+    @Defaulted var name: String = ""
+    var id: String { key }
+}
+
+struct RoleSuggestions: Decodable, Sendable {
+    @Defaulted var ok: Bool = false
+    @Defaulted var suggestions: [RoleSuggestion] = []
+}
+
+/// POST /api/roles/cross 等建角色接口：{ok, msg, role, created}
+struct RoleMutation: Decodable, Sendable {
+    @Defaulted var ok: Bool = false
+    @Defaulted var msg: String = ""
+    var role: AgentRole? = nil
+    @Defaulted var created: Bool = false
+}
+
 /// GET /api/fs/dirs：目录浏览严格限制在服务端 architecture.allowedRoots 内（src/fs-browse.ts）。
 /// path=null 是「授权根视图」：entries 是各个 allowedRoot，本身不可选。
 struct FsDirEntry: Decodable, Sendable, Equatable, Hashable, Identifiable {
@@ -215,6 +332,8 @@ struct WorkTask: Decodable, Sendable, Equatable, Identifiable {
     var endedAt: String?
     var exitCode: Int?
     var ccSessionId: String?         // terminal 任务认领到的底层 Claude 会话（旁观/接管到引擎用）
+    var roleId: String?              // 接这个任务的角色（src/role-auto.ts，派发时定死）
+    var roleName: String?
 }
 
 struct RecentSession: Decodable, Sendable, Equatable, Identifiable {
@@ -231,6 +350,7 @@ struct RecentSession: Decodable, Sendable, Equatable, Identifiable {
     // 跨引擎接力后 mode 不再反映真实引擎：新 daemon 下发 backend/providerId，老 daemon 缺省回退 mode
     var backend: String?
     var providerId: String?
+    var roleName: String?            // 接这个任务的角色；老 daemon 不下发
 }
 
 struct DevMsg: Decodable, Sendable, Equatable, Hashable {

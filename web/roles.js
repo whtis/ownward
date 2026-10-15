@@ -9,6 +9,10 @@
  * 项目知识不复制进角色：项目候选落在 projects/<主项目>/_candidates/，晋升目标是
  * README/decisions/operations 三份项目文件。
  *
+ * V3 自动角色（src/role-auto.ts）：往一个仓库派任务就自动生成它的「项目 Owner」（origin=auto），
+ * 跨项目的活在派发弹窗和本页顶部提示建「跨项目角色」。自动建的和手建的是同一种角色，
+ * 同一套校验、同一道晋升门；区别只在 origin 标记和「工作目录」会被自动登记。
+ *
  * 数据全部来自 /api/roles/*；正式记忆的内容走 /api/vault/file 只读预览，
  * 编辑一律跳去笔记 tab（daemon 那边路径校验锁死 vault 内 .md）。 */
 
@@ -18,8 +22,10 @@ const Roles = {
   icons: [], targets: ["principles", "decisions", "backlog"],
   projectTargets: ["README", "decisions", "operations"],
   showArchived: false, loaded: false, listError: "",
+  suggestions: [],                                    // 跨项目建议（/api/roles/suggestions）
   scopesOn: false, scopesLoaded: false, scopes: [""], projectCache: {},   // scope → slug[]（请求失败时的兜底）
   openSeq: 0, editing: null,                          // editing: 角色 id = 编辑，null = 新建
+  domainForm: false,                                  // 列表顶上「新建领域角色」的小表单开着没
 };
 
 /* icon 是后端白名单枚举（ROLE_ICONS），这里只做「枚举值 → 内置 svg 路径」的查表：
@@ -76,6 +82,12 @@ const PROJ_DOCS = [
 const PROJ_TARGET_LABEL = { README: "项目现状", decisions: "项目决策", operations: "部署与排障" };
 const ROLE_TYPE_LABEL = { lead: "职能负责人", project: "项目专家" };
 const roleType = (r) => (r && r.type === "project" ? "project" : "lead");   // 旧 role.json 没有 type = lead
+/** 展示用的叫法：自动建的项目专家就是这个项目的 Owner，自动建的负责人管的是几个项目之间的事，
+ *  领域角色管没有仓库的那类活（业务运营、设备运维…） */
+const roleKindLabel = (r) => r?.origin === "domain" ? "领域角色" : roleType(r) === "project"
+  ? (r?.origin === "auto" ? "项目 Owner" : "项目专家")
+  : (r?.origin === "auto" ? "跨项目" : "职能负责人");
+const autoTagHtml = (r) => (r?.origin === "auto" ? `<span class="tag" data-kind="auto" title="Ownward 派任务时自动建的：工作目录会自动登记，内容照样可以改">自动</span>` : "");
 
 const R_HEX = /^#[0-9a-fA-F]{6}$/;
 /** 颜色直接进 style，手改坏的 role.json 不能带任意 CSS 进来——不合法就退默认 */
@@ -95,9 +107,10 @@ TABS.roles = {
     root.innerHTML = `
       <div class="col roles-list-col">
         <div class="page-head compact">
-          <div><div class="eyebrow">ROLES</div><h1>角色</h1><p>带长期记忆的身份：原则、决策、待办</p></div>
+          <div><div class="eyebrow">ROLES</div><h1>角色</h1><p>自动按项目生成，带着记忆接活</p></div>
           <div class="tools">
             <button class="button ghost sm" id="rl-arch" aria-pressed="false">含归档</button>
+            <button class="button ghost sm" id="rl-new-domain" title="没有代码仓库的那类活（业务运营、设备运维…）由它接">新建领域角色</button>
             <button class="button secondary sm" id="rl-new">新建角色</button>
           </div>
         </div>
@@ -113,6 +126,7 @@ TABS.roles = {
       </div>`;
     $("#rl-back").addEventListener("click", () => (root.dataset.mobileView = "list"));
     $("#rl-new").addEventListener("click", () => openRoleModal(null));
+    $("#rl-new-domain").addEventListener("click", () => { Roles.domainForm = !Roles.domainForm; renderRoleList(); if (Roles.domainForm) $("#rl-dn-name")?.focus(); });
     $("#rl-arch").addEventListener("click", () => {
       Roles.showArchived = !Roles.showArchived;
       $("#rl-arch").dataset.on = String(Roles.showArchived);
@@ -123,10 +137,12 @@ TABS.roles = {
     renderRoleDetail();
     loadRoles();
     loadRoleScopes();
+    loadRoleSuggestions();
   },
-  // 切回来重拉：vault 里的 markdown 用户可能刚在 Obsidian 里改过
+  // 切回来重拉：vault 里的 markdown 用户可能刚在 Obsidian 里改过；派过新任务可能刚建了 Owner / 冒出跨项目建议
   show() {
     if (Roles.loaded || Roles.listError) loadRoles();
+    loadRoleSuggestions();
     if (Roles.sel) openRole(Roles.sel);
     if (!Roles.scopesLoaded) loadRoleScopes();
   },
@@ -178,8 +194,8 @@ function renderRoleList() {
   }
   if (!Roles.loaded) { el.innerHTML = stateBox("正在载入角色…", "loading"); return; }
   if (!Roles.list.length) {
-    el.innerHTML = `<div class="state-box">还没有角色<br>
-      <span style="font-size:12px">建一个「研发」，把原则和决策攒起来</span><br>
+    el.innerHTML = domainFormHtml() + suggestionsHtml() + `<div class="state-box">还没有角色<br>
+      <span style="font-size:12px">往一个仓库派任务，就会自动生成它的项目 Owner；也可以手建一个「研发」攒跨项目的原则</span><br>
       <button class="button secondary sm" style="margin-top:10px" onclick="openRoleModal(null)">新建角色</button></div>`;
     return;
   }
@@ -200,14 +216,25 @@ function renderRoleList() {
     attached.set(key, [...(attached.get(key) || []), e]);
   }
 
-  const rows = [];
+  const rows = [domainFormHtml(), suggestionsHtml()];
   for (const l of leads) {
     rows.push(roleItemHtml(l, false));
     for (const e of (attached.get(`${l.scope} ${l.id}`) || []).sort(byStatus)) rows.push(roleItemHtml(e, true));
   }
-  if (orphans.length) {
+  // 自动建的 Owner 与领域角色天生不挂上级（挂了会让上级归档不了），各自成组；手建又没挂上级的才提示去挂
+  const owners = orphans.filter((e) => e.origin === "auto"), domains = orphans.filter((e) => e.origin === "domain");
+  const loose = orphans.filter((e) => e.origin !== "auto" && e.origin !== "domain");
+  if (owners.length) {
+    rows.push(`<div class="rl-group">项目 Owner<span class="rl-quiet"> · 派任务时自动生成</span></div>`);
+    for (const e of owners.sort(byStatus)) rows.push(roleItemHtml(e, false));
+  }
+  if (domains.length) {
+    rows.push(`<div class="rl-group">领域角色<span class="rl-quiet"> · 没有仓库的那类活，根目录的任务按描述匹配</span></div>`);
+    for (const e of domains.sort(byStatus)) rows.push(roleItemHtml(e, false));
+  }
+  if (loose.length) {
     rows.push(`<div class="rl-group">未挂靠的项目专家<span class="rl-quiet"> · 在编辑里选一个上级</span></div>`);
-    for (const e of orphans.sort(byStatus)) rows.push(roleItemHtml(e, false));
+    for (const e of loose.sort(byStatus)) rows.push(roleItemHtml(e, false));
   }
   el.innerHTML = rows.join("");
 }
@@ -215,15 +242,16 @@ function renderRoleList() {
 function roleItemHtml(r, child) {
   const expert = roleType(r) === "project";
   const n = (r.projects || []).length;
-  const meta = expert
-    ? `主项目 ${esc(r.primaryProject || "未设置")}`
+  const meta = r.origin === "domain" ? "没有仓库的那类活"
+    : expert ? `主项目 ${esc(r.primaryProject || "未设置")}`
     : (r.childCount ? `${r.childCount} 个项目专家` : (n ? `${n} 个项目` : "未关联项目"));
   return `<div class="role-item" data-on="${Roles.sel === r.id}" data-archived="${r.status === "archived"}"
       data-child="${!!child}" onclick="openRole('${jsq(r.id)}')" title="${esc(r.name)}">
     ${roleAvatar(r, "sm")}
     <div class="role-item-main">
       <div class="t">${esc(r.name || r.id)}
-        <span class="tag" data-kind="${expert ? "expert" : "lead"}">${esc(ROLE_TYPE_LABEL[roleType(r)])}</span>
+        <span class="tag" data-kind="${expert ? "expert" : "lead"}">${esc(roleKindLabel(r))}</span>
+        ${autoTagHtml(r)}
         ${r.status === "archived" ? `<span class="tag">已归档</span>` : ""}
         ${r.conflict ? `<span class="tag" data-tone="bad">冲突</span>` : ""}
         ${r.parentMissing ? `<span class="tag" data-tone="warn">上级失联</span>` : ""}</div>
@@ -278,13 +306,14 @@ function renderRoleDetail() {
   if (!role) {
     $("#rl-crumb").textContent = "选择左侧角色，或新建一个";
     $("#rl-tools").innerHTML = "";
-    box.innerHTML = stateBox("角色是带记忆的长期身份：原则、决策、待办跟着它走，开对话时按需注入");
+    box.innerHTML = stateBox("角色是带记忆的长期身份：派任务或开对话时，它的原则和项目记忆跟着带上");
     return;
   }
   const archived = role.status === "archived";
   $("#rl-crumb").innerHTML = `${roleAvatar(role, "sm")}<span class="nm">${esc(role.name || role.id)}</span>`;
   $("#rl-tools").innerHTML = `
-    ${archived ? "" : `<button class="button primary sm" onclick="chatWithRole('${jsq(role.id)}')">与这个角色对话</button>`}
+    ${archived ? "" : `<button class="button primary sm" onclick="dispatchWithRole('${jsq(role.id)}')">派任务给它</button>
+      <button class="button secondary sm" onclick="chatWithRole('${jsq(role.id)}')">与这个角色对话</button>`}
     <button class="button ghost sm" onclick="openRoleModal('${jsq(role.id)}')">编辑</button>
     <button class="button ${archived ? "secondary" : "danger"} sm" onclick="toggleArchive('${jsq(role.id)}',${archived ? "false" : "true"})">${archived ? "恢复" : "归档"}</button>`;
 
@@ -298,7 +327,8 @@ function renderRoleDetail() {
       <div class="role-hero-main">
         <h2>${esc(role.name || role.id)}</h2>
         <div class="role-hero-meta">
-          <span class="tag" data-kind="${expert ? "expert" : "lead"}">${esc(ROLE_TYPE_LABEL[roleType(role)])}</span>
+          <span class="tag" data-kind="${expert ? "expert" : "lead"}">${esc(roleKindLabel(role))}</span>
+          ${autoTagHtml(role)}
           <span class="tag mono">${esc(role.id)}</span>
           ${role.scope ? `<span class="tag">${esc(scopeLabel(role.scope))}</span>` : ""}
           <span class="tag" data-tone="${archived ? "" : "ok"}">${archived ? "已归档" : "启用中"}</span>
@@ -312,7 +342,7 @@ function renderRoleDetail() {
     ${expert ? expertOrgHtml(role, org) : leadOrgHtml(role, org)}
 
     <div class="rl-block">
-      <div class="rl-block-head"><h3>职责边界</h3><span class="rl-quiet">随每轮对话注入</span></div>
+      <div class="rl-block-head"><h3>职责边界</h3><span class="rl-quiet">对话和任务都会带上</span></div>
       <div class="rl-prose">${role.instructions ? esc(role.instructions) : `<span class="rl-quiet">还没写。写清「负责什么、不负责什么」，模型的回答会稳很多。</span>`}</div>
     </div>
 
@@ -322,9 +352,17 @@ function renderRoleDetail() {
         ? `<div class="pick-row">${projects.map((s) => s === role.primaryProject && expert
             ? `<span class="chip" data-static="true" data-on="true">${esc(s)} · 主项目</span>`
             : `<span class="chip" data-static="true">${esc(s)}</span>`).join("")}</div>
-           <div class="rl-quiet" style="margin-top:6px">对话会注入这些项目的 README（只读，同 scope）${expert ? "；主项目每轮必注入" : ""}</div>`
-        : `<div class="rl-quiet">还没关联项目。关联后，对话会带上项目 README 里的现状与陷阱。</div>`}
+           <div class="rl-quiet" style="margin-top:6px">${role.origin === "domain"
+             ? `领域角色的记忆在 vault 的 projects/${esc(role.primaryProject)}/：根目录里干的这类活收割后记在这里`
+             : `对话和任务会带上这些项目的记忆：README、决策、近期工作日志（只读，同 scope）${expert ? "；主项目必带" : ""}`}</div>`
+        : `<div class="rl-quiet">还没关联项目。关联后，对话和任务会带上项目的现状、决策与近期工作日志。</div>`}
+      ${(role.history || []).length
+        ? `<div class="pick-row" style="margin-top:8px"><span class="rl-quiet">曾用名</span>${role.history.map((s) => `<span class="chip" data-static="true">${esc(s)}</span>`).join("")}</div>
+           <div class="rl-quiet" style="margin-top:4px">改名之前的记录（README、决策、工作日志）作为历史一起读；与现状冲突时以现状为准</div>`
+        : ""}
     </div>
+
+    ${roleDirsHtml(role)}
 
     ${expert ? projectCandidatesHtml(role) : ""}
 
@@ -355,6 +393,92 @@ function renderRoleDetail() {
     </div>`;
 }
 
+/* 工作目录：派任务时第一个当主目录、其余当附加目录。自动角色每次派发都会顺手登记，手建的角色不动它 */
+function roleDirsHtml(role) {
+  const dirs = role.dirs || [];
+  return `
+    <div class="rl-block">
+      <div class="rl-block-head"><h3>工作目录</h3><span class="rl-quiet">「派任务给它」时第一个当主目录，其余当附加目录</span></div>
+      ${dirs.length
+        ? `<div class="pick-row">${dirs.map((d, i) => `<span class="dir-chip${i ? "" : " primary"}" title="${esc(d)}"><span>${esc(d.split("/").filter(Boolean).pop() || d)}</span></span>`).join("")}</div>`
+        : `<div class="rl-quiet">${role.origin === "auto" ? "还没登记——往它的项目派一次任务就会记上"
+          : role.origin === "domain" ? "领域角色不绑目录：派任务时用弹窗里的默认目录（一般是工作区根目录）"
+          : "手建的角色不自动登记目录：派任务时在弹窗里选"}</div>`}
+    </div>`;
+}
+
+/* 新建领域角色：没有仓库的那类活（业务运营、设备运维、本机排障…）。scope 建了就定死——工作的活进 work/，
+ * 根目录里派的任务按描述匹配到它，收割也记进它的虚拟项目（vault projects/<英文短名>/） */
+function domainFormHtml() {
+  if (!Roles.domainForm) return "";
+  const scopes = Roles.scopesOn ? ["work", "private"] : [""];
+  return `<div class="rl-suggest" id="rl-domain-form">
+    <div class="rl-suggest-head">新建领域角色<span class="rl-quiet"> · 管没有代码仓库的那类活</span></div>
+    <div class="field-grid" style="display:grid;gap:6px">
+      <input id="rl-dn-name" placeholder="名字，如：业务运营" maxlength="30">
+      ${Roles.scopesOn ? `<select id="rl-dn-scope">${scopes.map((s) => `<option value="${s}">${esc(scopeLabel(s))}</option>`).join("")}</select>` : ""}
+      <input id="rl-dn-slug" placeholder="英文短名（vault 文件夹名），如：biz-ops；留空自动起" maxlength="31">
+      <input id="rl-dn-desc" placeholder="这类活包括什么，如：周报整理、工单跟进、会议复盘" maxlength="200">
+    </div>
+    <div class="row" style="margin-top:8px;gap:6px">
+      <button class="button secondary sm" onclick="rlCreateDomain()">建</button>
+      <button class="button ghost sm" onclick="Roles.domainForm=false;renderRoleList()">取消</button>
+    </div>
+  </div>`;
+}
+async function rlCreateDomain() {
+  const name = $("#rl-dn-name")?.value.trim() || "";
+  if (!name) { toast("先写个名字"); return; }
+  const r = await post("/api/roles/domain", {
+    name, scope: $("#rl-dn-scope")?.value ?? "", slug: $("#rl-dn-slug")?.value.trim() || undefined,
+    description: $("#rl-dn-desc")?.value.trim() || undefined,
+  });
+  toast(r.msg || (r.ok ? "已建" : "没建成"));
+  if (!r.ok) return;
+  Roles.domainForm = false;
+  await loadRoles();
+  openRole(r.role.id);
+}
+
+/* 跨项目建议：近 90 天里同时动过几个项目、又没有角色同时管它们——问一句要不要建（人点了才建） */
+function suggestionsHtml() {
+  const list = Roles.suggestions || [];
+  if (!list.length) return "";
+  return `<div class="rl-suggest">
+    <div class="rl-suggest-head">发现跨项目的工作</div>
+    ${list.map((s) => `<div class="rl-suggest-item">
+      <div class="t">${esc(s.labels.join(" + "))}</div>
+      <div class="rl-quiet">${esc(String(s.count))} 次任务同时动了这几个项目${s.scope ? ` · ${esc(scopeLabel(s.scope))}` : ""}，还没有角色同时管它们</div>
+      <div class="foot">
+        <button class="button secondary sm" onclick="rlAcceptSuggestion('${jsq(s.key)}')">建「${esc(s.name)}」</button>
+        <button class="button ghost sm" onclick="rlDismissSuggestion('${jsq(s.key)}')">忽略</button>
+      </div>
+    </div>`).join("")}
+  </div>`;
+}
+async function loadRoleSuggestions() {
+  const r = await getJSON("/api/roles/suggestions").catch(() => null);
+  if (!r?.ok) return;   // 拿不到建议不算错：列表照常用，下次切回来再问
+  Roles.suggestions = r.suggestions || [];
+  renderRoleList();
+}
+async function rlAcceptSuggestion(key) {
+  const s = (Roles.suggestions || []).find((x) => x.key === key);
+  if (!s) return;
+  const res = await post("/api/roles/cross", { dirs: s.dirs });
+  toast(res.msg || (res.ok ? "已建角色" : "没建成"));
+  if (!res.ok) return;
+  Roles.suggestions = Roles.suggestions.filter((x) => x.key !== key);
+  await loadRoles();
+  if (res.role?.id) openRole(res.role.id);
+}
+async function rlDismissSuggestion(key) {
+  const res = await post("/api/roles/suggestions/dismiss", { key });
+  if (!res.ok) { toast(res.msg || "忽略失败"); return; }
+  Roles.suggestions = (Roles.suggestions || []).filter((x) => x.key !== key);
+  renderRoleList();
+}
+
 /* 组织块：项目专家看「主项目 + 上级」，负责人看「名下专家」。
  * 上级/主项目失联一律如实标出——组织关系错了，注入的记忆就是错的。 */
 function expertOrgHtml(role, org) {
@@ -362,7 +486,7 @@ function expertOrgHtml(role, org) {
   const parent = org.parent;
   return `
     <div class="rl-block">
-      <div class="rl-block-head"><h3>组织与主项目</h3><span class="rl-quiet">主项目 README 每轮对话必注入</span></div>
+      <div class="rl-block-head"><h3>组织与主项目</h3><span class="rl-quiet">主项目记忆每次必带</span></div>
       <div class="rl-org">
         <div class="rl-org-cell">
           <div class="k">主项目</div>
@@ -554,6 +678,14 @@ async function dismissProjCand(id, cid) {
   const res = await post(`/api/roles/${encodeURIComponent(id)}/project-candidates/${encodeURIComponent(cid)}/dismiss`, {});
   toast(res.msg || (res.ok ? "已丢弃" : "丢弃失败"));
   if (res.ok && Roles.sel === id) openRole(id);
+}
+/** 派任务给角色：打开派发弹窗、点名这个角色，它登记过的工作目录直接填好 */
+function dispatchWithRole(id) {
+  const role = Roles.role && Roles.role.id === id ? Roles.role : Roles.list.find((r) => r.id === id);
+  if (!role) return;
+  if (role.status === "archived") { toast("角色已归档，先恢复再派任务"); return; }
+  if (typeof openWorkForRole !== "function") { toast("派发弹窗还没准备好，稍后再试"); return; }
+  openWorkForRole(role.id);
 }
 /** 从角色发起新对话：切到对话 tab 并预选角色 + 全部关联项目，范围在那边还能缩小 */
 function chatWithRole(id) {

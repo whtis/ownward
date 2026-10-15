@@ -8,6 +8,7 @@
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, join, normalize, relative, sep } from "path";
+import { stripRoleContext } from "./role-context.ts";
 import { saveContentImages } from "./runner/agent-images.ts";
 import { DATA } from "./util.ts";
 
@@ -45,25 +46,36 @@ function readBytes(path: string, from: number, len: number): string {
 }
 
 /** 从头部 chunk 提取 cwd / 首条真实 user 文本 / entrypoint（sdk-cli=daemon 决策，cli=真人交互）。
- *  只读 24KB：cwd/entrypoint/首条 user 都在开头几行，读小块才能在几千文件的目录里快速跳过 daemon 会话。 */
+ *  只读 24KB：cwd/entrypoint/首条 user 都在开头几行，读小块才能在几千文件的目录里快速跳过 daemon 会话。
+ *  entrypoint 在 user 行里排在 message 后面：首条消息很长（派发任务带着角色记忆、用户贴了大段文本）时
+ *  那一行会被窗口截断，sdk-cli 会话就被当成真人会话混进旁观列表——认不出来时再多读一截。 */
 function headMeta(path: string): { cwd: string; firstUser: string; entrypoint: string } {
-  const head = readBytes(path, 0, Math.min(24 * 1024, statSync(path).size));
+  //（只在「被截断的正好是一行 user 消息」时补读：老版本 CC 的 transcript 压根没有 entrypoint，别为它们白读）
+  const size = statSync(path).size;
+  const first = scanHead(readBytes(path, 0, Math.min(24 * 1024, size)));
+  if (first.entrypoint || !first.cutUser || size <= 24 * 1024) return first;
+  return scanHead(readBytes(path, 0, Math.min(256 * 1024, size)));
+}
+
+function scanHead(head: string): { cwd: string; firstUser: string; entrypoint: string; cutUser: boolean } {
   let cwd = "";
   let firstUser = "";
   let entrypoint = "";
+  let cutUser = false;
   for (const line of head.split("\n")) {
     if (!line.trim()) continue;
     let e: any;
-    try { e = JSON.parse(line); } catch { continue; }
+    try { e = JSON.parse(line); } catch { cutUser = line.includes('"type":"user"'); continue; }
     if (!cwd && typeof e.cwd === "string") cwd = e.cwd;
     if (!entrypoint && typeof e.entrypoint === "string") entrypoint = e.entrypoint;
     if (!firstUser && e.type === "user" && !e.isMeta && !e.isSidechain) {
-      const t = extractText(e.message?.content);
+      // 角色信封只是给 agent 的记忆：认领/标题按用户自己说的那句话来
+      const t = stripRoleContext(extractText(e.message?.content));
       if (t && !/^</.test(t.trim())) firstUser = t.trim().slice(0, 120);
     }
     if (cwd && firstUser && entrypoint) break;
   }
-  return { cwd, firstUser, entrypoint };
+  return { cwd, firstUser, entrypoint, cutUser };
 }
 
 /** 尾部找 summary 行（CC 生成的会话摘要，标题最优来源之一） */
@@ -260,7 +272,7 @@ export function readCcMessages(path: string, after = 0): { messages: CcMessage[]
         const imgs = saveContentImages(DATA, imgKey, e.message?.content);
         if (imgs.length) messages.push({ role: "tool", name: "image", text: `🖼 图片 ×${imgs.length}`, ts: e.timestamp, images: imgs });
       } catch { /* 图片落盘失败不阻塞旁观 */ }
-      const t = extractText(e.message?.content).trim();
+      const t = stripRoleContext(extractText(e.message?.content).trim());
       if (prevReject && /^\[Request interrupted/.test(t)) { prevReject = false; continue; }
       prevReject = false;
       if (!t || isScaffold(e, t)) continue;

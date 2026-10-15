@@ -3,6 +3,12 @@
 // 默认值由服务端下发（state.dispatchDefaults），候选目录来自 /api/projects，
 // 型号表复用 /api/chat/providers（同一台机器能用的模型是同一批，不另维护）。
 // 派发成功直接进会话（onDispatched），不停在表单。
+//
+// 谁来接（src/role-auto.ts）：缺省「自动」——按目录匹配这个仓库的项目 Owner，没有就在派发时建；
+// 主目录不是仓库时按任务描述匹配领域角色，拿不准就摆出候选让人手选（选好之前不许提交）；
+// 匹配上的点名发过去——派出去的就是预览给人看的那个（roleSubmit）。
+// 也可以点名一个角色（它登记的工作目录直接填好）或不用角色。跨了几个项目又没有角色同时管时，
+// 问一句要不要建跨项目角色。规则在 UI/Roles.swift（与 web / android 同一张预期表）。
 import SwiftUI
 import PhotosUI
 
@@ -81,8 +87,16 @@ func normalizedDispatchDefaultEffort(_ provider: String, model: String, configur
 /// 描述留空时的开场白（与 web 同款）：开一个「待命会话」，进会话再说要干啥
 private let standbyPrompt = "你是常驻结对助手。本条只是开场，简短确认待命即可，等我下一条消息再开始干活。"
 
+/// 目录选择器开给谁：主目录还是附加目录（同一个 .sheet——一个视图上挂两个 sheet 在 iOS 上会互相顶掉）
+private enum BrowseTarget: String, Identifiable {
+    case main, extra
+    var id: String { rawValue }
+}
+
 struct DispatchView: View {
     let client: OwnwardClient
+    /// 角色页「派任务给它」点名进来的角色 id（目录按角色登记的填好）
+    var initialRole: String? = nil
     let onDispatched: (String) -> Void
 
     @State private var projects: [ProjectDir] = []
@@ -96,7 +110,22 @@ struct DispatchView: View {
     @State private var permission = "safe"   // safe | bypass
     @State private var worktree = true
     @State private var defaultsApplied = false
-    @State private var browsing = false
+    @State private var browsing: BrowseTarget?
+    // 谁来接
+    @State private var roles: [AgentRole] = []
+    @State private var rolesSupported = false        // 服务端声明 /api/work 收 role 键才画这一节
+    @State private var roleChoice = roleAuto
+    @State private var initialRoleApplied = false
+    @State private var extraDirs: [String] = []
+    @State private var preview: RolePreview?
+    @State private var previewError: String?
+    @State private var byTask = false                // 上一份预览是按任务描述匹配的（by=task）：只有这时改描述才重新预览
+    @State private var previewedDirs: String?        // 眼下这份预览/错误是哪组目录问的（nil = 刚清掉，新的还没到）
+    @State private var previewedTask: String?        // ……发请求那一刻带的是哪段任务描述（nil = 同上）
+    @State private var previewNudge = 0              // 提交被「正在匹配」拦下：换个 id 马上重问一次
+    @State private var previewNow = false            // ……那一轮不等防抖
+    @State private var crossSkipped: Set<String> = []
+    @State private var creatingCross = false
     @State private var pendingImages: [PendingImage] = []
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var submitting = false
@@ -115,7 +144,7 @@ struct DispatchView: View {
             Section("项目目录") {
                 TextField("~/workspace/项目", text: $dir)
                     .font(.owBody).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("浏览远程目录") { Haptics.tap(); browsing = true }
+                Button("浏览远程目录") { Haptics.tap(); browsing = .main }
                     .font(.owLabel)
                 if !projects.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -137,6 +166,23 @@ struct DispatchView: View {
                     }
                 }
             }
+            Section {
+                // 附加目录：agent 能同时读写这几个仓库；跨项目时下面「角色」一节会问要不要建跨项目角色
+                ForEach(extraDirs, id: \.self) { x in
+                    HStack {
+                        Text((x as NSString).lastPathComponent).font(.owBody).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Button {
+                            Haptics.selection(); extraDirs.removeAll { $0 == x }
+                        } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(OW.textDim) }
+                        .buttonStyle(.borderless).accessibilityLabel("移除附加目录")
+                    }
+                }
+                Button("添加附加目录") { Haptics.tap(); browsing = .extra }.font(.owLabel)
+            } header: {
+                Text("附加目录")
+            }
+            if rolesSupported { roleSection }
             Section("引擎") {
                 // 型号表随引擎切换，旧值不跨引擎。清空写在 Binding 的 setter 里而不是 .onChange：
                 // 后者对「服务端默认值把 provider 也一起改了」同样会触发，顺序上会把刚填好的默认 model 抹掉
@@ -225,10 +271,18 @@ struct DispatchView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .task { await load() }
-        .sheet(isPresented: $browsing) {
+        // 「自动」会落到谁、是不是跨项目：目录一变就重新问；上一份是按任务描述匹配的，描述变了也重新问
+        // （task(id:) 换 id 会取消上一次，天然防抖）
+        .task(id: previewKey) { await refreshPreview() }
+        .sheet(item: $browsing) { target in
             DirectoryPicker(client: client, startPath: dir.trimmingCharacters(in: .whitespaces).isEmpty ? nil : dir.trimmingCharacters(in: .whitespaces)) { picked in
-                dir = picked
-                browsing = false
+                switch target {
+                case .main: dir = picked
+                case .extra:
+                    if picked == dir.trimmingCharacters(in: .whitespaces) { error = "附加目录不能和主目录相同" }
+                    else if !extraDirs.contains(picked) { extraDirs.append(picked) }
+                }
+                browsing = nil
             }
         }
         .onChange(of: pickerItems) { _, items in
@@ -239,6 +293,137 @@ struct DispatchView: View {
                 if failed > 0 { error = "部分图片读取失败或超过 5MB" }
                 pickerItems = []
             }
+        }
+    }
+
+    /// 谁来接：选择器 + 一句「会带上谁的记忆」+ 跨项目时问要不要建跨项目角色
+    @ViewBuilder private var roleSection: some View {
+        let groups = dispatchableRoles(roles)
+        let hint = roleHint(roleChoice, preview: preview, roles: roles,
+                            dirBlank: dir.trimmingCharacters(in: .whitespaces).isEmpty)
+        let candidates = rolePickCandidates(roleChoice, preview: preview)
+        Section {
+            Picker("谁来接", selection: Binding(get: { roleChoice }, set: { pickRole($0) })) {
+                Text("自动匹配（推荐）").tag(roleAuto)
+                ForEach(groups.projects) { r in Text(r.name.isEmpty ? r.id : r.name).tag(r.id) }
+                if !groups.domains.isEmpty {
+                    Section("领域角色") {
+                        ForEach(groups.domains) { r in Text(r.name.isEmpty ? r.id : r.name).tag(r.id) }
+                    }
+                }
+                ForEach(groups.cross) { r in Text(r.name.isEmpty ? r.id : r.name).tag(r.id) }
+                Text("不用角色").tag(roleNone)
+            }
+            Text(previewError ?? hint.text)
+                .font(.owBodyS)
+                .foregroundStyle(previewError != nil || hint.tone == .warn ? OW.danger : hint.tone == .new ? OW.accent : OW.textDim)
+            if !candidates.isEmpty {
+                // 拿不准由哪个领域角色接：候选直接摆出来点，外加「不用角色」
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(candidates + [RoleRefLite(id: roleNone, name: "不用角色")]) { p in
+                            Button {
+                                pickRole(p.id)
+                            } label: {
+                                Text(p.name.isEmpty ? p.id : p.name)
+                                    .font(.owLabel).foregroundStyle(OW.text)
+                                    .padding(.horizontal, 12).padding(.vertical, 6)
+                                    .background(OW.surface2, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            if let cross = crossPrompt(roleChoice, preview: preview, skipped: crossSkipped) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(crossPromptText(cross)).font(.owBodyS).foregroundStyle(OW.text)
+                    if cross.possible {
+                        HStack(spacing: 12) {
+                            Button {
+                                Task { await createCross(cross) }
+                            } label: { Text("建「\(cross.name)」并由它接手") }
+                            .buttonStyle(.borderedProminent).disabled(creatingCross)
+                            Button("不用") { Haptics.selection(); crossSkipped.insert(crossKey(cross)) }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        } header: {
+            Text("角色")
+        }
+    }
+
+    /// 预览按哪组目录问：一变就重新问（400ms 防抖）
+    private var previewDirs: String {
+        "\(rolesSupported)|\(dir.trimmingCharacters(in: .whitespaces))|\(extraDirs.joined(separator: "\n"))"
+    }
+
+    /// 输入框当前的任务描述（同派发时一样去掉首尾空白）：预览带它，提交时拿它比对预览是不是按它问的
+    private var currentTask: String { task.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// 任务描述只在上一份预览是按描述匹配的（by=task）时才算进来：别的时候描述怎么改都不影响结果，
+    /// 也别每敲一个字都让服务端调一次模型
+    private var previewKey: String {
+        "\(previewNudge)|" + (byTask ? previewDirs + "\n\n" + currentTask : previewDirs)
+    }
+
+    private func refreshPreview() async {
+        guard !Task.isCancelled else { return }   // 还没开跑就被新一轮顶掉：别动任何状态（尤其别把 previewNow 吃掉）
+        let now = previewNow; previewNow = false
+        let dirs = previewDirs
+        let sameDirs = dirs == previewedDirs
+        // 目录没变、要问的也没变：只是 byTask 跟着刚到的那份预览翻了（翻成 false 描述就无关了；
+        // 翻成 true 时那份正是按眼下这段描述问的）——眼下显示的就是对的，别清掉再问一遍。提交时点名要重问的除外
+        if !now, sameDirs, !byTask || currentTask == previewedTask { return }
+        preview = nil; previewError = nil; previewedTask = nil
+        if !sameDirs { previewedDirs = nil; byTask = false }   // 目录变了：先当不是按描述匹配的，等新一份预览再定
+        let d = dir.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard rolesSupported, !d.isEmpty else { return }
+        var text = currentTask
+        do {
+            // 手输目录时别每敲一个字都问一次；只改了描述的等更久——按描述匹配服务端要调一次模型
+            if !now { try await Task.sleep(for: .milliseconds(sameDirs ? 800 : 400)) }
+            text = currentTask   // 只改目录的那轮，防抖期间改描述不会重来：按最新的描述问（记下的就是这一段）
+            let p = try await client.resolveRoles(dir: d, extraDirs: extraDirs.filter { $0 != d }, task: text)
+            guard !Task.isCancelled else { return }   // 目录或描述在这期间又变了：这份是旧的预览，新一轮会自己问
+            preview = p
+            previewedDirs = dirs; previewedTask = text
+            byTask = previewByTask(p)
+        } catch {
+            // 被新一轮 .task(id:) 顶掉：sleep 抛 CancellationError，URLSession 抛的却是 URLError(.cancelled)，
+            // 统一看 Task.isCancelled——别把「已取消」写进提示（新一轮已经清过 previewError）
+            guard !Task.isCancelled else { return }
+            previewError = error.userMessage
+            previewedDirs = dirs; previewedTask = text
+        }
+    }
+
+    /// 点名一个角色：它登记了工作目录就替人填好（第一个当主目录，其余当附加目录）——派给角色，不用再找目录。
+    /// 领域角色不绑目录（它登记的一般就是 ~/workspace）：主目录已经填了就不动，空着才按它登记的填
+    private func pickRole(_ choice: String) {
+        Haptics.selection()
+        roleChoice = choice
+        guard let r = roles.first(where: { $0.id == choice }), let d = roleDirs(r) else { return }
+        if r.origin == "domain", !dir.trimmingCharacters(in: .whitespaces).isEmpty { return }
+        dir = d.dir; extraDirs = d.extras
+    }
+
+    private func createCross(_ cross: RoleCross) async {
+        guard !creatingCross else { return }
+        creatingCross = true
+        defer { creatingCross = false }
+        do {
+            let r = try await client.createCrossRole(dirs: cross.dirs)
+            guard r.ok, let role = r.role else { error = r.msg.isEmpty ? "没建成" : r.msg; Haptics.error(); return }
+            if let fresh = try? await client.roles() { roles = fresh.roles }
+            roleChoice = role.id
+            Haptics.success()
+        } catch {
+            self.error = error.userMessage; Haptics.error()
         }
     }
 
@@ -296,6 +481,22 @@ struct DispatchView: View {
         } catch {
             self.error = error.userMessage
         }
+        // 角色放在默认值之后：点名的角色带着自己的工作目录，要盖过 dispatch.defaults.dir
+        if let r = try? await client.roles() {
+            roles = r.roles
+            rolesSupported = r.ok && r.dispatchRole
+            if !rolesSupported { roleChoice = roleAuto }
+            if rolesSupported, let want = initialRole, !initialRoleApplied {
+                if let role = r.roles.first(where: { $0.id == want }) {
+                    roleChoice = want
+                    if let d = roleDirs(role) { dir = d.dir; extraDirs = d.extras }
+                } else {
+                    roleChoice = roleAuto
+                    error = "这个角色读不到了（可能刚被归档）"
+                }
+                initialRoleApplied = true
+            }
+        }
     }
 
     private func submit() async {
@@ -303,6 +504,16 @@ struct DispatchView: View {
         guard !d.isEmpty else { error = "先选项目目录"; return }
         guard effort.isEmpty || workProviderEfforts(provider, model: model).contains(effort) else {
             error = "所选模型不支持这个思考深度"; return
+        }
+        // 派出去的角色 = 预览给人看的角色：按描述匹配上的点名发；描述改了新预览还没回来、或拿不准还选着「自动」就先不派
+        let role: String?
+        switch roleSubmit(choice: roleChoice, preview: preview, byTask: byTask, previewTask: previewedTask ?? "",
+                          currentTask: currentTask, supported: rolesSupported) {
+        case .send(let r): role = r
+        case .block(let msg):
+            error = msg; Haptics.warning()
+            if msg == roleMatchingMsg { previewNow = true; previewNudge += 1 }   // 不等防抖，马上按眼下的描述重问
+            return
         }
         guard !submitting else { return }
         submitting = true; error = nil
@@ -316,7 +527,9 @@ struct DispatchView: View {
                 model: model.isEmpty ? nil : model,
                 effort: effort.isEmpty ? nil : effort,
                 permission: permission,
-                images: pendingImages.map(\.payload)
+                images: pendingImages.map(\.payload),
+                role: role,
+                extraDirs: extraDirs.filter { $0 != d }
             )
             guard r.ok else { error = r.msg.isEmpty ? "派发失败" : r.msg; Haptics.error(); return }
             if let id = r.taskId { Haptics.success(); onDispatched(id) } else { dismiss() }

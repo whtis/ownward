@@ -9,6 +9,7 @@ struct AgentListView: View {
     let openTask: (String) -> Void
     let openTerminal: (_ taskId: String, _ ccId: String?) -> Void
     let openDispatch: () -> Void
+    var openRoles: () -> Void = {}
 
     @State private var sessions: [RecentSession] = []
     @State private var tasks: [WorkTask] = []
@@ -32,7 +33,7 @@ struct AgentListView: View {
                     ForEach(running) { s in
                         EntityRow(
                             title: rowTitle(s.title, s.last, "会话"),
-                            sub: sessionSub(s.project, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
+                            sub: sessionSub(s.project, s.roleName, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
                             dot: OW.success
                         ) { openTask(s.id) }
                     }
@@ -50,7 +51,7 @@ struct AgentListView: View {
                     ForEach(rest) { s in
                         EntityRow(
                             title: rowTitle(s.title, s.last, "会话"),
-                            sub: sessionSub(s.project, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
+                            sub: sessionSub(s.project, s.roleName, engineLabel(s.mode, backend: s.backend, providerId: s.providerId), TimeFormat.ago(epochMs: s.lastAt)),
                             dot: s.status == "done" ? OW.accent : OW.textDim
                         ) { openTask(s.id) }
                     }
@@ -68,6 +69,11 @@ struct AgentListView: View {
         .searchable(text: $query, prompt: "搜索任务、会话")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { DrawerMenuButton() }
+            // 角色：派任务的另一个入口——挑「谁来接」，目录跟着角色走
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { Haptics.tap(); openRoles() } label: { Image(systemName: "person.2") }
+                    .accessibilityLabel("角色")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { Haptics.tap(); openDispatch() } label: { Image(systemName: "plus") }
                     .accessibilityLabel("新任务")

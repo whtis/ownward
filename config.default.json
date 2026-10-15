@@ -65,6 +65,7 @@
     "claudeBin": "claude",
     "claudeModel": "sonnet",
     "skillAnalysisModel": "haiku",
+    "roleMatchModel": "haiku",
     "codexBin": "codex",
     "codexModel": "gpt-5.6-sol",
     "codebuddyBin": "codebuddy",
@@ -74,6 +75,7 @@
     "worktreeRoot": "~/.ownward-worktrees",
     "worktreeRetentionDays": 0,
     "watchSec": 60,
+    "autoRole": true,
     "defaults": {
       "dir": "",
       "provider": "",

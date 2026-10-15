@@ -840,6 +840,7 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
         if (t.mode === "codex-bg") dk = sessionByTask.get(t.id) ?? dk;
         const provider = row?.kind === "runner" ? row.providerId : (t.mode === "codex-bg" ? "codex" : "claude");
         return { id: t.id, project: t.project, title: t.title || String(t.task || "").slice(0, 80),
+          ...(t.roleName ? { roleName: t.roleName } : {}),   // 接这个任务的角色（派发时定死，见 dispatch.ts）
           mode: t.mode, backend: provider, providerId: provider, status: t.status, exitCode: t.exitCode, uncertain: !!t.uncertain,
           runnerState: { pending: row?.pending ?? [], turn: row?.turn ?? "" }, startedAt: t.startedAt, lastAt, msgs: row?.msgs ?? 0, userMsgs: row?.userMsgs ?? 0, last: row?.lastText ?? "", dk };
       })
@@ -1204,10 +1205,15 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
       return json({
         ok: true, roles, icons: R.ROLE_ICONS, targets: R.PROMOTE_TARGETS,
         types: R.ROLE_TYPES, projectTargets: PM.PROJECT_PROMOTE_TARGETS,
+        // 客户端能力探测：/api/work 收 role 键（老 daemon 的键白名单会把它整包 400），自动匹配开没开。
+        // 手机端按这两个字段决定画不画「角色」那一节——老 daemon 也有 /api/roles，光看接口在不在分不出来
+        dispatchRole: true, autoRole: cfg.dispatch?.autoRole !== false,
       });
     }
     if (req.method === "POST" && p === "/api/roles") {
       const b = await body();
+      // 领域角色只能走 /api/roles/domain（它负责建虚拟项目、避开仓库的 slug）；通用接口不许把角色标成 domain
+      if (b && (b as any).origin === "domain") return json({ ok: false, msg: "领域角色请用「新建领域角色」创建" }, 400);
       return b ? out(R.createRole(b)) : json({ ok: false, msg: "请求体不是 JSON" }, 400);
     }
     // 必须排在 /api/roles/:id 之前——projects 是固定段，不是角色 id
@@ -1218,6 +1224,91 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
       // 不做兜底回落：scope 传错就报错，否则工作角色会拿到私人项目列表
       if (!ALL_SCOPES.includes(scope as any)) return json({ ok: false, msg: `scope 不合法（可选：${ALL_SCOPES.join("/") || "留空"}）` }, 400);
       return json({ ok: true, scope, scopesOn: SCOPES_ON, projects: R.listProjectSlugs(scope as any) });
+    }
+
+    // ---- 自动角色（role-auto.ts）：同样是固定段，必须排在 /api/roles/:id 之前 ----
+    // 目录一律先过授权根（与 /api/work、/api/projects/open 同口径）：不给任意路径跑 git、也不给任意路径建角色
+    if (["/api/roles/resolve", "/api/roles/owner", "/api/roles/cross", "/api/roles/domain", "/api/roles/suggestions", "/api/roles/suggestions/dismiss"].includes(p)) {
+      const RA = await import("./role-auto.ts");
+      const roots = (cfg.architecture?.allowedRoots ?? []).flatMap((root: string) => {
+        try { const a = realpathSync(resolve(expandHome(root))); return statSync(a).isDirectory() ? [a] : []; } catch { return []; }
+      });
+      const grantDir = (raw: unknown): string | null => {
+        if (typeof raw !== "string" || !raw.trim()) return null;
+        try { const d = realpathSync(resolve(expandHome(raw.trim()))); return statSync(d).isDirectory() && roots.some((r) => isWithin(r, d)) ? d : null; }
+        catch { return null; }
+      };
+      const denied = (raw: unknown) => json({ ok: false, msg: `目录不存在或不在授权范围（architecture.allowedRoots）内：${String(raw).slice(0, 120)}` }, 403);
+
+      if (req.method === "POST" && p === "/api/roles/resolve") {
+        // 派发弹窗的预览：只读，不建任何东西（真建发生在派发那一刻）。
+        // task：主目录不是仓库时按任务描述匹配领域角色（会调一次模型，结果缓存给真派发复用）
+        const b = await body() as { dir?: unknown; extraDirs?: unknown; task?: unknown } | null;
+        if (!b) return json({ ok: false, msg: "请求体不是 JSON" }, 400);
+        const dir = grantDir(b.dir);
+        if (!dir) return denied(b.dir);
+        const extras: string[] = [];
+        for (const raw of Array.isArray(b.extraDirs) ? b.extraDirs.slice(0, 32) : []) {
+          const d = grantDir(raw);
+          if (!d) return denied(raw);   // 不静默丢：丢了预览就和真派发对不上
+          if (d !== dir) extras.push(d);
+        }
+        const task = typeof b.task === "string" ? b.task.slice(0, 4000) : "";
+        return json({ ok: true, ...(await RA.previewRoleForDispatch(dir, extras, task)) });
+      }
+      if (req.method === "POST" && p === "/api/roles/owner") {
+        const b = await body() as { dir?: unknown } | null;
+        const dir = grantDir(b?.dir);
+        if (!dir) return denied(b?.dir);
+        const r = RA.ensureOwnerForDir(dir);
+        return r.ok ? json({ ...r, msg: r.created ? `已为这个项目生成「${r.role.name}」` : `这个项目已有「${r.role.name}」` }) : out(r);
+      }
+      if (req.method === "POST" && p === "/api/roles/cross") {
+        // 跨项目角色只在人点了「建」之后才来：弹窗的提示和角色页的建议都走这里
+        const b = await body() as { dirs?: unknown; name?: unknown } | null;
+        if (!b || !Array.isArray(b.dirs) || b.dirs.length < 2 || b.dirs.length > 20) return json({ ok: false, msg: "dirs 要 2–20 个目录" }, 400);
+        const dirs: string[] = [];
+        for (const raw of b.dirs) { const d = grantDir(raw); if (!d) return denied(raw); dirs.push(d); }
+        const r = RA.crossRoleForDirs(dirs, typeof b.name === "string" ? b.name : undefined);
+        return r.ok ? json({ ...r, msg: r.created ? `已建「${r.role.name}」` : `已有「${r.role.name}」同时管这几个项目` }) : out(r);
+      }
+      if (req.method === "POST" && p === "/api/roles/domain") {
+        // 领域角色（没有仓库的那类活）：人在角色页点「建」才来；默认目录同样要过授权根
+        const b = await body() as { name?: unknown; scope?: unknown; slug?: unknown; description?: unknown; dirs?: unknown } | null;
+        if (!b) return json({ ok: false, msg: "请求体不是 JSON" }, 400);
+        const dirs: string[] = [];
+        for (const raw of Array.isArray(b.dirs) ? b.dirs.slice(0, 20) : []) { const d = grantDir(raw); if (!d) return denied(raw); dirs.push(d); }
+        const r = RA.ensureDomainRole({
+          name: String(b.name ?? ""), scope: String(b.scope ?? "") as any,
+          slug: typeof b.slug === "string" ? b.slug : undefined,
+          description: typeof b.description === "string" ? b.description.slice(0, 200) : undefined,
+          dirs,
+        });
+        return r.ok ? json({ ...r, msg: r.created ? `已建领域角色「${r.role.name}」` : `已有领域角色「${r.role.name}」` }) : out(r);
+      }
+      if (req.method === "GET" && p === "/api/roles/suggestions") {
+        // 素材：近 90 天人派的任务（主目录 + 附加目录）+ 会话中途 add-dir 追加的目录（tasks.json 里没有）
+        const since = Date.now() - 90 * 86400_000;
+        const byTask = new Map<string, { dirs: Set<string>; at: string }>();
+        for (const t of loadTasks()) {
+          if (t.kind === "routine" || t.kind === "evolve" || !(Date.parse(t.startedAt) > since)) continue;
+          byTask.set(t.id, { dirs: new Set([t.projectDir, ...(t.extraDirs ?? [])].filter(Boolean)), at: t.startedAt });
+        }
+        try {
+          const { SessionRepository } = await import("./sessions/repository.ts");
+          for (const s of new SessionRepository(DATA).list()) {
+            const hit = s.extraDirs?.length ? s.taskIds.map((id) => byTask.get(id)).find(Boolean) : undefined;
+            if (hit) for (const d of s.extraDirs ?? []) hit.dirs.add(d);
+          }
+        } catch (e) { log(`roles: 建议漏掉了会话里追加的目录（会话仓库读不出来）：${e}`); }
+        const sources = [...byTask.values()].filter((x) => x.dirs.size >= 2).map((x) => ({ dirs: [...x.dirs], at: x.at }));
+        return json({ ok: true, suggestions: RA.crossRoleSuggestions(sources) });
+      }
+      if (req.method === "POST" && p === "/api/roles/suggestions/dismiss") {
+        const b = await body() as { key?: unknown } | null;
+        return out(RA.dismissRoleSuggestion(String(b?.key ?? "")));
+      }
+      return json({ ok: false, msg: `未知的角色接口：${req.method} ${p}` }, 404);
     }
 
     const roleOne = p.match(/^\/api\/roles\/([\w-]+)$/);
@@ -1241,6 +1332,10 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     const roleUpdate = p.match(/^\/api\/roles\/([\w-]+)\/update$/);
     if (req.method === "POST" && roleUpdate) {
       const b = await body();
+      if (b && (b as any).origin === "domain") {
+        const cur = R.getRole(roleUpdate[1]);
+        if (!cur || cur.origin !== "domain") return json({ ok: false, msg: "领域角色请用「新建领域角色」创建，不能把现有角色改成领域角色" }, 400);
+      }
       return b ? out(R.updateRole(roleUpdate[1], b)) : json({ ok: false, msg: "请求体不是 JSON" }, 400);
     }
     const roleArchive = p.match(/^\/api\/roles\/([\w-]+)\/archive$/);

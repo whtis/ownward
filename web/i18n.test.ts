@@ -30,6 +30,9 @@ const BODY = `
   <span id="tpl">5 件待分流</span>
   <div class="msg" data-role="user"><div class="who" id="who">我 · 10:30</div><div class="bubble" id="user-bubble">设置</div></div>
   <div class="msg" data-role="system"><div class="bubble" id="notice">⚠️ 这一轮没跑起来（provider_input_invalid）：Claude cwd 不存在或不是目录</div></div>
+  <div class="msg" data-role="system"><div class="bubble" id="bg-none">⚠️ 后台子代理已结束，但没有收到汇报</div></div>
+  <div class="msg" data-role="system"><div class="bubble" id="bg-wait">⏳ 还有 3 个后台子代理在跑，跑完会自动汇报；期间发的消息会排到汇报之后（点中断可连同子代理一起停掉）</div></div>
+  <div class="msg" data-role="system"><div class="bubble" id="bg-task">⚠️ 后台任务 bx1 → completed：Run full verify</div></div>
   <textarea id="ta" placeholder="负责什么、不负责什么">设置</textarea>
   <span id="partial">修复设置页</span>
   <span id="title" title="设置">x</span>
@@ -46,6 +49,7 @@ const CHECKS = `
     static: $("static").textContent, tpl: $("tpl").textContent, who: $("who").textContent, userBubble: $("user-bubble").textContent,
     notice: $("notice").textContent, placeholder: $("ta").placeholder, taValue: $("ta").value, partial: $("partial").textContent,
     title: $("title").title, optNoValue: $("sel").options[0].textContent, optValue: $("sel").options[1].textContent, taskTitle: $("task-title").textContent, dyn: $("dyn").textContent, t: I18N.t("今日"), unknown: I18N.t("完全不在词典里的一句话"),
+    bgNone: $("bg-none").textContent, bgWait: $("bg-wait").textContent, bgTask: $("bg-task").textContent,
     errors: window.__errors,
   });`;
 
@@ -58,6 +62,10 @@ describe("界面语言（i18n.js + i18n-en.js）", () => {
     expect(r.who).toBe("Me · 10:30");                                    // 「A · B」拼接标签
     expect(r.notice).toContain("Claude cwd does not exist or is not a directory");  // 服务端报错：模板 + 捕获段短语替换
     expect(r.notice).not.toMatch(/[㐀-鿿]/);
+    // 会话系统提示带 emoji 前缀：剥掉前缀按正文查词典
+    expect(r.bgNone).toBe("⚠️ Background subagent finished but no report was received");
+    expect(r.bgWait).toMatch(/^⏳ 3 background subagents are still running/);
+    expect(r.bgTask).toBe("⚠️ Background task bx1 → completed: Run full verify");
     expect(r.placeholder).not.toMatch(/[㐀-鿿]/);               // textarea 的 placeholder 是界面文本
     expect(r.userBubble).toBe("设置");                                   // 用户气泡不翻，哪怕整串等于界面词
     expect(r.taValue).toBe("设置");                                      // 输入框里用户写的字不翻

@@ -301,6 +301,8 @@ struct DevMessageRow: View {
         VStack(alignment: .leading, spacing: 0) {
             if msg.role == "tool", msg.name == "image" {
                 MsgImages(paths: msg.images, client: client)   // 图片行：agent 截图/读图，不折叠进工具行
+            } else if msg.isRoleNotice {
+                RoleNoticeDivider(text: msg.text)
             } else {
                 // 每条消息都长按可复制（含 agent 还在输出的那条——见 copyOnLongPress）
                 switch msg.role {
@@ -319,6 +321,20 @@ struct DevMessageRow: View {
                 MsgImages(paths: msg.images, client: client, alignEnd: msg.role == "user")   // 用户附件跟气泡一边靠右
             }
         }
+    }
+}
+
+/// 「已带上角色「X」的记忆」：两侧细线夹一行小字，跟 web 的 handoff-divider 一个样子
+struct RoleNoticeDivider: View {
+    let text: String
+    var body: some View {
+        HStack(spacing: 10) {
+            Rectangle().fill(OW.outlineFaint).frame(height: 1)
+            Text(text).font(.owLabelS).foregroundStyle(OW.textDim).multilineTextAlignment(.center)
+                .layoutPriority(1)
+            Rectangle().fill(OW.outlineFaint).frame(height: 1)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
     }
 }
 

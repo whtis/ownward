@@ -339,7 +339,7 @@ function renderChatBind() {
     <label class="bind-label" for="ch-role">角色</label>
     <select id="ch-role" aria-label="对话角色">
       <option value="">不用角色（普通对话）</option>
-      ${active.map((r) => `<option value="${esc(r.id)}" ${r.id === Chat.newRole ? "selected" : ""}>${esc(r.name || r.id)}${r.type === "project" ? "（项目专家）" : ""}</option>`).join("")}
+      ${active.map((r) => `<option value="${esc(r.id)}" ${r.id === Chat.newRole ? "selected" : ""}>${esc(r.name || r.id)}${r.origin === "domain" ? "（领域角色）" : r.type === "project" ? (r.origin === "auto" ? "（项目 Owner）" : "（项目专家）") : ""}</option>`).join("")}
     </select>
     ${role
       ? `<span class="bind-kind" data-kind="${expert ? "expert" : "lead"}">${esc(CHAT_TYPE_LABEL[expert ? "project" : "lead"])}</span>

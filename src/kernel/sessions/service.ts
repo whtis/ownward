@@ -11,6 +11,7 @@ import { cfg,log } from "../../util.ts";
 import { clearInitialHistory, initialHistorySignature, readInitialHistory, readInitialHistorySnapshot, writeInitialHistory } from "./initial-history.ts";
 import { buildCodexResumeCommand } from "../../sessions/provider-home.ts";
 import { commandSessionImages } from "./session-images.ts";
+import { ROLE_CONTEXT_TAG, roleContextNotice, splitRoleContext } from "../../role-context.ts";
 import { validateImageInputs } from "../../image-input.ts";
 import { assertProviderOptions, defaultCodexModel } from "../../session-options.ts";
 import { addRule, logDecision } from "../../approval.ts";
@@ -202,6 +203,24 @@ export class KernelSessionService implements SessionService {
     return `${events.length}:${events.at(-1)?.eventId ?? ""}|${count}:${last}|${s.updatedAt}|${s.historyResetCommandId ?? ""}|${this.historyKey(s)}|${archivedSessionEventsSignature(this.dataRoot, s.id)}`;
   }
   private historyKey(s: SessionRecord): string { return `${initialHistorySignature(this.dataRoot, s.id)}|${this.historyMarkers.get(s.id)?.text ?? ""}`; }
+  /** 接力时把首条消息里的角色记忆（role-context.ts 的信封）原样带给新 Provider：投影出来的历史已经拆掉了它，
+   *  不带过去的话，换个引擎角色就失忆了。信封放在接力 prompt 中间而不是开头——接力命令在会话里本来就隐藏，
+   *  放开头会被投影器拆成一行可见的「已带上角色记忆」。所以这里在首条 start-run 里按标签找，不要求在开头：
+   *  链式接力时上一跳的接力 prompt 带着它，再接力照样找得到。读不出来只记日志：记忆是锦上添花，不能挡住接力。 */
+  private roleEnvelopeOf(s: SessionRecord): string {
+    try {
+      const journal = new RunnerCommandJournal(this.dataRoot);
+      const first = journal.readStrict().find((c) => c.sessionId === s.id && c.kind === "start-run");
+      const raw = first ? this.readInputCached(journal, first) : undefined;
+      const text = raw ? String(JSON.parse(raw)?.text ?? "") : "";
+      const at = text.indexOf(`<${ROLE_CONTEXT_TAG}>`);
+      const split = at >= 0 ? splitRoleContext(text.slice(at)) : null;
+      return split ? text.slice(at, text.length - split.rest.length).trim() : "";
+    } catch (error) {
+      log(`handoff: 读不出首条消息里的角色记忆，新 Provider 这次不带：${error instanceof Error ? error.message : error}`);
+      return "";
+    }
+  }
   private readInputCached(journal: RunnerCommandJournal, command: RunnerCommandRecord): string | undefined {
     if (this.inputCache.has(command.commandId)) return this.inputCache.get(command.commandId);
     const raw = journal.readInput(command);
@@ -253,7 +272,9 @@ export class KernelSessionService implements SessionService {
     this.projections.set(s.id, live!);
     const state = { ...live!.projector.state(), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}), ...(s.archive ? { alive: false, turn: "idle", partial: "", pending: [], operability: "read-only" as const, archiveState: s.archive.state } : { operability: "active" as const }) } as KernelSessionState;
     const commandJournal=new RunnerCommandJournal(this.dataRoot),orderedCommands=[...commands.values()],resetCommandIndex=s.historyResetCommandId?orderedCommands.findIndex((command)=>command.commandId===s.historyResetCommandId):-1,snapshotHistory=readInitialHistorySnapshot(this.dataRoot,s.id),copiedAt=Date.parse(snapshotHistory?.copiedAt||"")||0,createdAt=Date.parse(s.createdAt)||0,overlap=new Map<string,number>(); if(s.source==="adopted")for(const message of snapshotHistory?.messages??[])if(message.role==="user"&&(Date.parse(message.ts||"")||0)>=createdAt)overlap.set(message.text,(overlap.get(message.text)??0)+1);const inputs: import("./types.ts").DevMsg[]=[];for(const [index,command] of orderedCommands.entries()){if(index<=resetCommandIndex||command.sessionId!==s.id||!["start-run","resume-run","send-input"].includes(command.kind))continue;const raw=this.readInputCached(commandJournal,command);if(raw===undefined)continue;let text="";try{text=JSON.parse(raw)?.text;}catch{}const images=commandSessionImages(command.sessionId,raw);if((typeof text!=="string"||!text.trim())&&!images.length)continue;const normalized=typeof text==="string"?text:"",count=overlap.get(normalized)??0;if(s.source==="adopted"&&Date.parse(command.acceptedAt)<=copiedAt&&count>0){overlap.set(normalized,count-1);continue;}
-inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?`📎×${images.length}${normalized?` ${normalized}`:""}`:normalized,ts:command.acceptedAt,...(images.length?{images}:{})});}state.messages=[...state.messages,...inputs].sort((a,b)=>(Date.parse(a.ts||"")||0)-(Date.parse(b.ts||"")||0));const resume=!s.archive&&s.nativeRef?resumeFor(s,s.nativeRef):null;Object.assign(state,{resume,fullAccess:s.access==="full-access"||s.access==="bypass"});
+// 角色信封（role-context.ts）：首条消息前面那段记忆只给 Provider 看，会话里换成一行 system 提示——用户说的话保持原样
+const envelope=splitRoleContext(normalized),said=envelope?envelope.rest:normalized;if(!said.trim()&&!images.length)continue;if(envelope)inputs.push({role:"system",name:"role",text:roleContextNotice(envelope.meta),ts:command.acceptedAt});
+inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?`📎×${images.length}${said?` ${said}`:""}`:said,ts:command.acceptedAt,...(images.length?{images}:{})});}state.messages=[...state.messages,...inputs].sort((a,b)=>(Date.parse(a.ts||"")||0)-(Date.parse(b.ts||"")||0));const resume=!s.archive&&s.nativeRef?resumeFor(s,s.nativeRef):null;Object.assign(state,{resume,fullAccess:s.access==="full-access"||s.access==="bypass"});
     this.withRecordLease(s, state);
     this.stateCache.set(s.id, { signature, state: structuredClone(state) });
     return { signature, state };
@@ -321,7 +342,7 @@ inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?
     if(unknown&&!input.confirmUnknownOutcome)throw new KernelSessionPolicyError("SESSION_HANDOFF_UNKNOWN_CONFIRM_REQUIRED","最新 Run 结果未知，需明确确认后接力；不会重放旧命令");
     if(unknown&&input.confirmUnknownOutcome)this.repo.confirmHandoffUnknown(old.id,latestRun!.runId);
     const reason=(input.reason||(old.providerId===input.providerId?"用户调整模型配置":"用户主动切换引擎")).slice(0,512),transcript=oldState.messages.slice(-40).map(m=>`${m.role}: ${m.text.slice(0,2000)}`).join("\n").slice(-32_000);
-    const prompt=["你正在接手另一个 Provider 未完成的任务。请先检查工作区实际状态，再继续执行；不要重放任何旧工具调用或命令。",`接力原因：${reason}`,"以下是有界历史快照：",transcript||"（无可用历史）"].join("\n\n");
+    const envelope=this.roleEnvelopeOf(old),prompt=["你正在接手另一个 Provider 未完成的任务。请先检查工作区实际状态，再继续执行；不要重放任何旧工具调用或命令。",`接力原因：${reason}`,...(envelope?[envelope]:[]),"以下是有界历史快照：",transcript||"（无可用历史）"].join("\n\n");
     let moved:ReturnType<SessionRepository["handoff"]>;try{moved=this.repo.handoff({taskId,expectedSessionId:old.id,providerId:input.providerId,...options,reason});}catch(error){if(error instanceof SessionRepositoryError&&error.message==="SESSION_HANDOFF_STALE")throw new KernelSessionPolicyError("SESSION_HANDOFF_STALE","会话已被另一个接力请求更新，请刷新后重试");throw error;}
     try{const receipt=await this.submitTurn(moved.current,taskId,{text:prompt,clientMutationId:`handoff:${moved.previous.id}:${input.providerId}`});this.stateCache.delete(moved.previous.id);this.stateCache.delete(moved.current.id);return{...receipt,sessionId:moved.current.id,providerId:input.providerId};}
     catch(error:any){if(error?.outcomeUnknown!==true){if(typeof error?.commandId==="string")this.bridge.abandon(error.commandId,String(error?.code||"RUNNER_SUBMIT_REJECTED"));this.repo.rollbackHandoff(moved.current.id);}throw error;}

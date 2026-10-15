@@ -50,6 +50,10 @@ fun foldToolRuns(msgs: List<DevMsg>, minRun: Int = 3): List<FeedItem> {
     return out
 }
 
+/** 角色记忆提示：服务端把任务首条消息里的角色信封拆掉，换成这一条 system(name=role)（src/role-context.ts）。
+ *  它不是过程也不是工具行：不进折叠组，单独画成一条分隔线（web 的 handoff-divider 同款） */
+fun DevMsg.isRoleNotice() = role == "system" && name == "role"
+
 /** ⚠️ 出错 / ⛔ 已拒绝：服务端用这两个前缀标失败的工具行（agent-session.ts、runner-consumer.ts） */
 fun DevMsg.isToolError() = name?.let { it.startsWith("⚠️") || it.startsWith("⛔") } == true
 

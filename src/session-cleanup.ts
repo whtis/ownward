@@ -9,6 +9,7 @@
 import { closeSync, existsSync, openSync, readSync, readdirSync, readFileSync, statSync, unlinkSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { stripRoleContext } from "./role-context.ts";
 import { DATA, ROOT, log } from "./util.ts";
 
 const PROJECTS = join(homedir(), ".claude", "projects");
@@ -56,7 +57,9 @@ function probe(path: string): { entrypoint: string; firstUser: string } {
       const c = e.message?.content;
       const t = (typeof c === "string" ? c
         : Array.isArray(c) ? c.filter((x: any) => x?.type === "text").map((x: any) => x.text).join("\n") : "").trim();
-      if (t && !t.startsWith("<")) firstUser = t;
+      // 派发任务的首条消息前面带着角色信封（role-context.ts）：拆掉再判，「首条 user 文本」与其它扫描同口径
+      const own = stripRoleContext(t);
+      if (own && !own.startsWith("<")) firstUser = own;
     }
     if (entrypoint && firstUser) break;
   }

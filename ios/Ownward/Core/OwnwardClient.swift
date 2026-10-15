@@ -258,7 +258,18 @@ final class OwnwardClient: Sendable {
     /// 固定 bg=true：手机端没有 terminal 通道。provider 只认 claude/codex/codebuddy；
     /// 成功体 {ok, msg, task}，task 形状随服务端演进，只取 id（taskId）。
     func dispatchWork(dir: String, task: String, provider: String, worktree: Bool,
-                      model: String?, effort: String? = nil, permission: String?, images: [OutImage] = []) async throws -> DispatchResult {
+                      model: String?, effort: String? = nil, permission: String?, images: [OutImage] = [],
+                      role: String? = nil, extraDirs: [String] = []) async throws -> DispatchResult {
+        try await post("/api/work", Self.dispatchBody(dir: dir, task: task, provider: provider, worktree: worktree,
+                                                      model: model, effort: effort, permission: permission, images: images,
+                                                      role: role, extraDirs: extraDirs))
+    }
+
+    /// /api/work 的请求体（单独成函数好单测）。role 只在点名（角色 id / none）时才发：缺省 = 服务端自动匹配；
+    /// 老 daemon 的键白名单不认这个键（见 dispatchRoleParam）
+    static func dispatchBody(dir: String, task: String, provider: String, worktree: Bool,
+                             model: String?, effort: String?, permission: String?, images: [OutImage],
+                             role: String?, extraDirs: [String]) -> [String: JSONValue] {
         var body: [String: JSONValue] = [
             "dir": .string(dir), "task": .string(task), "bg": .bool(true),
             "provider": .string(provider), "worktree": .bool(worktree),
@@ -266,8 +277,37 @@ final class OwnwardClient: Sendable {
         if let model, !model.isEmpty { body["model"] = .string(model) }
         if let effort, !effort.isEmpty { body["effort"] = .string(effort) }
         if let permission, !permission.isEmpty { body["permission"] = .string(permission) }
-        if !images.isEmpty { body["images"] = Self.imagesJSON(images) }
-        return try await post("/api/work", body)
+        if !images.isEmpty { body["images"] = imagesJSON(images) }
+        if let role, !role.isEmpty { body["role"] = .string(role) }
+        if !extraDirs.isEmpty { body["extraDirs"] = .array(extraDirs.map { .string($0) }) }
+        return body
+    }
+
+    // MARK: - 角色（src/role-auto.ts）：派任务由角色接，项目 Owner 自动生成，跨项目时问要不要建跨项目角色；
+    // 主目录不是仓库时按任务描述匹配领域角色
+
+    func roles() async throws -> RolesResponse { try await get("/api/roles") }
+
+    /// 「自动」会落到谁、是不是跨项目：只读预览，服务端不建任何东西。目录要在 allowedRoots 里，不然 403
+    func resolveRoles(dir: String, extraDirs: [String] = [], task: String = "") async throws -> RolePreview {
+        try await post("/api/roles/resolve", Self.resolveRolesBody(dir: dir, extraDirs: extraDirs, task: task))
+    }
+
+    /// /api/roles/resolve 的请求体（单独成函数好单测）。task 总是带上、空串也发：主目录不是仓库时服务端按它匹配领域角色；
+    /// 老 daemon 的这个接口忽略不认识的键，不会像 /api/work 那样整包 400
+    static func resolveRolesBody(dir: String, extraDirs: [String], task: String) -> [String: JSONValue] {
+        ["dir": .string(dir), "extraDirs": .array(extraDirs.map { .string($0) }), "task": .string(task)]
+    }
+
+    /// 人点了「建」才调：几个项目已有角色同时管就直接返回它（created=false）
+    func createCrossRole(dirs: [String]) async throws -> RoleMutation {
+        try await post("/api/roles/cross", ["dirs": .array(dirs.map { .string($0) })])
+    }
+
+    func roleSuggestions() async throws -> RoleSuggestions { try await get("/api/roles/suggestions") }
+
+    func dismissRoleSuggestion(key: String) async throws -> OkMsg {
+        try await post("/api/roles/suggestions/dismiss", ["key": .string(key)])
     }
 
     func projects() async throws -> [ProjectDir] { try await get("/api/projects") }

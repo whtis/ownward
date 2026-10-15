@@ -459,6 +459,10 @@ fun DevMessageRow(msg: DevMsg, client: OwnwardClient) {
         MsgImages(msg.images, client)
         return
     }
+    if (msg.isRoleNotice()) {
+        RoleNoticeDivider(msg.text)
+        return
+    }
     // 每条消息都长按可复制（含 agent 还在输出的那条——见 copyOnLongPress）
     val copy = copyOnLongPress { msg.text }
     when (msg.role) {
@@ -490,6 +494,25 @@ fun DevMessageRow(msg: DevMsg, client: OwnwardClient) {
         )
     }
     MsgImages(msg.images, client, alignEnd = msg.role == "user") // 用户消息带附件时，缩略图跟在气泡下、同样靠右
+}
+
+/** 「已带上角色「X」的记忆」：两侧细线夹一行小字，跟 web 的 handoff-divider 一个样子 */
+@Composable
+private fun RoleNoticeDivider(text: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.weight(1f).height(1.dp).background(ownwardColors.OutlineFaint))
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 10.dp).weight(4f, fill = false),
+        )
+        Box(Modifier.weight(1f).height(1.dp).background(ownwardColors.OutlineFaint))
+    }
 }
 
 /** 消息图片条：横向可滚。用户发的图靠右（跟气泡一边），agent 的图靠左。

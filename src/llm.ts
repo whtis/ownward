@@ -85,14 +85,15 @@ const rules = () => {
   return owner ? `${owner}\n\n${base}` : base;
 };
 
-/** opts.timeoutMs：默认 3 分钟够日报/周报；月度复盘这种十万字素材的长稿要给更久，由调用方按素材量决定。 */
-export async function llmJson(prompt: string, opts: { timeoutMs?: number; quiet?: boolean } = {}): Promise<any | null> {
+/** opts.timeoutMs：默认 3 分钟够日报/周报；月度复盘这种十万字素材的长稿要给更久，由调用方按素材量决定。
+ *  opts.model：只对 claude 引擎生效的型号覆盖（小而频繁的判断类活用 haiku，别占决策模型的额度）；备用引擎不认它 */
+export async function llmJson(prompt: string, opts: { timeoutMs?: number; quiet?: boolean; model?: string } = {}): Promise<any | null> {
   const engine = (cfg.llm?.engine || "claude") as LlmEngine;
   const configured = cfg.llm?.fallbackEngine;
   const fallback = configured === false || configured === "off" ? null
     : (configured || (engine === "claude" ? "codex" : null)) as LlmEngine | null;
   const timeoutMs = opts.timeoutMs ?? 180_000;
-  return runWithFailover(engine, fallback, (provider) => provider === "codex" ? viaCodex(prompt, timeoutMs) : provider === "codebuddy" ? viaCodebuddy(prompt, timeoutMs) : viaClaude(prompt, timeoutMs),
+  return runWithFailover(engine, fallback, (provider) => provider === "codex" ? viaCodex(prompt, timeoutMs) : provider === "codebuddy" ? viaCodebuddy(prompt, timeoutMs) : viaClaude(prompt, timeoutMs, opts.model),
     opts.quiet ? async () => {} : reportFailover, opts.quiet ? () => {} : clearFailoverNotice);
 }
 
@@ -101,10 +102,10 @@ function providerError(r: { code: number; stdout: string; stderr: string }): str
   return r.code === 124 ? "timed out" : (r.stderr || r.stdout).slice(-500);
 }
 
-async function viaClaude(prompt: string, timeoutMs: number): Promise<ProviderResult> {
+async function viaClaude(prompt: string, timeoutMs: number, model?: string): Promise<ProviderResult> {
   const args = [
     "-p", prompt,
-    "--model", cfg.llm?.claudeModel || "haiku",
+    "--model", model || cfg.llm?.claudeModel || "haiku",
     "--max-turns", "3",            // 留一点余量；工具已全禁，正常一轮就出结果
     "--disallowedTools", "Bash", "Edit", "Write", "Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "TodoWrite", "NotebookEdit",
     "--output-format", "text",
