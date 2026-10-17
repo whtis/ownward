@@ -85,3 +85,38 @@ describe("task provider handoff", () => {
     expect(fn).toContain("配置已应用，但刷新失败");
   });
 });
+
+// 2026-10-17：没选 bypass 派出去的 claude 会话在会话里放不开——沙箱开关只给 codex，「总是（全局）」也只记一类命令
+const approveAllBody = source.slice(source.indexOf("function canApproveAll("), source.indexOf("function rememberScope("));
+const canApproveAllWith = (S: any) => new Function("S", `${approveAllBody}\nreturn canApproveAll;`)(S) as (dev: any) => boolean;
+const scopeBody = source.slice(source.indexOf("function rememberScope("), source.indexOf("async function devInterrupt("));
+const rememberScope = new Function(`${scopeBody}\nreturn rememberScope;`)() as (perm: any) => string;
+
+describe("会话里切「全部放行」", () => {
+  test("只有 claude/codebuddy 的 Runner 会话有开关；放开要 allowFullAccess，已放开的总能切回", () => {
+    const allowed = canApproveAllWith({ state: { allowFullAccess: true } }), locked = canApproveAllWith({ state: { allowFullAccess: false } });
+    expect(allowed({ providerId: "claude", operability: "active" })).toBe(true);
+    expect(allowed({ providerId: "codebuddy", operability: "active" })).toBe(true);
+    expect(allowed({ providerId: "codex", operability: "active" })).toBe(false);   // codex 走沙箱开关
+    expect(allowed({ providerId: "claude" })).toBe(false);                          // legacy 会话没有 operability，不支持热切换
+    expect(allowed({ providerId: "claude", operability: "read-only" })).toBe(false);
+    expect(locked({ providerId: "claude", operability: "active" })).toBe(false);
+    expect(locked({ providerId: "claude", operability: "active", fullAccess: true })).toBe(true);
+  });
+
+  test("审批卡说清「总是」记住的是哪一类", () => {
+    expect(rememberScope({ remember: { kind: "bash", pattern: "cd" } })).toBe("「cd」这类命令");
+    expect(rememberScope({ remember: { kind: "tool", pattern: "WebFetch" } })).toBe("WebFetch 工具");
+    expect(rememberScope({ remember: { kind: "bash", pattern: "B=https://raw.githubusercontent.com/example/project/master;" } })).toBe("「B=https://raw.githubusercontent.…」这类命令");
+    expect(rememberScope({ toolName: "Bash" })).toBe("");   // 老 daemon 不带 remember：不画提示
+  });
+
+  test("审批卡与会话头都接上了全部放行", () => {
+    const card = source.slice(source.indexOf("const perms = (dev.pending || []).map("), source.indexOf("// AskUserQuestion：真选项按钮"));
+    expect(card).toContain("canApproveAll(dev) && !dev.fullAccess");
+    expect(card).toContain("devSetAccess('${esc(t.id)}',true,'${esc(dev.providerId)}')");
+    const head = source.slice(source.indexOf("function detailHead("), source.indexOf("function ctxWindowOf("));
+    expect(head).toContain("canApproveAll(dev)");
+    expect(head).toContain("⚡ 全部放行");
+  });
+});

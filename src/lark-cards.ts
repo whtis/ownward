@@ -1,5 +1,5 @@
 // 飞书互动卡片：把最常见的两类决策搬到飞书，离开电脑也能点——
-//   ① agent 高危操作审批（批准/拒绝）+ 提问（选项按钮）；② routine 草稿 写入/跳过。
+//   ① agent 高危操作审批（批准/拒绝）+ 提问（选项按钮）；② routine 草稿 写入/跳过；③ 排查助手 选角色/判对判错（support.ts）。
 // 发卡走 bot 身份的 interactive 消息；点按钮的回调走 card.action.trigger 事件
 // （daemon 的 lark 消费循环把这个 key 分流到 handleCardAction）。
 // 需在飞书开发者后台「事件与回调 → 回调配置」启用 card.action.trigger，否则收不到点击。
@@ -76,6 +76,12 @@ export function sendPingCard(): Promise<string | null> {
   ]));
 }
 
+/** 通用互动卡（排查助手等功能用）：按钮 value 里带 t，回调按 t 分发回各自的处理函数 */
+export function sendActionCard(title: string, template: string, bodyMd: string,
+  buttons: { text: string; value: object; type?: BtnType }[]): Promise<string | null> {
+  return sendCard(card(title, template, bodyMd, buttons.map((b) => button(b.text, b.value, b.type))));
+}
+
 /** routine 草稿 写入/跳过卡 */
 export function sendRoutineCard(id: string, date: string, name: string, time: string, draftPreview: string): Promise<string | null> {
   const body = `**${time} 截止**\n\n${draftPreview}`;
@@ -125,6 +131,11 @@ export async function handleCardAction(payload: any): Promise<void> {
         skipRoutine(v.id, v.date);
         await updateCard(token, opId, "已跳过");
       }
+    } else if (v.t === "support") {
+      // 排查助手：选角色 / 判对判错。回写时保留标题和正文（结论还要看），只把按钮换成结果
+      const { handleSupportCardAction } = await import("./support.ts");
+      const next = await handleSupportCardAction(v);
+      await rewriteCard(token, opId, next.title, next.template, next.body);
     }
   } catch (e) {
     await updateCard(token, opId, `处理失败：${String(e instanceof Error ? e.message : e).slice(0, 80)}`);
@@ -145,4 +156,15 @@ async function updateCard(token: string, operatorId: string, result: string): Pr
     "--data", JSON.stringify({ token, card: newCard }),
   ], { timeoutMs: 20_000 });
   if (r.code !== 0) log(`lark card update failed: ${r.stderr.slice(0, 120)}`);
+}
+
+/** 回写整张卡但保留标题和正文（去掉按钮）：同样 token 30min / 2 次、Card 1.0 必须带 open_ids */
+async function rewriteCard(token: string, operatorId: string, title: string, template: string, bodyMd: string): Promise<void> {
+  if (!token || token === "[REDACTED]") return;
+  const newCard = { ...card(title, template, bodyMd, []), open_ids: [operatorId] };
+  const r = await run([
+    "lark-cli", "api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot",
+    "--data", JSON.stringify({ token, card: newCard }),
+  ], { timeoutMs: 20_000 });
+  if (r.code !== 0) log(`lark card rewrite failed: ${r.stderr.slice(0, 120)}`);
 }

@@ -3,6 +3,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { openAction, sweepActions } from "./actions.ts";
+import { recoverOrphanedStages, runStaging } from "./staging.ts";
 import { reapExited, updateTask } from "./dispatch.ts";
 import { harvestTask } from "./harvest.ts";
 import { runHeartbeat } from "./heartbeat.ts";
@@ -177,10 +178,22 @@ async function main() {
     const recovered = recoverDispatchingRuns(DATA, "daemon_restarted_during_dispatch");
     if (recovered) log(`run recovery: ${recovered} dispatching run(s) → unknown_outcome（未自动重放）`);
   } catch (e) { log(`run dispatch recovery failed: ${e}`); }
+  try {
+    const orphans = recoverOrphanedStages();
+    if (orphans) log(`staging recovery: ${orphans} running stage(s) → queued`);
+  } catch (e) { log(`staging recovery failed: ${e}`); }
+  // 预发布（scripts/stage.sh 生成的 dev 配置里 prerelease.enabled=true；别和行动项预处理的 staging.* 混）：和生产同机同时跑，
+  // 凡是会碰共享外部状态的后台任务一律不起（收割写 vault、清 ~/.claude 里的共享记录、飞书日历、routine 写文档、
+  // 心跳/日报/分流调模型），dev 自己的会话/任务/审批照常；崩溃循环也不许派回滚助手——那个助手回滚的是生产
+  const staging = cfg.prerelease?.enabled === true;
   const intent = takeRestartIntent();
   if (intent) log(`上一代是主动重启（${intent.by}，generation=${intent.expectedGeneration}）→ 崩溃计数清零`);
   const crashGuard = new CrashGuard(DATA);
   const boot = crashGuard.begin(!!intent);
+  if (boot.shouldRollback && staging) {
+    console.error("预发布实例崩溃循环：不派回滚助手（它回滚的是生产 launchd job），直接退出");
+    process.exit(1);
+  }
   if (boot.shouldRollback) {
     console.error("crash loop detected → dispatch independent rollback helper");
     dispatchDeployHelper("rollback", [], `rollback-${boot.state.generation}`)
@@ -195,7 +208,7 @@ async function main() {
     return;
   }
   rotateLog();
-  log(`Ownward daemon starting (pid ${process.pid})`);
+  log(`Ownward daemon starting (pid ${process.pid})${staging ? " — 预发布模式：碰共享状态的后台任务不启动" : ""}`);
   traceLife(); // 报出上一代的死因 + 装本代的退出留痕
   // 取得单实例锁并完成 crash-loop/life 留痕后恢复；单文件失败会保留 processing，不阻断启动。
   recoverClaims(DATA);
@@ -212,7 +225,7 @@ async function main() {
   await import("./verticals.ts").then((m) => m.startVerticals()).catch((e) => log(`verticals start: ${e instanceof Error ? e.name : "unknown"}`));
 
   const triageMs = (cfg.triage.intervalMin || 20) * 60_000;
-  setInterval(() => runTriage(), triageMs);
+  if (!staging) setInterval(() => runTriage(), triageMs);
   // off 只服务确实存在的 legacy Session；没有 legacy 身份时不加载旧审批状态机。
   if (sessionMode === "off") void import("./session-service.ts").then(async m=>{if(await m.sweepLegacyApprovalsIfPresent())setInterval(()=>m.sweepLegacyApprovalsIfPresent(),60_000);}).catch(e=>log(`legacy approval sweep disabled: ${e instanceof Error?e.name:"unknown"}`));
   // Runner 默认写链的审批投影 + 6h 兜底超时（与上面的 legacy sweep 对称：那条只覆盖 mode=off 的存量会话）。
@@ -244,6 +257,7 @@ async function main() {
   }
 
   // Worktree 定时回收：bg 编码任务的隔离目录只增不减，实测一个月积到 58 个 / 6.3G。
+  // （预发布不扫：清理是生产的事，dev 的 worktree 目录另放，见 scripts/stage-config.ts）
   // 默认关（dispatch.worktreeRetentionDays=0）；开了也只删「干净且已落地、N 天没动」的——
   // 有未提交改动或还有提交没合进主检出/远端的一律留着并计数进日志，删目录不该是顺手丢掉没验收的活。
   {
@@ -252,7 +266,7 @@ async function main() {
       const done = r.results.filter((x) => x.ok).length, left = Object.entries(r.skipped).map(([s, n]) => `${s} ${n}`).join("、");
       if (done || r.results.length) log(`worktree sweep: 清理 ${done} 个，释放 ${(r.freedKb / 1024 / 1024).toFixed(1)}G${left ? `；未动：${left}` : ""}`);
     }).catch((e) => log(`worktree sweep: ${e instanceof Error ? e.message : "unknown"}`));
-    setTimeout(sweep, 120_000); setInterval(sweep, 86_400_000);
+    if (!staging) { setTimeout(sweep, 120_000); setInterval(sweep, 86_400_000); }
   }
 
   // 编码任务看护：bg 任务退出 → 通知 + 自动收割；演进任务额外跑验证门；routine 任务回写状态
@@ -301,6 +315,8 @@ async function main() {
           ref: { task_id: t.id },
         });
       }
+      // 预发布：收割要调模型总结，写进的又是每次预发布都会被覆盖的 vault 拷贝——不做
+      if (staging) continue;
       try {
         const note = await harvestTask(t);
         // harvestedAt 是重收的判据：只有首轮走到这里，后面的追问轮靠 sweepHarvest 按日志 mtime 补
@@ -315,29 +331,35 @@ async function main() {
   setTimeout(() => { import("./session-index.ts").then((m) => m.sweepSessionIndex({ roots: cfg.architecture?.allowedRoots ?? [] })).catch((e) => log(`session index: ${e}`)); }, 15_000);
   setInterval(() => { import("./session-index.ts").then((m) => m.sweepSessionIndex({ maxAgeMs: 4_000, roots: cfg.architecture?.allowedRoots ?? [] })).catch((e) => log(`session index: ${e}`)); }, 5_000);
   setInterval(() => { import("./flight-record.ts").then((m) => m.sweepFlights().catch((e) => log(`flight sweep: ${e}`))); }, 300_000); // 飞行记录写失败的 durable 重试
-  setInterval(() => { import("./routines.ts").then((m) => m.sweepRoutines()).catch((e) => log(`routines sweep: ${e}`)); }, 60_000); // 职责草稿自动生成
-  setInterval(() => { import("./memory.ts").then((m) => m.sweepMemoryChores().catch((e) => log(`memory chores: ${e}`))); }, 600_000); // 记忆杂务浮到首页
-  setInterval(() => { import("./capture.ts").then((m) => m.sweepCapture().catch((e) => log(`capture: ${e}`))); }, 1200_000); // 会话自动收割（替代 session wrap）
-  setInterval(() => { import("./harvest.ts").then((m) => m.sweepHarvest().catch((e) => log(`harvest sweep: ${e}`))); }, 600_000); // 多轮任务收割补收（追问轮不走 reap，见 sweepHarvest 注释）
+  if (!staging) {
+    setInterval(() => { import("./routines.ts").then((m) => m.sweepRoutines()).catch((e) => log(`routines sweep: ${e}`)); }, 60_000); // 职责草稿自动生成
+    setInterval(() => { import("./memory.ts").then((m) => m.sweepMemoryChores().catch((e) => log(`memory chores: ${e}`))); }, 600_000); // 记忆杂务浮到首页
+    setInterval(() => { import("./capture.ts").then((m) => m.sweepCapture().catch((e) => log(`capture: ${e}`))); }, 1200_000); // 会话自动收割（替代 session wrap）
+  }
+  if (!staging) setInterval(() => { import("./harvest.ts").then((m) => m.sweepHarvest().catch((e) => log(`harvest sweep: ${e}`))); }, 600_000); // 多轮任务收割补收（追问轮不走 reap，见 sweepHarvest 注释）
   setInterval(() => { import("./vault-sync.ts").then((m) => m.syncVault()).catch((e) => log(`vault sync: ${e}`)); }, 1800_000); // vault git 同步（接管 wrap 时代的 commit+push）
   setInterval(() => { import("./dispatch.ts").then((m) => m.sweepTaskTitles().catch(() => {})); }, 300_000); // 任务精炼标题补齐
   setInterval(() => { import("./terminal-tasks.ts").then((m) => m.sweepTerminalTasks().catch((e) => log(`terminal sweep: ${e}`))); }, 300_000); // terminal 任务沉寂自动收尾（CC 会话 >15min 无写入）
   setInterval(() => { import("./terminal-tasks.ts").then((m) => m.sweepTerminalLinks().catch(() => {})); }, 60_000); // 给运行中 terminal 任务补链底层 CC 会话（确定性认领）
   setTimeout(() => { import("./terminal-tasks.ts").then((m) => m.sweepTerminalLinks().catch(() => {})); }, 20_000); // 启动即给现有 terminal 任务补链
-  setTimeout(() => { import("./memory.ts").then((m) => m.sweepMemoryChores().catch(() => {})); }, 30_000);
+  if (!staging) setTimeout(() => { import("./memory.ts").then((m) => m.sweepMemoryChores().catch(() => {})); }, 30_000);
   setTimeout(() => { import("./dispatch.ts").then((m) => m.sweepTaskTitles().catch(() => {})); }, 15_000); // 启动即补现有任务标题
-  setInterval(() => { import("./session-cleanup.ts").then((m) => { try { m.sweepDaemonTranscripts(); } catch (e) { log(`session cleanup: ${e}`); } }); }, 6 * 3600_000); // 每 6h 清 daemon 决策 transcript（>3天）
-  setTimeout(() => { import("./session-cleanup.ts").then((m) => { try { m.sweepDaemonTranscripts(); } catch (e) { log(`session cleanup: ${e}`); } }); }, 60_000); // 启动 1min 后清一次（首次会清掉历史积压的几千个）
+  if (!staging) {   // ~/.claude/projects 是和生产共用的，清理归生产
+    setInterval(() => { import("./session-cleanup.ts").then((m) => { try { m.sweepDaemonTranscripts(); } catch (e) { log(`session cleanup: ${e}`); } }); }, 6 * 3600_000); // 每 6h 清 daemon 决策 transcript（>3天）
+    setTimeout(() => { import("./session-cleanup.ts").then((m) => { try { m.sweepDaemonTranscripts(); } catch (e) { log(`session cleanup: ${e}`); } }); }, 60_000); // 启动 1min 后清一次（首次会清掉历史积压的几千个）
+  }
 
   setInterval(sweepActions, 60_000); // snooze 到期回 open
-  setInterval(() => { import("./calendar.ts").then((m) => m.sweepMeetingReminders()).catch((e) => log(`meeting reminders: ${e}`)); }, 60_000); // 会前 10min 提醒
-  setInterval(() => { import("./daily-digest.ts").then((m) => m.sweepDigest()).catch((e) => log(`daily digest: ${e}`)); }, 60_000); // 本地 24:00 自动日报
-
+  if (!staging && cfg.staging?.enabled) setInterval(() => { runStaging().catch((e) => log(`staging: ${e}`)); }, 60_000); // 行动项预处理（草稿 / review 简报），每 tick 一条
   const hbMs = (cfg.heartbeat.intervalMin || 45) * 60_000;
-  setTimeout(() => {
-    runHeartbeat();
-    setInterval(() => runHeartbeat(), hbMs);
-  }, 60_000); // 启动 1 分钟后开始第一次心跳
+  if (!staging) {
+    setInterval(() => { import("./calendar.ts").then((m) => m.sweepMeetingReminders()).catch((e) => log(`meeting reminders: ${e}`)); }, 60_000); // 会前 10min 提醒
+    setInterval(() => { import("./daily-digest.ts").then((m) => m.sweepDigest()).catch((e) => log(`daily digest: ${e}`)); }, 60_000); // 本地 24:00 自动日报
+    setTimeout(() => {
+      runHeartbeat();
+      setInterval(() => runHeartbeat(), hbMs);
+    }, 60_000); // 启动 1 分钟后开始第一次心跳
+  }
 
   // Skill saga 必须在开放 mutation API 前完成恢复；失败时保留 manual-repair 冻结，
   // daemon 仍启动以便用户读取 inventory 与恢复说明。
@@ -367,7 +389,7 @@ async function main() {
   setTimeout(recoverSettings, 15_000);
   setInterval(recoverSettings, 30_000); // 原 helper 仍持锁时会 busy；持续补派直到事务进入终态
 
-  log(`ready: triage every ${triageMs / 60000}m, heartbeat every ${hbMs / 60000}m`);
+  log(staging ? "ready (预发布)：分流/心跳/收割/routine 等后台任务未启动" : `ready: triage every ${triageMs / 60000}m, heartbeat every ${hbMs / 60000}m`);
 }
 
 if(import.meta.main)main().catch(error=>{console.error(`Ownward startup failed: ${error instanceof Error?error.message:String(error)}`);process.exit(78);});

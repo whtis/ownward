@@ -49,6 +49,7 @@ describe("Claude Code Runner Provider contract", () => {
     expect(parseClaudeOptions({ access: "standard", extraDirs: [], effort: "minimal" }).effort).toBe("minimal");
     expect(() => parseClaudeOptions({ access: "standard", extraDirs: [], temperature: 1 })).toThrow("options 含未知字段");
   });
+  test("probe failure is not cached: the next turn re-probes and spawns with --effort",async()=>{const spawnRecord=join(root(),"retry.jsonl"),{server,client,provider}=await fixture({}, {}, {FAKE_CLAUDE_EFFORT:"1",FAKE_CLAUDE_HELP_DELAY_MS:"41",FAKE_CLAUDE_HELP_FAIL_ONCE:join(root(),"help-failed-once"),FAKE_CLAUDE_SPAWN_RECORD:spawnRecord});try{await client.request("submit",startBody("effort-retry-1","retry-1"));expect((await waitTerminal(client,"effort-retry-1")).at(-1)).toMatchObject({type:"failed",reason:"unsupported_command"});await client.request("submit",startBody("effort-retry-2","retry-2"));const events=await waitTerminal(client,"effort-retry-2");expect(events.at(-1)?.type).not.toBe("failed");expect(readFileSync(spawnRecord,"utf8")).toContain("--effort");expect(provider.metrics.effortProbeFailures).toBe(1);}finally{client.close();server.stop();}});
   test("explicit effort either reaches argv or fails before spawn when unsupported/probe-failed",async()=>{for(const mode of["supported","unsupported","probe-failed"] as const){const spawnRecord=join(root(),`${mode}.jsonl`),{data,server,client,provider}=await fixture({}, {}, {FAKE_CLAUDE_EFFORT:mode==="unsupported"?"0":"1",FAKE_CLAUDE_HELP_DELAY_MS:"40",FAKE_CLAUDE_HELP_FAIL:mode==="probe-failed"?"1":"0",FAKE_CLAUDE_SPAWN_RECORD:spawnRecord});try{await Promise.all([client.request("submit",startBody(`effort-first-${mode}`,"capability")),client.request("submit",startBody(`effort-concurrent-${mode}`,"capability-2"))]);const first=await waitTerminal(client,`effort-first-${mode}`),second=await waitTerminal(client,`effort-concurrent-${mode}`);if(mode==="supported"){expect(JSON.stringify(payloads(data,first))).toContain("--effort|high");expect(JSON.stringify(payloads(data,second))).toContain("--effort|high");expect(readFileSync(spawnRecord,"utf8").trim().split("\n")).toHaveLength(2);}else{for(const events of[first,second]){expect(events.at(-1)).toMatchObject({type:"failed",reason:"unsupported_command"});expect(events.some(event=>event.type==="started"||event.type==="session-updated")).toBeFalse();}expect(() => readFileSync(spawnRecord,"utf8")).toThrow();}expect(provider.metrics.effortProbePending).toBeGreaterThan(0);expect(provider.metrics.effortUnsupported).toBe(mode==="supported"?0:2);expect(provider.metrics.effortProbeFailures).toBe(mode==="probe-failed"?1:0);}finally{client.close();server.stop();}}});
 
   test("slow effort help keeps Runner query responsive and remains bounded",async()=>{const{server,client}=await fixture({}, {}, {FAKE_CLAUDE_EFFORT:"1",FAKE_CLAUDE_HELP_DELAY_MS:"500"});try{await client.request("submit",startBody("slow-help","capability"));const before=Date.now();expect((await client.queryCommand("slow-help")).body.events).toBeArray();expect(Date.now()-before).toBeLessThan(400);expect((await waitTerminal(client,"slow-help",3_000)).at(-1)?.type).toBe("completed");}finally{client.close();server.stop();}});
@@ -161,6 +162,31 @@ describe("Claude Code Runner Provider contract", () => {
       expect((await waitTerminal(client, "approve-command")).at(-1)?.type).toBe("completed"); const turn = await waitTerminal(client, "approval-turn"); expect(turn.at(-1)?.type).toBe("completed"); expect(JSON.stringify(payloads(data, turn))).toContain("approval:allow");
       await expect(client.request("approval-response", { commandId: "stale", runId: "run-approval-turn", sessionId: "approval-session", providerId: "claude", approvalRequestId: "approval-1", input: JSON.stringify({ targetRunId: "run-approval-turn", response: "allow" }) })).resolves.toMatchObject({ kind: "accepted" });
       expect((await waitTerminal(client, "stale")).at(-1)).toMatchObject({ type: "failed", reason: "approval_stale" });
+    } finally { client.close(); server.stop(); }
+  });
+
+  // 2026-10-17：没选 bypass 派出去的会话，人对着审批卡想「全部放行」——以前轮次里切权限只会 provider_busy
+  test("本轮挂着审批时 set-access 不打断这一轮：审批仍等 Kernel 答复（adapter 不替人批），下一轮按 bypass 拉起", async () => {
+    const { data, server, client } = await fixture(); try {
+      await client.request("submit", startBody("mid-turn", "APPROVAL", "mid-session"));
+      let approval: any; for (let i = 0; i < 100 && !approval; i++) { approval = ((await client.queryCommand("mid-turn")).body.events as any[]).find((event) => event.type === "approval-requested"); if (!approval) await Bun.sleep(10); }
+      expect(approval?.approvalRequestId).toBe("approval-1");
+      await client.request("submit", { commandId: "mid-access", kind: "set-access", runId: "run-mid-access", sessionId: "mid-session", providerId: "claude", input: JSON.stringify({ access: "bypass" }) });
+      expect((await waitTerminal(client, "mid-access")).at(-1)?.type).toBe("completed");
+      expect(((await client.queryCommand("mid-turn")).body.events as any[]).some((event) => ["completed", "failed", "interrupted", "unknown-outcome"].includes(event.type))).toBe(false);
+      await client.request("approval-response", { commandId: "mid-approve", runId: "run-mid-turn", sessionId: "mid-session", providerId: "claude", approvalRequestId: "approval-1", input: JSON.stringify({ targetRunId: "run-mid-turn", response: "allow" }) });
+      expect((await waitTerminal(client, "mid-approve")).at(-1)?.type).toBe("completed"); expect((await waitTerminal(client, "mid-turn")).at(-1)?.type).toBe("completed");
+      await client.request("submit", { commandId: "after-access", kind: "send-input", runId: "run-after-access", sessionId: "mid-session", providerId: "claude", input: JSON.stringify({ text: "next", images: [] }) });
+      expect(JSON.stringify(payloads(data, await waitTerminal(client, "after-access")))).toContain("--dangerously-skip-permissions");
+      // Kernel 随后带着新 access 续聊（resume-run 恢复快照）与内存态一致，不报身份冲突
+      await client.request("submit", { commandId: "resume-after", kind: "resume-run", runId: "run-resume-after", sessionId: "mid-session", providerId: "claude", input: JSON.stringify({ text: "again", images: [], cwd: tmpdir(), options: { ...options, access: "bypass" }, nativeRef: "native-claude-1" }) });
+      expect((await waitTerminal(client, "resume-after")).at(-1)?.type).toBe("completed");
+    } finally { client.close(); server.stop(); }
+  });
+  test("Runner 重启后没有内存态的 set-access 直接 completed：下一轮 resume-run 显式携带 Kernel 持久化的 access", async () => {
+    const { server, client } = await fixture(); try {
+      await client.request("submit", { commandId: "ghost-access", kind: "set-access", runId: "run-ghost-access", sessionId: "never-started", providerId: "claude", input: JSON.stringify({ access: "bypass" }) });
+      expect((await waitTerminal(client, "ghost-access")).at(-1)).toMatchObject({ type: "completed" });
     } finally { client.close(); server.stop(); }
   });
 

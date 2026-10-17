@@ -80,6 +80,22 @@ export function extractConclusion(messages: DevMsg[], max = 1200): string {
   return "";
 }
 
+/** 每一轮的结论：每条 user 消息之后、下一条 user 消息之前，最后一条有内容的 assistant 消息（截断）。
+ *  只留最后一条的话，多轮任务的正事结论会被后面一句闲聊顶掉——收割再从这份记录总结工作日志，
+ *  就只知道「最后聊了啥」（2026-10-17：修 bug 的结论被一句「界面语言」问答盖住，日志把已做的改动写成「没做」）。
+ *  轮次太多时留头 2 轮 + 尾 8 轮：头是正事，尾是最新进展 */
+export function extractTurnConclusions(messages: DevMsg[], max = 1200): { label: string; text: string }[] {
+  const turns: { label: string; text: string }[] = [];
+  let index = -1, last = "";
+  const close = () => { if (index >= 0 && last) turns.push({ label: index === 0 ? "任务" : `追问 ${index}`, text: last.length > max ? last.slice(0, max) + "…" : last }); };
+  for (const m of messages) {
+    if (m.role === "user") { close(); index++; last = ""; continue; }
+    if (index >= 0 && m.role === "assistant" && m.text.trim()) last = m.text.trim();
+  }
+  close();
+  return turns.length > 10 ? [...turns.slice(0, 2), { label: "…", text: `（中间 ${turns.length - 10} 轮的结论省略，见会话）` }, ...turns.slice(-8)] : turns;
+}
+
 /** 未完成项：plan 里 status != completed 的步骤 */
 export function extractUnfinished(plan: PlanStep[]): PlanStep[] {
   return (plan || []).filter((p) => p.status !== "completed");
@@ -225,9 +241,11 @@ export function assembleFlightRecord(input: FlightInput): FlightRecord {
   renderGit(body, input.git);
   body.push("");
 
-  // 结论
+  // 结论：单轮任务照旧一段；多轮逐轮列出（标签与 Prompts 段对得上）
   body.push("## 结论");
-  body.push(conclusion || "(无 assistant 结论)");
+  const turnConclusions = extractTurnConclusions(input.messages);
+  if (turnConclusions.length > 1) for (const c of turnConclusions) body.push(c.label === "…" ? c.text : `**${c.label}**：${c.text}`, "");
+  else body.push(conclusion || "(无 assistant 结论)");
   body.push("");
 
   // 未完成项

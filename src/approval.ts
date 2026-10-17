@@ -132,10 +132,10 @@ export function revokeRule(id: string): boolean {
   return true;
 }
 
-/** 追加一条决策审计（jsonl 追加写，失败不阻塞主流程） */
-export function logDecision(entry: Omit<DecisionAudit, "at">) {
+/** 追加一条决策审计（jsonl 追加写，失败不阻塞主流程）。dataRoot：Kernel 侧按自己的数据根写（生产里就是 DATA），测试不落进运行环境 */
+export function logDecision(entry: Omit<DecisionAudit, "at">, dataRoot = DATA) {
   try {
-    ensureDir(DATA);
-    appendFileSync(AUDIT_FILE, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n");
+    ensureDir(dataRoot);
+    appendFileSync(dataRoot === DATA ? AUDIT_FILE : join(dataRoot, "approval-audit.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n");
   } catch { /* 审计写不进不影响审批本身 */ }
 }

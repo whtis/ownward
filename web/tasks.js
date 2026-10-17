@@ -30,6 +30,7 @@ const Tasks = {
   resetSession() {
     Tasks.dev = null; Tasks.devSig = ""; Tasks.ccMsgs = []; Tasks.ccOffset = 0; Tasks.openTools = new Set(); Tasks.feedLimit = FEED_PAGE; Tasks.msgTail = MSG_PAGE; Tasks.feedHidden = 0; Tasks.feedRuns = new Map();
     Tasks.images = ComposerDrafts.getAttachments(Tasks.selKind === "task" && Tasks.sel ? `task:${Tasks.sel}` : ""); Tasks.repoOpen = false; Tasks.repo = null;
+    ShareCard.stop();   // 分享选择态跟着会话走，换会话就退出
   },
 };
 // 项目组展开状态（localStorage 持久化，同 mac 端 AppStorage 的习惯）
@@ -740,15 +741,20 @@ function detailHead(t, extra) {
   const inSession = !!(t.engine && dev);   // 会话视图：读数交给信息条，这里不重复画
   const btns = [];
   if (t.engine && dev) {
-    // 沙箱开关：仅 codex 会话（claude 权限派发时定死）；解除态高亮警示
+    // 权限开关，放开态高亮警示。codex 是沙箱（写盘范围）；claude/codebuddy 是审批：派发时没选 bypass，
+    // 也能在会话里切到「全部放行」——本轮挂着的审批当场放行，不打断这一轮（只有 Runner 会话支持，legacy 没有 operability）
     if (dev.backend === "codex") {
       const on = !!dev.fullAccess;
       btns.push(`<button class="button sm ${on ? "danger" : "ghost"}" title="${on ? "已解除沙箱：可写全盘。点击恢复" : "解除沙箱：codex 可写全盘（下一轮生效）"}" onclick="devSetAccess('${esc(t.id)}',${!on})">${on ? "🔓 无沙箱" : "🔒 沙箱"}</button>`);
+    } else if (canApproveAll(dev)) {
+      const on = !!dev.fullAccess;
+      btns.push(`<button class="button sm ${on ? "danger" : "ghost"}" title="${on ? "全部放行中：工具调用不再逐条审批。点击恢复逐条审批" : "切到全部放行：本会话之后的工具调用不再逐条审批，正在等的审批一并放行"}" onclick="devSetAccess('${esc(t.id)}',${!on},'${esc(dev.providerId)}')">${on ? "⚡ 全部放行" : "🔐 逐条审批"}</button>`);
     }
     // 分叉：原会话要有自己的原生会话（跑完过一轮）才分得出来；本轮在跑也能点，后端会等它这一轮结束；归档会话由后端拒绝
     if (dev.resume && (dev.providerId === "claude" || dev.providerId === "codex")) {
       btns.push(`<button class="button sm ghost" title="分叉：带着完整上下文新开一个会话，原会话照常可用。两个会话共用同一工作目录，注意别同时改同一处" onclick="forkSession('${esc(t.id)}')">分叉</button>`);
     }
+    btns.push(`<button class="button sm ghost" title="点选几条消息，生成一张分享图片" onclick="tkShareStart()">分享</button>`);
     if (dev.control === "observing") btns.push(`<button class="button sm secondary" onclick="devControl('${esc(t.id)}','take')">接管输入</button>`);
     else if (dev.control === "ownward") btns.push(`<button class="button sm ghost" onclick="devControl('${esc(t.id)}','release')">释放输入权</button>`);
   }
@@ -967,7 +973,8 @@ function msgHtml(m, i) {
     return `<div class="msg" data-role="tool">${toolFrameHtml(m, i)}</div>`;
   }
   const who = m.role === "user" ? "我" : m.role === "assistant" ? "agent" : m.role === "thinking" ? "思考" : "系统";
-  return `<div class="msg" data-role="${esc(m.role)}"><div class="who">${who} · ${m.ts ? hhmm(m.ts) : ""}</div>
+  const shareable = (m.role === "user" || m.role === "assistant") && (m.text || "").trim();   // 分享图只收一问一答的正文
+  return `<div class="msg" data-role="${esc(m.role)}"${shareable ? ` data-share-i="${i}"` : ""}><div class="who">${who} · ${m.ts ? hhmm(m.ts) : ""}</div>
     <div class="bubble">${m.role === "assistant" ? mdHtml(m.text) : esc(m.text)}</div>${imgs}</div>`;
 }
 
@@ -990,13 +997,17 @@ function renderSession(t, dev) {
   const perms = (dev.pending || []).map((p) => {
     const isQ = p.toolName === "AskUserQuestion";
     if (!isQ) {
+      // 「总是」只记这一类（Bash 按命令首词），要放开整个会话用「全部放行」——两者不说清楚，「总是（全局）」读起来像全局放行
+      const scope = rememberScope(p), approveAll = canApproveAll(dev) && !dev.fullAccess;
       return `<div class="perm-card">
         <div class="name">🔐 权限请求 · ${esc(p.toolName)}</div>
         <div class="brief">${esc(p.brief || "")}</div>
+        ${scope ? `<div class="hint">「总是」只记住<b>${esc(scope)}</b>${approveAll ? "；要整个会话都不再问，点「全部放行」" : ""}</div>` : ""}
         <div class="foot">
           <button class="button sm primary" onclick="devDecide('${esc(t.id)}','${esc(p.requestId)}',true)">批准</button>
           <button class="button sm secondary" onclick="devDecide('${esc(t.id)}','${esc(p.requestId)}',true,null,'session')">总是（本会话）</button>
           <button class="button sm secondary" onclick="devDecide('${esc(t.id)}','${esc(p.requestId)}',true,null,'global')">总是（全局）</button>
+          ${approveAll ? `<button class="button sm secondary" title="本会话之后的工具调用都不再逐条审批，这一条一并放行" onclick="devSetAccess('${esc(t.id)}',true,'${esc(dev.providerId)}')">全部放行</button>` : ""}
           <button class="button sm danger" onclick="devDecide('${esc(t.id)}','${esc(p.requestId)}',false)">拒绝</button>
         </div></div>`;
     }
@@ -1202,11 +1213,24 @@ async function devSend(id) {
 async function devAddDir(id) {
   window.openAddDirPicker(id);
 }
-async function devSetAccess(id, full) {
-  if (full && !confirm("解除沙箱后 codex 可写整个磁盘（含系统路径），确认？")) return;
+/** provider 省略 = codex（沙箱）；claude/codebuddy 是审批：full = 全部放行 */
+async function devSetAccess(id, full, provider) {
+  const approvals = provider === "claude" || provider === "codebuddy";
+  if (full && !confirm(approvals ? "切到全部放行后，agent 执行命令、改文件、联网都不再逐条询问（等同派发时选 bypass），正在等的审批也会一并放行。确认？" : "解除沙箱后 codex 可写整个磁盘（含系统路径），确认？")) return;
   const r = await post("/api/dev/set-access", { id, full });
   toast(r.msg || (r.ok ? "已切换" : "失败"));
   pollDetail(true);
+}
+/** claude/codebuddy 会话能不能在会话里切「全部放行」：只有 Runner 会话（带 operability）支持；
+ *  放开要 architecture.allowFullAccess（派发弹窗的 bypass 同一道闸），已经放开的总能切回逐条审批 */
+function canApproveAll(dev) {
+  return (dev?.providerId === "claude" || dev?.providerId === "codebuddy") && dev.operability === "active" && (!!dev.fullAccess || S.state?.allowFullAccess === true);
+}
+/** 「总是」真正记住的那一类（服务端按 patternFor 归纳）：Bash 按命令首词/高危键，其它按工具名 */
+function rememberScope(p) {
+  const r = p.remember;
+  if (!r?.pattern) return "";
+  return r.kind === "bash" ? `「${r.pattern.length > 32 ? r.pattern.slice(0, 32) + "…" : r.pattern}」这类命令` : `${r.pattern} 工具`;
 }
 async function devInterrupt(id) { toast((await post("/api/dev/interrupt", { id })).msg); }
 async function devControl(id, action) {
@@ -1330,11 +1354,28 @@ async function pollCcObserve(id = Tasks.sel, kind = Tasks.selKind, forceHeader =
       <div class="right">
         <button class="button sm secondary" ${meta?.adoptToken ? "disabled" : ""} onclick="adoptCc('${jsq(id)}')">${meta?.adoptToken ? "正在接管…" : "接管续聊"}</button>
         ${meta?.kind !== "codex" ? `<button class="button sm ghost" onclick="harvestCc('${jsq(id)}')">收割成日志</button>` : ""}
+        <button class="button sm ghost" title="点选几条消息，生成一张分享图片" onclick="tkShareStart()">分享</button>
       </div></div>
     <div class="session-scroll" id="tk-scroll">${inc.truncated ? `<div class="msg" data-role="system"><div class="bubble">（长会话已截断前文）</div></div>` : ""}
       ${feedHtml(Tasks.ccMsgs)}</div>`;
   const sc2 = $("#tk-scroll");
   sc2.scrollTop = nearBottom ? sc2.scrollHeight : prevTop;
+}
+/** 进入分享选择态：消息按全量绝对下标取（引擎会话要加上服务端省掉的 omitted），轮询换了快照也取得到 */
+function tkShareStart(opts = {}) {
+  const dev = Tasks.dev, msgs = () => (dev && Tasks.dev ? Tasks.dev.messages || [] : Tasks.ccMsgs || []);
+  const off = () => (dev && Tasks.dev ? Tasks.dev.omitted || 0 : 0);
+  const t = S.tasks.find((x) => x.id === Tasks.sel), meta = Tasks.ccList.find((x) => x.id === Tasks.sel);
+  const provider = dev ? (dev.backend || dev.providerId || "") : (meta?.kind === "codex" ? "codex" : "claude");
+  const model = dev?.model || "";
+  ShareCard.start({
+    title: String(t?.title || t?.task || meta?.title || "").split("\n")[0].slice(0, 120), project: t?.project || meta?.project || "",
+    provider: [provider, model].filter(Boolean).join(" · "),
+    agentName: provider === "codex" ? "Codex" : provider === "codebuddy" ? "CodeBuddy" : provider === "claude" ? "Claude" : "Agent",
+    indices: msgs().map((m, k) => ({ i: k + off(), role: m.role })).filter((x) => x.role === "user" || x.role === "assistant"),
+    resolve: (i) => { const m = msgs()[i - off()]; return m && (m.role === "user" || m.role === "assistant") ? m : null; },
+    preset: opts.preset, open: !!opts.open,   // 划选分享：只带选中的片段，直接打开预览
+  });
 }
 function renderObserve(t, title) {
   const el = $("#tk-detail");

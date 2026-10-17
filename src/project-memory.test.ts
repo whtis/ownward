@@ -9,6 +9,8 @@ import type { Scope } from "./paths.ts";
 import {
   createProjectCandidate,
   dismissProjectCandidate,
+  dismissProjectCandidates,
+  isBackfilledCandidate,
   listProjectCandidates,
   promoteProjectCandidate,
 } from "./project-memory.ts";
@@ -278,5 +280,41 @@ describe("写正式文件的失败与越界", () => {
     expect(existsSync(join(real, "projects", "ownward", "_candidates", `${c.id}.md`))).toBe(true);
     ok(promoteProjectCandidate("ownward", "", c.id, "README"));
     expect(readFileSync(join(real, "projects", "ownward", "README.md"), "utf8")).toContain("软链 vault 也要能写");
+  });
+});
+
+describe("回填旧账：来源日期与批量丢弃", () => {
+  test("日报分来的取日报日期，对话来的取入库日期；来源比入库早 7 天以上算回填", () => {
+    const root = freshVault();
+    const dir = seedProject(root, "", "ownward");
+    const chat = newCand();
+    const digest = ok(createProjectCandidate("ownward", "", { text: "旧决策", sourceChatId: "digest:2026-08-14" })) as any;
+    expect(digest.candidate.sourceDate).toBe("2026-08-14");
+    const list = (ok(listProjectCandidates("ownward", "")) as any).candidates;
+    const byId = Object.fromEntries(list.map((c: any) => [c.id, c]));
+    expect(byId[chat.id].sourceDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(isBackfilledCandidate(byId[chat.id])).toBe(false);
+    expect(isBackfilledCandidate({ sourceDate: "2026-08-14", createdAt: "2026-10-15T07:17:42.632Z" })).toBe(true);
+    expect(isBackfilledCandidate({ sourceDate: "2026-10-14", createdAt: "2026-10-15T07:17:42.632Z" })).toBe(false);
+    expect(isBackfilledCandidate({ sourceDate: "", createdAt: "2026-10-15T07:17:42.632Z" })).toBe(false);
+    expect(readdirSync(join(dir, "_candidates"))).toHaveLength(2);
+  });
+
+  test("批量丢弃：全部校验过才动手；已不在的如实报；正式文件不碰", () => {
+    const root = freshVault();
+    const dir = seedProject(root, "", "ownward", "README_ORIGINAL");
+    const a = newCand(), b = newCand(), c = newCand();
+    expect(bad(dismissProjectCandidates("ownward", "", [a.id, "../../etc/passwd"])).code).toBe("invalid");
+    expect(readdirSync(join(dir, "_candidates"))).toHaveLength(3);   // 坏一条整批不动
+    expect(bad(dismissProjectCandidates("ownward", "", [])).code).toBe("invalid");
+    expect(bad(dismissProjectCandidates("ownward", "", "x" as any)).code).toBe("invalid");
+    ok(dismissProjectCandidate("ownward", "", b.id));
+    const r = ok(dismissProjectCandidates("ownward", "", [a.id, b.id])) as any;
+    expect(r.dismissed).toBe(1);
+    expect(r.missing).toEqual([b.id]);
+    expect(r.msg).toContain("另 1 条已不在");
+    expect(readdirSync(join(dir, "_candidates")).map((f) => f.slice(0, -3))).toEqual([c.id]);
+    expect(bad(dismissProjectCandidates("ownward", "", [a.id])).code).toBe("not_found");
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toBe("README_ORIGINAL");
   });
 });

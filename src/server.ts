@@ -61,6 +61,7 @@ function stateSnapshot() {
     vaultToday: join(OWNWARD_DIR, `${fmt(new Date(), "date")}.md`),
     vaultRoot: VAULT_ROOT,   // 客户端剥 vault 相对路径用（别在客户端硬编码目录名）
     allowFullAccess: cfg.architecture?.allowFullAccess === true,
+    staging: cfg.prerelease?.enabled === true,   // 预发布实例（../dev）：页面挂标，免得把 dev 当生产用
     // 派发弹窗的默认值（config: dispatch.defaults = {dir, provider, model, permission}）——前端不硬编码
     dispatchDefaults: dispatchDefaultsSnapshot(cfg.dispatch?.defaults),
     // 任意 gmail*.json 即视为已配置（多账号）

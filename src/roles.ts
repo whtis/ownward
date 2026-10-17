@@ -57,7 +57,7 @@ export type RoleType = typeof ROLE_TYPES[number];
  *  auto 只影响展示；domain 另有一条形状约束（必须是项目专家形状，见 checkShape） */
 export const ROLE_ORIGINS = ["", "auto", "domain"] as const;
 /** 这些段被 /api/roles/<段> 的固定路由占了：同名角色的详情会永远打不开，建的时候就拒 */
-const RESERVED_IDS = new Set(["projects", "suggestions", "resolve", "owner", "cross", "domain"]);
+const RESERVED_IDS = new Set(["projects", "suggestions", "resolve", "owner", "cross", "domain", "stewards"]);
 
 const MAX_NAME = 30, MAX_DESC = 200, MAX_INSTRUCTIONS = 2000, MAX_PROJECTS = 20, MAX_DIRS = 20;
 const MAX_PARENT_DEPTH = 8;   // 父链走查上限：正常只有两层，纯粹是防人工改文件造出的环/长链

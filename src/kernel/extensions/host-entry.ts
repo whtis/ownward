@@ -53,9 +53,16 @@ async function handle(c: Conn, env: HostEnvelope) {
         inspect: async (input: any) => (await request(c, "sources.inspect", { input, leaseId: sourcesLeaseId }, 40_000)).value,
         fetch: async (input: any) => (await request(c, "sources.fetch", { input, leaseId: sourcesLeaseId }, 110_000)).value,
       }) : undefined;
+      // events/notify（ADR 0003）：Kernel 侧同步受理。publish 整批两次 fsync（队列 + 账本），磁盘忙时给足 10s
+      const eventsLeaseId=String(grants.eventsLeaseId||""),events = grants.events ? Object.freeze({
+        publish: async (list: unknown) => (await request(c, "events.publish", { events: list, leaseId: eventsLeaseId }, 10_000)).value,
+      }) : undefined;
+      const notifyLeaseId=String(grants.notifyLeaseId||""),notify = grants.notify ? Object.freeze({
+        send: async (input: unknown) => (await request(c, "notify.send", { input, leaseId: notifyLeaseId })).value,
+      }) : undefined;
       const mod = c.module?null:await import(pathToFileURL(entry).href); c.module = c.module??mod!.default;
       if (!c.module || typeof c.module.activate !== "function") throw Object.assign(new Error("module invalid"), { code: "EXTENSION_MODULE_INVALID" });
-      c.context = deepFreeze({ id: env.body.id, config, storage, actions, scheduler, llm, sources, log: (operation: string, message: string) => request(c, "log", { operation, message: String(message).slice(0, 500) }).catch(() => {}) }); await c.module.activate(c.context); c.activated = true; body = { ready: true, manifest: c.module.manifest ?? null, jobs: [...c.jobs].map(([id, j]) => ({ id, intervalMs: j.intervalMs })) };
+      c.context = deepFreeze({ id: env.body.id, config, storage, actions, scheduler, llm, sources, events, notify, log: (operation: string, message: string) => request(c, "log", { operation, message: String(message).slice(0, 500) }).catch(() => {}) }); await c.module.activate(c.context); c.activated = true; body = { ready: true, manifest: c.module.manifest ?? null, jobs: [...c.jobs].map(([id, j]) => ({ id, intervalMs: j.intervalMs })) };
     } else if (env.method === "route") {
       exact(env.body, ["method", "url", "headers", "body", "timeoutMs", "maxResponseBytes"]); if (typeof env.body.method !== "string" || typeof env.body.url !== "string" || typeof env.body.body !== "string" || !Number.isInteger(env.body.timeoutMs) || !Number.isInteger(env.body.maxResponseBytes)) throw Object.assign(new Error(), { code: "EXTENSION_REQUEST_INVALID" });
       if (!c.module?.route) body = { handled: false };

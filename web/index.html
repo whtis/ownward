@@ -37,7 +37,7 @@
 <body>
 <div class="app-shell">
   <header class="topbar">
-    <div class="brand" aria-label="Ownward 首页">ownward<span>/</span></div>
+    <div class="brand-cell"><div class="brand" aria-label="Ownward 首页">ownward<span>/</span></div><span class="staging-badge" id="staging-badge" title="预发布实例（../dev）：配置同生产，事件源/通知/后台收割已关；派的任务是真跑" hidden>预发布</span></div>
     <nav class="nav-tabs" id="nav-tabs" aria-label="主导航">
       <button class="nav-tab" data-tab="today">今日 <span class="badge" id="b-today"></span></button>
       <button class="nav-tab" data-tab="tasks">任务 <span class="badge" id="b-tasks"></span></button>
@@ -301,6 +301,7 @@
 <script src="/today.js"></script>
 <script src="/feed.js"></script>
 <script src="/composer-files.js"></script>
+<script src="/share-card.js"></script>
 <script src="/tasks.js"></script>
 <script src="/chat.js"></script>
 <script src="/lark.js"></script>

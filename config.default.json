@@ -42,6 +42,41 @@
     "intervalMin": 20,
     "maxBatch": 50
   },
+  "staging": {
+    "enabled": false,
+    "kinds": ["lark.reply", "github.review", "gmail.reply"],
+    "settleMin": 10,
+    "dailyBudget": 30,
+    "model": "sonnet",
+    "maxInputChars": 24000
+  },
+  "support": {
+    "enabled": false,
+    "trigger": "排查",
+    "correctionTrigger": "纠正",
+    "roles": [],
+    "excluded": [],
+    "routeModel": "sonnet",
+    "investigateModel": "sonnet",
+    "dailyCap": 20,
+    "maxConcurrent": 2,
+    "maxTurns": 30,
+    "investigateTimeoutMs": 600000,
+    "allowedCommands": [],
+    "denyRead": [
+      "**/.env",
+      "**/.env.*",
+      "**/*.env",
+      "**/config_*.yaml",
+      "**/*secret*",
+      "**/*credential*",
+      "**/*.pem",
+      "**/*.key",
+      "**/.npmrc",
+      "~/.ssh/**",
+      "~/.aws/**"
+    ]
+  },
   "chat": {
     "providers": {
       "claude": [
@@ -117,6 +152,9 @@
         "codebuddy"
       ]
     }
+  },
+  "prerelease": {
+    "enabled": false
   },
   "release": {
     "observationSec": 0,

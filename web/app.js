@@ -497,7 +497,7 @@ TABS.feed = {
     $("#new-events-btn").addEventListener("click", () => {
       S.buffered = [];
       $("#new-events-btn").style.display = "none";
-      document.title = "Ownward";
+      document.title = appTitle();
       $("#feed-scroll").scrollTop = 0;
       renderFeed();
     });
@@ -545,12 +545,12 @@ function pushFeed(entry) {
     const btn = $("#new-events-btn");
     btn.textContent = `↑ ${S.buffered.length} 条新事件`;
     btn.style.display = "block";
-    if (document.hidden) document.title = `(${S.buffered.length}) Ownward`;
+    if (document.hidden) document.title = appTitle(`(${S.buffered.length}) `);
   } else {
     renderFeed(1);
   }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = "Ownward"; });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) document.title = appTitle(); });
 
 /* 人正盯着工作台时，横幅和飞书都是重复打扰：聚焦状态下每 30s 上报一次，
    daemon 据此把通知降级成只进 feed（src/presence.ts）。失焦就不报，到点自然过期。
@@ -602,8 +602,14 @@ function connectSSE() {
     setTimeout(connectSSE, Math.min(S.retries * 3000, 30000));
   };
 }
+/** 页面标题：预发布实例一律带前缀（未读数等前缀放在最前） */
+function appTitle(prefix = "") { return `${prefix}${S.state?.staging ? "[预发布] " : ""}Ownward`; }
 function renderTopbar() {
   if (!S.state) return;
+  // 预发布实例（../dev，端口 4519）挂醒目标记：配置和生产一样、派的任务也是真跑，别当成生产在用
+  const staging = S.state.staging === true;
+  $("#staging-badge").hidden = !staging;
+  if (staging && !document.title.includes("[预发布]")) document.title = appTitle();
   renderSysStatus();
   renderHeartbeatPill();
   applyFeatureVisibility();

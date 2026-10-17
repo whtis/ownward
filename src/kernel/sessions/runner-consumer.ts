@@ -13,6 +13,7 @@ import type { KernelGrantedAccess, SessionCapability, SessionInput } from "./con
 import { SessionRunnerBridgeStore, type BridgeCommand } from "./bridge-store.ts";
 import { readInitialHistory } from "./initial-history.ts";
 import { assertProviderOptions } from "../../session-options.ts";
+import { patternFor } from "../../approval.ts";
 
 export const PROVIDER_CAPABILITIES: Readonly<Record<SessionProviderId, ReadonlySet<SessionCapability>>> = {
   // fork：claude 走原生 --resume <ref> --fork-session；codex 没有可验证的原生分叉，adapter 复制 rollout 到新 thread id
@@ -26,6 +27,7 @@ export const PROVIDER_CAPABILITIES: Readonly<Record<SessionProviderId, ReadonlyS
   // transcript 是私有格式，无 history 能力（adapter readHistory 会拒）；--fork-session 未实测，不声明 fork
   codebuddy: new Set(["stream", "resume", "interrupt", "approval", "images", "tools", "add-dir", "set-access", "set-options", "new-session"]),
 };
+const PROVIDER_LABEL: Readonly<Record<string, string>> = { claude: "Claude", codex: "Codex", codebuddy: "CodeBuddy" };
 
 export class KernelSessionPolicyError extends Error {
   readonly code: string;
@@ -161,14 +163,16 @@ function pendingView(requestId: string | undefined, body: any, at: string): Reco
   }
   if (body?.kind === "tool") {
     const toolName = typeof body.toolName === "string" ? body.toolName : "unknown-tool";
-    return { ...base, toolName, brief: `${toolName}: ${toolBrief(body.input)}` };
+    // remember = 点「总是」真正记住的那一类（Bash 按命令首词/高危键，其它按工具名）。卡片上不说清楚，「总是（全局）」读起来
+    // 就像全局放行，实际只记了 `cd`，下一条 grep 照问（2026-10-17 实撞）
+    return { ...base, toolName, brief: `${toolName}: ${toolBrief(body.input)}`, ...(toolName === "unknown-tool" ? {} : { remember: patternFor(toolName, body.input) }) };
   }
   return base;  // legacy/未知形状原样透传
 }
 
 /** 兼容 Web AgentState 的纯投影；正文只能由 journal payload loader 显式提供。 */
 export class RunnerAgentStateProjector {
-  private readonly messages: DevMsg[] = []; private readonly explained = new Set<string>(); private partial = ""; private turn = "idle"; private pending: unknown[] = []; private tokens: Record<string, unknown> = {}; private lastActivityAt = 0;
+  private readonly messages: DevMsg[] = []; private readonly explained = new Set<string>(); private readonly warned = new Set<string>(); private readonly progressed = new Set<string>(); private partial = ""; private turn = "idle"; private pending: unknown[] = []; private tokens: Record<string, unknown> = {}; private lastActivityAt = 0;
   private plan: unknown[] = []; private commands: string[] | undefined; private model: string | undefined; private ctxTokens = 0; private ctxWindow = 0; private cumInput = 0; private cumOutput = 0;
   constructor(private readonly session: SessionRecord, private readonly payload: (event: RunnerEventRecord) => unknown, private readonly command: (commandId: string) => Pick<RunnerCommandRecord, "kind" | "approvalRequestId"> | undefined = () => ({ kind: "start-run" }), initial: DevMsg[] = []) { this.messages.push(...structuredClone(initial)); }
   apply(event: RunnerEventRecord): void {
@@ -177,8 +181,8 @@ export class RunnerAgentStateProjector {
     const body: any = event.payloadRef ? this.payload(event) : null;
     const command = this.command(event.commandId), isTurn = command?.kind === "start-run" || command?.kind === "resume-run" || command?.kind === "send-input";
     if (event.type === "started" && isTurn) this.turn = "running";
-    else if (event.type === "delta") this.partial += typeof body === "string" ? body : String(body?.text ?? "");
-    else if (event.type === "message-completed") this.applyMessage(body, event.at);
+    else if (event.type === "delta") { this.partial += typeof body === "string" ? body : String(body?.text ?? ""); if (isTurn) this.progressed.add(event.commandId); }
+    else if (event.type === "message-completed") { this.applyMessage(body, event.at); if (isTurn) this.progressed.add(event.commandId); }
     else if (event.type === "provider-notice") this.applyNotice(body, event.at, event.commandId);
     else if (event.type === "session-updated" && body && typeof body === "object") {
       if (Array.isArray(body.commands)) this.commands = body.commands.filter((c: unknown): c is string => typeof c === "string").slice(0, 300);
@@ -201,12 +205,14 @@ export class RunnerAgentStateProjector {
       // 没发生——用户那条消息（来自 command journal 的投影）孤零零挂着，没有回复也没有解释。
       // 已经有 provider-notice 讲过原因的不重复说；interrupted 是用户自己按的，不用解释。
       if ((event.type === "failed" || event.type === "unknown-outcome") && !this.explained.has(event.commandId)) {
-        const reason = typeof event.reason === "string" ? event.reason : "";
+        const reason = typeof event.reason === "string" ? event.reason : "", exit = Number.isSafeInteger(event.exitCode) ? `（exit ${event.exitCode}）` : "";
+        // 跑了半天才死的（已经出过消息）不能说「没跑起来」：用户会去查启动参数，而真相是进程中途被杀（exit 143 = SIGTERM）
         const text = reason === "provider_busy" ? "⚠️ 这条没送到 agent：上一轮还没释放会话（消息已放回队列重发）"
           : event.type === "unknown-outcome" ? `⚠️ 这一轮结局未知${reason ? `：${reason}` : ""}——按原 commandId 查证后再决定重发`
-          : `⚠️ 这一轮没跑起来${reason ? `：${reason}` : ""}`;
+          : `⚠️ ${this.progressed.has(event.commandId) ? "这一轮中途退出" : "这一轮没跑起来"}${reason ? `：${reason}` : ""}${exit}`;
         this.messages.push({ role: "system", name: "error", text, ts: event.at });
       }
+      this.progressed.delete(event.commandId);
     }
     else if (["completed", "failed"].includes(event.type) && command?.kind === "approval-response") this.pending = this.pending.filter((p: any) => p.requestId !== command.approvalRequestId);
   }
@@ -286,6 +292,12 @@ export class RunnerAgentStateProjector {
     // 没有任何可给用户看的内容，渲染出来只会让人以为坏了。真错误（限流/掉登录/带信息的
     // api_error）都有 detail，照常透出
     if (body.category === "api_error" && !detail) return;
+    // Provider 自己的非致命警告（codex 的 item.type=error：config.toml 里有不认识的键、WebSocket 退回 HTTPS…）：
+    // 本轮照常往下跑。它不能算「这一轮为什么失败」的解释——以前算，本轮真挂了时「这一轮没跑起来」那行被它顶掉，
+    // 用户只看得见一条配置警告，以为就是它把任务弄坏了（2026-10-17 实撞：exit 143 被一条配置警告盖住）。
+    // codex exec 每轮一个新进程、每轮重报一遍（还连报两遍）：同一会话同一条只显示一次，和 CLI 自己的界面一致。
+    const warning = body.category === "provider_warning";
+    if (warning) { if (this.warned.has(detail)) return; this.warned.add(detail); }
     const map: Record<string, string> = {
       compacting: "⏳ 正在压缩上下文（/compact）…",
       compact_ok: "✅ 上下文已压缩",
@@ -294,7 +306,7 @@ export class RunnerAgentStateProjector {
       auth_expired: `⚠️ 登录过期${detail ? `：${detail}` : ""}`,
       api_error: `⚠️ ${detail}`,
       stderr: `⚠️ stderr: ${detail}`,
-      provider_warning: `⚠️ ${detail || "provider 警告"}`,
+      provider_warning: `⚠️ ${PROVIDER_LABEL[this.session.providerId] ?? this.session.providerId} 警告（本轮照常继续）：${detail || "provider 警告"}`,
       lock_conflict: `⚠️ 会话被另一个进程占用，本轮没跑起来${detail ? `：${detail}` : ""}\n多半是终端里还开着同一个会话（codex resume / claude --resume），先退出它再续聊`,
       resume_not_found: `⚠️ 找不到可恢复的会话${detail ? `：${detail}` : ""}`,
       background_task: `⚠️ ${detail || "后台任务状态变更"}`,
@@ -307,8 +319,16 @@ export class RunnerAgentStateProjector {
     const text = map[body.category] ?? (detail ? `⚠️ ${body.category}：${detail}` : "");
     if (!text) return;
     const informational = ["compacting", "compact_ok", "background_waiting", "fork_waiting"].includes(body.category);
-    if (commandId && !informational) this.explained.add(commandId);
-    this.messages.push({ role: "system", ...(informational ? {} : { name: "error" }), text, ts: at });
+    if (commandId && !informational && !warning) this.explained.add(commandId);
+    const last = this.messages[this.messages.length - 1];
+    if (last && last.role === "system") {
+      const cleanPrev = last.text.replace(/^[⚠️⏳✅]\s*/, "");
+      const cleanCur = text.replace(/^[⚠️⏳✅]\s*/, "");
+      if (cleanPrev === cleanCur || (detail && (cleanPrev.includes(detail) || detail.includes(cleanPrev)))) {
+        return;
+      }
+    }
+    this.messages.push({ role: "system", ...(informational ? {} : { name: warning ? "warning" : "error" }), text, ts: at });
   }
   state() { return { messages: structuredClone(this.messages), turn: this.turn, alive: this.turn === "running", partial: this.partial, pending: structuredClone(this.pending), resume: null, backend: this.session.providerId, providerId: this.session.providerId, control: this.session.control, queued: [], plan: structuredClone(this.plan), tokens: structuredClone(this.tokens), lastActivityAt: this.lastActivityAt, ...(this.commands ? { commands: [...this.commands] } : {}), ...(this.model ? { model: this.model } : {}), ...(this.ctxTokens ? { ctxTokens: this.ctxTokens } : {}), ...(this.ctxWindow ? { ctxWindow: this.ctxWindow } : {}) }; }
 }

@@ -12,7 +12,7 @@ export const KERNEL_API_VERSION = 1;
  *  没有 minKernelVersion 的话，「新 Vertical 装到老 Kernel」会一路放行到
  *  运行时才炸（老 Kernel 的方法分发链走到末尾抛 EXTENSION_KERNEL_METHOD_DENIED），
  *  用户看到的是「页面打得开，一点某个功能就报错」。 */
-export const KERNEL_VERSION = "1.6.0";
+export const KERNEL_VERSION = "1.7.0";
 
 export type VerticalState = "discovered" | "disabled" | "starting" | "migration_failed" | "ready" | "degraded" | "failed" | "stopping";
 export type VerticalCapability = "storage" | "sessions" | "tasks" | "tasks:full-access" | "actions" | "events" | "scheduler" | "notify" | "vault" | "llm" | "sources";
@@ -125,6 +125,39 @@ export interface ScopedActions {
   resolve(id: string, resolution: string): boolean | Promise<boolean>;
   dismiss(id: string): boolean | Promise<boolean>;
 }
+/** act=需要你动手（进飞书）；fyi=知道就行（横幅+feed）；silent=只留档 feed。与 Kernel 通知等级同义。 */
+export type VerticalNotifyLevel = "act" | "fyi" | "silent";
+export interface VerticalNotification {
+  /** 去重/冷却键。Kernel 强制加 `vertical:<id>:` 前缀；同 key 在冷却窗口内重复调用返回 duplicate。 */
+  key: string;
+  /** 首行当标题，≤500 字。 */
+  text: string;
+  /** 只进 feed，≤2000 字。 */
+  detail?: string;
+  /** 缺省 fyi。 */
+  level?: VerticalNotifyLevel;
+  /** http(s) 绝对地址，或 `/verticals/<本 id>/` 下的相对路径（Kernel 换成工作台地址，手机上也能点开）。 */
+  link?: string;
+  /** 时效性提醒（止损、开会）：静默时段照推。需本机配置 grantedNotifyUrgent=true，否则拒绝。 */
+  urgent?: boolean;
+}
+/** 直接通知（ADR 0003）：投递一律过 Kernel 通知策略（前台降级/静默时段/冷却/只有 act 进飞书）。
+ *  校验+限流后即返回，不等通道；观测数据，至多一次。 */
+export interface ScopedNotify {
+  send(input: VerticalNotification): { status: "queued" | "duplicate" } | Promise<{ status: "queued" | "duplicate" }>;
+}
+export interface VerticalEvent {
+  /** 同一业务事实必须稳定：重复发布只计 duplicates，不再入队。 */
+  id: string;
+  type: string;
+  occurredAt?: string;
+  payload: Record<string, unknown>;
+}
+/** 业务事件（ADR 0003）：进 Kernel 关键事件队列，由 triage 定级 notify/log/丢弃。
+ *  返回即已 fsync 入队；整批校验，任一条非法整批拒绝。 */
+export interface ScopedEvents {
+  publish(events: readonly VerticalEvent[]): { accepted: number; duplicates: number } | Promise<{ accepted: number; duplicates: number }>;
+}
 export interface VerticalContext {
   readonly id: string;
   readonly config: Readonly<Record<string, unknown>>;
@@ -132,11 +165,11 @@ export interface VerticalContext {
   readonly sessions?: ScopedSessions;
   readonly tasks?: ScopedTasks;
   readonly actions?: ScopedActions;
-  readonly events?: Readonly<Record<string, never>>;
+  readonly events?: ScopedEvents;
   readonly scheduler?: ScopedScheduler;
   readonly llm?: ScopedLlm;
   readonly sources?: ScopedSources;
-  readonly notify?: Readonly<Record<string, never>>;
+  readonly notify?: ScopedNotify;
   readonly vault?: { readonly scopes: readonly string[]; readonly sensitivity: "normal" | "sensitive" };
   readonly log: (operation: string, message: string) => void;
 }

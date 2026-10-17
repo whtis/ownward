@@ -30,6 +30,17 @@ export async function runHeartbeat(): Promise<void> {
   ].join("\n");
 
   const res = await llmJson(prompt);
+  // 观察（建议/风险/规律）与提醒独立：没有要提醒的事也可以往货架上放一条
+  if (Array.isArray(res?.observations) && res.observations.length) {
+    try {
+      const S = await import("./shelf.ts");
+      const { listActions } = await import("./actions.ts");
+      const { kept, dropped } = S.dropQueuedObservations(res.observations as import("./shelf.ts").ShelfInput[], listActions(false));
+      if (dropped) log(`heartbeat: ${dropped} 条观察说的是行动队列里已有的事，不上货架`);
+      S.recordShelfItems(kept);
+    }
+    catch (e) { log(`heartbeat: shelf record failed: ${e}`); }
+  }
   if (res?.message) {
     await notify(`💓 ${res.message}`, { source: "heartbeat", level: "act", actions: [{ text: "打开工作台", url: workbenchUrl("/?tab=today"), primary: true }] });
     appendNotification(res.message);   // 归档与推送解耦：被前台/冷却压住的提醒也要留在笔记里
@@ -68,10 +79,14 @@ async function gatherContext(): Promise<string> {
   // 挂着的行动队列：心跳的催办依据（之前只有通知一次性提醒，搁置的事没人再吭声）
   const { listActions } = await import("./actions.ts");
   const open = listActions(false).map((a) => ({
-    kind: a.kind, title: a.title, state: a.state,
+    id: a.id, kind: a.kind, title: a.title, state: a.state,
     挂了多久: `${Math.round((Date.now() - Date.parse(a.createdAt)) / 360_000) / 10}h`,
   }));
   parts.push(`## 待处理的行动（收件箱挂着的）\n${JSON.stringify(open).slice(0, 2500)}`);
+
+  const { listShelfItems } = await import("./shelf.ts");
+  const shelf = listShelfItems().map((x) => `- [${x.category}] ${x.title}`);
+  parts.push(`## 货架上已有的观察（别重复给）\n${shelf.join("\n") || "(空)"}`);
 
   parts.push(`## 待 triage 队列\n${queueSize()} 个事件`);
   parts.push(`## 最近已发通知（去重用）\n${JSON.stringify(recentNotifications())}`);

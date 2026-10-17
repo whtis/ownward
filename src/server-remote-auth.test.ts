@@ -46,7 +46,14 @@ describe("listen=all remote authentication", () => {
       const { startServer } = await import(${JSON.stringify(join(import.meta.dir, "server.ts"))});
       const server = startServer(), base = "http://127.0.0.1:" + server.port;
       const token = readFileSync(join(process.env.OWNWARD_DATA_ROOT, "secrets/api-token.txt"), "utf8").trim();
-      const call = async (headers = {}, path = "/api/state", method = "GET") => (await fetch(base + path, { headers, method })).status;
+      // 整套测试并行跑、机器很忙时，偶尔一次请求会被 ECONNRESET（传输层抖动，不是这里要验的状态码）：
+      // 只对连接级错误重试，状态码一律原样返回，断言一个都不放松
+      const call = async (headers = {}, path = "/api/state", method = "GET") => {
+        for (let attempt = 1; ; attempt++) {
+          try { return (await fetch(base + path, { headers, method })).status; }
+          catch (error) { if (attempt >= 3 || !/ECONNRESET|ECONNREFUSED|socket/i.test(String(error?.code ?? error))) throw error; await Bun.sleep(50); }
+        }
+      };
       const proxyHeaders = [
         { forwarded: "for=203.0.113.9" },
         { "x-forwarded-for": "203.0.113.9" },

@@ -212,6 +212,15 @@ details.more .menu button:hover { background: var(--surface-hover); color: var(-
 .tag[data-tone="bad"] { color: var(--danger); background: color-mix(in srgb, var(--danger) 13%, transparent); }
 .tag[data-tone="accent"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
 
+/* Staged Actions：今天页行动卡上的预制草稿（徽标 / 一行预览 / 展开面板） */
+.stage-tag[role="button"] { cursor: pointer; }
+.stage-preview { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-panel { margin-top: 8px; padding: 8px 12px; background: var(--bg-subtle, rgba(0,0,0,0.03)); border-radius: 6px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.stage-panel ul { margin: 2px 0 0; padding-left: 18px; }
+.stage-panel .stage-caveats { color: var(--warning); }
+.stage-panel .stage-text { width: 100%; min-height: 96px; resize: vertical; box-sizing: border-box; }
+.stage-panel .foot { display: flex; gap: 6px; align-items: center; }
+
 input[type=text], textarea, select {
   background: var(--surface-1); border: 1px solid var(--border-default); border-radius: 6px;
   color: var(--text-primary); font: 13px/1.5 var(--font-ui); padding: 6px 9px;
@@ -412,6 +421,7 @@ textarea { resize: vertical; }
 .perm-card { border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent); background: var(--warning-soft); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
 .perm-card .name { font-family: var(--font-mono); font-weight: 600; font-size: 12px; }
 .perm-card .brief { margin: 6px 0; font-size: 12px; white-space: pre-wrap; max-height: 180px; overflow-y: auto; }
+.perm-card .hint { margin: -2px 0 8px; font-size: 11px; color: var(--text-secondary); }
 .perm-card .foot { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 
 /* 输入区：一个圆角容器把缩略图/文本框/工具条裹成整体，聚焦时整体高亮 */
@@ -623,6 +633,9 @@ textarea { resize: vertical; }
 .rl-block-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .rl-block-head h3 { font-size: 13.5px; font-weight: 650; }
 .rl-block-head .count { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); }
+.rl-pc-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.rl-pc-bar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.rl-pc-pick { float: left; margin: 2px 8px 0 0; cursor: pointer; }
 .rl-block-head .rl-quiet { margin-left: auto; }
 .rl-prose { white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: var(--text-secondary); background: var(--surface-2); border-radius: var(--radius-row); padding: 10px 12px; overflow-wrap: anywhere; }
 .rl-docs { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
@@ -678,6 +691,13 @@ textarea { resize: vertical; }
 .modal input[type=color] { width: 44px; height: 32px; padding: 2px; border: 1px solid var(--border-default); border-radius: 6px; background: var(--surface-1); cursor: pointer; }
 .modal .pick-row { margin-top: 4px; }
 .modal .pick-row .state-box { padding: 10px; font-size: 12px; }
+
+/* 预发布实例标记（renderTopbar 按 /api/state.staging 显隐）。和品牌名同占顶栏第一格：
+   顶栏是三栏网格，多塞一个兄弟元素会把导航和按钮挤乱；手机上品牌名隐藏，标记仍要看得见 */
+.brand-cell { display: flex; align-items: center; min-width: 0; }
+.staging-badge { align-self: center; margin-left: 8px; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 650; letter-spacing: .02em;
+  color: var(--warning); background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent); white-space: nowrap; }
+.staging-badge[hidden] { display: none; }
 
 /* ============ 笔记 tab ============ */
 .tree { font-size: 12.5px; }
@@ -810,6 +830,27 @@ textarea { resize: vertical; }
 .today-focus { grid-column: 1; grid-row: 1 / span 2; min-width: 0; }
 .today-side { grid-column: 2; display: grid; gap: 24px; min-width: 0; }
 .today-routines { grid-column: 2; min-width: 0; }
+.today-shelf { margin-top: 22px; }
+.today-shelf .shelf-card .body { color: var(--text-secondary); }
+/* 领域管家头像条：横向滚动，不挤占今日焦点的高度 */
+.today-stewards { display: flex; gap: 8px; margin-top: 12px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+.steward-card { flex: none; display: flex; align-items: center; gap: 9px; max-width: 260px; padding: 7px 12px 7px 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-row); background: var(--surface-1); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.steward-card:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle)); }
+.steward-avatar { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 9px; color: var(--accent); background: var(--accent-soft); }
+.steward-avatar .ui-icon { width: 16px; height: 16px; }
+.presence-dot { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--surface-1); background: var(--success); }
+.steward-card[data-presence="attention"] .presence-dot { background: var(--warning); }
+.steward-card[data-presence="busy"] .presence-dot { background: var(--accent); }
+.steward-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
+.steward-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.steward-summary { font-size: 11.5px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 本周目标：勾选即写回 memory/goals.md */
+.goals-panel { padding: 6px 12px; }
+.goal-row { display: flex; align-items: center; gap: 8px; min-height: 34px; font-size: 13px; cursor: pointer; }
+.goal-row + .goal-row { border-top: 1px solid var(--border-subtle); }
+.goal-row input { flex: none; margin: 0; }
+.goal-row .goal-text { min-width: 0; }
+.goal-row[data-done="true"] .goal-text { color: var(--text-tertiary); text-decoration: line-through; }
 .today-grid[data-focus-empty="true"] { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 22px; }
 .today-grid[data-focus-empty="true"] .today-focus { display: none; }
 .today-grid[data-focus-empty="true"] .today-side { grid-column: 1; }
@@ -818,6 +859,8 @@ textarea { resize: vertical; }
 .section-head h2 { font-size: 15px; line-height: 1.35; font-weight: 650; letter-spacing: -.01em; }
 .section-head p { margin-top: 2px; color: var(--text-tertiary); font-size: 12px; }
 .section-head.compact { min-height: 43px; }
+#td-routines-head { flex-shrink: 0; }
+#td-routines-head:empty { display: none; }
 .meeting-panel { padding: 5px 12px; }
 .meeting-panel .kv { min-height: 38px; }
 .state-box { padding: 26px 16px; border-radius: var(--radius-row); background: var(--surface-1); color: var(--text-tertiary); text-align: center; font-size: 13px; }
@@ -1546,3 +1589,38 @@ html[data-look="ink"] .modal { border-color: color-mix(in oklab, var(--text-prim
 
 /* 英文界面比中文长：顶栏按钮、导航标签、状态胶囊不折行 */
 .topbar .button, .nav-tab, #sys-status { white-space: nowrap; }
+
+/* 会话分享图（web/share-card.js）：选择态下可选消息虚线框、选中实线框 + 勾；底部浮条；预览弹窗 */
+#tk-scroll.share-mode { padding-bottom: 72px; }   /* 给浮条让出位置，最后一条能滚到它上面 */
+#tk-scroll.share-mode .msg { opacity: .42; transition: opacity .12s; }
+#tk-scroll.share-mode .msg[data-share-i] { opacity: 1; cursor: pointer; position: relative; border-radius: 12px; outline: 1.5px dashed var(--border-default); outline-offset: 5px; }
+#tk-scroll.share-mode .msg[data-share-i]:hover { outline-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+#tk-scroll.share-mode .msg[data-share-i][data-picked="true"] { outline: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+#tk-scroll.share-mode .msg[data-share-i][data-picked="true"]::after { content: "✓"; position: absolute; top: -12px; right: -12px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--text-inverse); font-size: 12px; font-weight: 700; }
+#tk-scroll.share-mode .msg[data-share-i][data-picked="partial"] { outline: 2px dashed var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
+#tk-scroll.share-mode .msg[data-share-i][data-picked="partial"]::after { content: "✂"; position: absolute; top: -12px; right: -12px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--text-inverse); font-size: 11px; }
+.share-sel-btn { position: fixed; z-index: 46; box-shadow: var(--shadow-popover); }
+.share-bar { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 45; display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 16px; border-radius: 999px; background: var(--surface-popover); border: 1px solid var(--border-default); box-shadow: var(--shadow-popover); font-size: 13px; white-space: nowrap; max-width: calc(100vw - 24px); }
+.share-bar .share-count { color: var(--text-secondary); margin-right: 4px; overflow: hidden; text-overflow: ellipsis; }
+.share-dialog { width: min(1000px, calc(100vw - 32px)); }
+.share-dialog-head { display: flex; align-items: center; justify-content: space-between; }
+.share-dialog-head h2 { font-size: 15px; margin: 0; }
+.share-layout { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 18px; align-items: start; }
+/* 预览按原宽铺开、竖着滚：长图别被压成看不清的缩略图 */
+.share-preview { background: var(--surface-2); border-radius: 12px; padding: 14px; max-height: min(70vh, 680px); overflow: auto; }
+.share-preview img { display: block; width: 100%; max-width: 420px; height: auto; margin: 0 auto; border-radius: 6px; }
+.share-side { display: grid; gap: 14px; }
+.share-field { display: grid; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.share-field input { width: 100%; margin: 0; }
+.share-themes { display: flex; gap: 8px; }
+.share-themes { flex-wrap: wrap; }
+.share-theme { width: 46px; height: 34px; border-radius: 8px; border: 2px solid var(--border-subtle); cursor: pointer; padding: 0; font: 600 13px Georgia, serif; }
+.share-theme[data-on="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+.share-check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.share-actions { display: grid; gap: 8px; }
+@media (max-width: 760px) {
+  .share-dialog { width: 100vw; }   /* 跟其他 control-dialog 一样手机上铺满，别被上面的宽度规则盖掉 */
+  .share-layout { grid-template-columns: 1fr; }
+  .share-preview { max-height: 56vh; padding: 8px; }
+  .share-bar .share-clear { display: none; }
+}

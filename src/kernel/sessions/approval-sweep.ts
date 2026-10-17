@@ -80,6 +80,14 @@ export function approvalRuleToRemember(payload: unknown): { toolName: string; in
   return { toolName: meta.toolName, input: meta.input, brief: meta.brief, ...patternFor(meta.toolName, meta.input) };
 }
 
+/** 会话被切到「全部放行」（Kernel 授权 bypass/full-access）：工具类请求直接放行，提问（AskUserQuestion）永远等人答——
+ *  判据同 approvalRuleToRemember 非空。没选 bypass 派出去的会话，本轮的 CLI 是按逐条审批拉起来的，切换只改下一轮的
+ *  启动参数；这一轮剩下冒出来的请求靠审批投影按这个授权收掉（2026-10-17：会话里没有任何办法放开，只能一条条点）。 */
+export function approveAllGranted(access: string | undefined): boolean { return access === "bypass" || access === "full-access"; }
+export function logApproveAll(taskId: string, requestId: string, remembered: NonNullable<ReturnType<typeof approvalRuleToRemember>>, dataRoot = DATA): void {
+  logDecision({ taskId, requestId, toolName: remembered.toolName, kind: remembered.kind, pattern: remembered.pattern, decision: "auto-allow", by: "system", detail: `全部放行 · ${remembered.brief}` }, dataRoot);
+}
+
 let sweeping = false, sweepAgain = false, kickTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** consume 拉到新审批时由 daemon 调：短时间内多次触发合并成一轮，正在跑就排一轮补跑。 */
@@ -105,6 +113,7 @@ export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
     const taskIdOf = (sessionId: string): string | null => {
       try { const s = repo.getById(sessionId); return s ? (s.taskIds[0] ?? s.id) : null; } catch { return null; }
     };
+    const accessOf = (sessionId: string): string | undefined => { try { return repo.getById(sessionId)?.access; } catch { return undefined; } };
     let dirty = false;
 
     // 已答复 / turn 终结：收敛我们建过的 Action，并清通知状态
@@ -132,6 +141,28 @@ export async function sweepRunnerApprovals(dataRoot = DATA): Promise<void> {
       const key = `${p.sessionId}:${p.requestId}`;
       const taskId = state.notified[key]?.taskId ?? taskIdOf(p.sessionId);
       if (!taskId) continue;
+      // 会话已切到「全部放行」：工具类请求直接放行——已经弹过卡、人还没点的也一并收掉。放不了就照常走人工审批
+      if (approveAllGranted(accessOf(p.sessionId))) {
+        let remembered: ReturnType<typeof approvalRuleToRemember> = null;
+        try { const raw = eventJournal.readPayload(p.event as any); remembered = approvalRuleToRemember(raw ? JSON.parse(raw) : null); } catch { /* 载荷读不出来：照常人工审批 */ }
+        if (remembered) {
+          try {
+            const { createSessionService } = await import("../../session-service.ts");
+            await createSessionService(taskId, [], dataRoot).respondApproval(p.sessionId, p.requestId, { allow: true });
+            logApproveAll(taskId, p.requestId, remembered, dataRoot);
+            log(`approval sweep: [${taskId}] 会话已全部放行，放行 ${remembered.kind}:${remembered.pattern}`);
+            if (state.notified[key]) {
+              try { const { resolveAction } = await import("../../actions.ts"); resolveAction(`perm:${state.notified[key].taskId}:${p.requestId}`, "approved"); } catch { /* Action 收敛尽力而为：下一轮 resolved 分支还会再收 */ }
+              delete state.notified[key]; dirty = true;
+            }
+            continue;
+          } catch (e: any) {
+            // 切换那一刻 setAccess 已经当场答过它（这一轮读到的是旧快照）：没有要人看的东西
+            if (e?.code === "SESSION_APPROVAL_NOT_PENDING" || /approval_stale/.test(String(e?.message ?? ""))) continue;
+            log(`approval sweep approve-all [${key}]: ${e?.code ?? (e instanceof Error ? e.name : "unknown")}，改为人工审批`);
+          }
+        }
+      }
       // 首见：投影 Action + 横幅 + 飞书互动卡（openAction 本身按 id 幂等；横幅/卡片靠状态文件防重发）
       if (!state.notified[key]) {
         try {

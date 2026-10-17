@@ -1,9 +1,9 @@
 import { appendFileSync, statSync } from "fs";
 import { join } from "path";
-import { SessionRepository, SessionRepositoryError, type SessionRecord } from "../../sessions/repository.ts";
+import { SessionRepository, SessionRepositoryError, type SessionProviderId, type SessionRecord } from "../../sessions/repository.ts";
 import { readRunJournalStrict, reduceRuns } from "../../runs/repository.ts";
 import { parseSessionMigrationMode, type KernelGrantedAccess, type KernelSessionDto, type KernelSessionGrants, type KernelSessionState, type SessionInput, type SessionMutationResult, type SessionService } from "./contracts.ts";
-import { expandCodexHome,inputForRunner, KernelSessionPolicyError, projectRunnerEvent, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant, type RunnerCommandReceipt } from "./runner-consumer.ts";
+import { expandCodexHome,inputForRunner, KernelSessionPolicyError, projectRunnerEvent, PROVIDER_CAPABILITIES, RunnerAgentStateProjector, RunnerSessionConsumer, validateDirectoryGrant, type RunnerCommandReceipt } from "./runner-consumer.ts";
 import { archivedSessionEventsSignature, readArchivedSessionEvents, RunnerCommandJournal, RunnerEventJournal, type RunnerCommandRecord, type RunnerEventRecord } from "../../runner/journals.ts";
 import { SessionRunnerBridgeStore, type BridgeCommand } from "./bridge-store.ts";
 import { mergeQueued, parseQueued, SessionInputQueueStore, type QueuedView } from "./input-queue.ts";
@@ -15,7 +15,7 @@ import { ROLE_CONTEXT_TAG, roleContextNotice, splitRoleContext } from "../../rol
 import { validateImageInputs } from "../../image-input.ts";
 import { assertProviderOptions, defaultCodexModel } from "../../session-options.ts";
 import { addRule, logDecision } from "../../approval.ts";
-import { approvalRuleToRemember } from "./approval-sweep.ts";
+import { approvalRuleToRemember, approveAllGranted, classifyApprovals, logApproveAll } from "./approval-sweep.ts";
 
 export type SessionMigrationMode = "off" | "runner";
 /** 分叉时拷进新会话界面的历史上限：只影响显示，原生上下文由 Provider 完整分叉 */
@@ -452,6 +452,27 @@ inputs.push({role:"user",name:`command:${command.commandId}`,text:images.length?
     // 接管回来 = 队列重新有资格发（释放输入权期间 flush 会一直拒绝，见 flushQueue 的租约校验）
     if(owner==="ownward"&&!this.queue.empty())void this.drainQueue(saved.id);
     return{sessionId:saved.id,control:saved.control};}
-  async setAccess(id:string,access:KernelGrantedAccess):Promise<SessionMutationResult|void>{if(this.mode==="off"){this.legacyGuard(id);await(await this.legacy()).setAgentAccess(id,access!=="workspace");return;}const s=this.session(id);this.assertOperable(s);const taskId=this.taskId(s,id);this.runner.require(s.providerId,"set-access");if(s.access!=="full-access"&&s.access!=="bypass")this.validateAccessGrant(access);const providerAccess=s.providerId!=="codex"?(access==="workspace"?"standard":"bypass"):(access==="workspace"?"workspace-write":"full-access")/* codebuddy 与 claude 同 access 语义(见 runner-consumer 投影与 inputForRunner)，不能归到 codex 侧，否则 set-access acceptance 校验必抛 CONTROL_GRANT_INVALID */,command=this.reserveControl(s,taskId,"set-access",{access:providerAccess},{authorizedAccess:access}),receipt=await this.runner.submit(taskId,s,"set-access",{access:providerAccess},command);await this.finishControl(taskId,command);this.repo.updateGrants(s.id,{access});this.stateCache.delete(s.id);return{queued:false,...receipt};}
+  /** 切会话权限。codex 是沙箱（写盘范围），claude/codebuddy 是审批：放开 = 全部放行，派发时没选 bypass 也能在会话里放开。
+   *  轮次里切（人多半正对着一张审批卡）：adapter 不打断这一轮、只改下一轮的启动参数；本轮已经挂着的工具审批这里当场放行，
+   *  之后本轮再冒出来的由审批投影按会话授权收掉（approval-sweep.approveAllGranted）。提问（AskUserQuestion）永远等人答。 */
+  async setAccess(id:string,access:KernelGrantedAccess):Promise<(SessionMutationResult&{providerId:SessionProviderId;running:boolean;approved?:number})|void>{if(this.mode==="off"){this.legacyGuard(id);await(await this.legacy()).setAgentAccess(id,access!=="workspace");return;}const s=this.session(id);this.assertOperable(s);const taskId=this.taskId(s,id);this.runner.require(s.providerId,"set-access");if(s.access!=="full-access"&&s.access!=="bypass")this.validateAccessGrant(access);const providerAccess=s.providerId!=="codex"?(access==="workspace"?"standard":"bypass"):(access==="workspace"?"workspace-write":"full-access")/* codebuddy 与 claude 同 access 语义(见 runner-consumer 投影与 inputForRunner)，不能归到 codex 侧，否则 set-access acceptance 校验必抛 CONTROL_GRANT_INVALID */,command=this.reserveControl(s,taskId,"set-access",{access:providerAccess},{authorizedAccess:access});let receipt:RunnerCommandReceipt;
+    // 确定性失败（Runner 拒收/明确失败）把 bridge 上这条控制命令作废，否则它一直算「进行中」把会话卡成 busy（同 reconfigure）
+    try{receipt=await this.runner.submit(taskId,s,"set-access",{access:providerAccess},command);await this.finishControl(taskId,command);}
+    catch(error:any){if(error?.outcomeUnknown!==true)this.bridge.abandon(command.commandId,String(error?.code||"RUNNER_CONTROL_FAILED"));throw error;}
+    this.repo.updateGrants(s.id,{access});this.stateCache.delete(s.id);
+    const running=reduceRuns(readRunJournalStrict(this.dataRoot)).some(run=>run.sessionId===s.id&&run.status==="running"),approved=running&&approveAllGranted(access)&&PROVIDER_CAPABILITIES[s.providerId].has("approval")?await this.approvePendingForAccess(s,taskId):0;
+    if(running&&approveAllGranted(access))try{approvalRequestedListener?.(this.dataRoot);}catch{/* 兜底是 60s 定时 sweep */}
+    return{queued:false,...receipt,providerId:s.providerId,running,...(approved?{approved}:{})};}
+  /** 切到全部放行的那一刻，本轮已经挂着的工具审批当场放行（提问不替人答）。逐条尽力而为：一条放不了不挡切换本身，审批投影还会再收一遍 */
+  private async approvePendingForAccess(s:SessionRecord,taskId:string):Promise<number>{
+    const journal=new RunnerEventJournal(this.dataRoot),events=journal.readStrict().filter(e=>e.sessionId===s.id),commands=new RunnerCommandJournal(this.dataRoot).readStrict().filter(c=>c.sessionId===s.id);let approved=0;
+    for(const p of classifyApprovals(events,commands,Date.now()).pending){
+      let remembered:ReturnType<typeof approvalRuleToRemember>=null;try{const raw=journal.readPayload(p.event as RunnerEventRecord);remembered=approvalRuleToRemember(raw?JSON.parse(raw):null);}catch{/* 载荷读不出来：留给人 */}
+      if(!remembered)continue;
+      try{await this.respondApproval(s.id,p.requestId,{allow:true});logApproveAll(taskId,p.requestId,remembered,this.dataRoot);approved++;}
+      catch(error:any){log(`approve-all [${taskId}] ${p.requestId}: ${String(error?.code||error?.name||"unknown")}`);}
+    }
+    return approved;
+  }
   async newSession(id:string):Promise<string>{if(this.mode==="off"){this.legacyGuard(id);return(await this.legacy()).newAgentSession(id);}const s=this.writableSession(id);this.assertOperable(s);const taskId=this.taskId(s,id);this.runner.require(s.providerId,"new-session");const command=this.reserveControl(s,taskId,"new-session",{});this.repo.beginHistoryReset(s.id,command.commandId);try{await this.runner.submit(taskId,s,"new-session",{},command);await this.finishControl(taskId,command);}catch(error:any){if(error?.outcomeUnknown!==true)this.repo.finishHistoryReset(s.id,command.commandId,false);throw error;}this.repo.finishHistoryReset(s.id,command.commandId,true);this.queue.clear(s.id);/* /new 是丢上下文重开：还排着的话是对旧上下文说的，跟着一起清（legacy 同）*/clearInitialHistory(this.dataRoot,s.id);this.historyMarkers.delete(s.id);this.stateCache.delete(s.id);return"已开启新会话";}
 }

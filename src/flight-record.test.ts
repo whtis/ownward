@@ -13,6 +13,7 @@ import {
   extractCommands,
   extractConclusion,
   extractPrompts,
+  extractTurnConclusions,
   extractUnfinished,
   filterAudit,
   gitSnapshot,
@@ -110,6 +111,21 @@ describe("flight-record 纯逻辑", () => {
 
   test("extractConclusion 取最后一条 assistant", () => {
     expect(extractConclusion(messages)).toBe("已加上双链，完成");
+  });
+
+  // 2026-10-17：只留最后一条时，修 bug 那一轮的结论被后面一句闲聊顶掉，收割据此把已做的改动写成「没做」
+  test("extractTurnConclusions 逐轮取最后一条 assistant，标签与 Prompts 段一致；太多轮留头 2 尾 8", () => {
+    expect(extractTurnConclusions(messages)).toEqual([{ label: "任务", text: "第一版做完了" }, { label: "追问 1", text: "已加上双链，完成" }]);
+    const many: DevMsg[] = Array.from({ length: 12 }, (_, i) => [{ role: "user", text: `q${i}`, ts: "t" }, { role: "assistant", text: `a${i}`, ts: "t" }] as DevMsg[]).flat();
+    const kept = extractTurnConclusions(many);
+    expect(kept.map((c) => c.text)).toEqual(["a0", "a1", "（中间 2 轮的结论省略，见会话）", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11"]);
+    expect(extractTurnConclusions([{ role: "user", text: "q", ts: "t" }, { role: "tool", name: "Bash", text: "ls", ts: "t" }] as DevMsg[])).toEqual([]);   // 没答复的轮次不列
+  });
+
+  test("单轮任务的结论照旧一段，不加轮次标签", () => {
+    const rec = assembleFlightRecord({ task: { id: "t1", project: "demo" }, messages: [{ role: "user", text: "做 X", ts: "1" }, { role: "assistant", text: "做完了", ts: "2" }] as DevMsg[], audit: [], git: dirtyGit, plan: [], tokens: {}, scope: "work", now });
+    expect(rec.content).toContain("## 结论\n做完了\n");
+    expect(rec.content.split("## 结论")[1]).not.toContain("**任务**：");
   });
 
   test("extractUnfinished 只留非 completed", () => {
@@ -270,7 +286,8 @@ describe("assembleFlightRecord 整体装配", () => {
     expect(rec.content).toContain("未跟踪文件");
     expect(rec.content).toContain("abc123 feat: 飞行记录");
     expect(rec.content).toContain("## 结论");
-    expect(rec.content).toContain("已加上双链，完成");
+    expect(rec.content).toContain("**任务**：第一版做完了");      // 多轮任务逐轮列结论，正事那轮不被追问顶掉
+    expect(rec.content).toContain("**追问 1**：已加上双链，完成");
     expect(rec.content).toContain("## 未完成项");
     expect(rec.content).toContain("- [ ] 接 daemon");
     expect(rec.content).toContain("- [ ] 写测试");

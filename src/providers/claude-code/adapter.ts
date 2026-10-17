@@ -16,7 +16,7 @@ import {
 type EventInput = ProviderEventInput;
 type ControlWait = { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; onAck?: () => void };
 type PendingApproval = { requestId: string; runId: string; input: Record<string, unknown>; reserved: boolean };
-type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; model?: string /* 本轮最近一个主线程 assistant 帧的模型 id：result.modelUsage 按它取窗口 */; toolNames?: Map<string, string>; held?: { since: number; timer: ReturnType<typeof setInterval>; busy?: boolean /* 主线程正在跑汇报伪 turn（init 之后、result 之前）*/ } };
+type Turn = { command: RunnerCommandRecord; queue: AsyncEventQueue; interruptRequested: boolean; terminal: boolean; delta: string; started: boolean; sessionUpdateEmitted: boolean; completion: Promise<void>; complete: () => void; proc?: Bun.Subprocess; generation?: number; initMeta?: { model?: string; commands: string[] }; model?: string /* 本轮最近一个主线程 assistant 帧的模型 id：result.modelUsage 按它取窗口 */; toolNames?: Map<string, string>; held?: { since: number; timer: ReturnType<typeof setInterval>; busy?: boolean /* 主线程正在跑汇报伪 turn（init 之后、result 之前）*/ }; noticedSynthetic?: boolean };
 type ClaudeSession = {
   sessionId: string; cwd: string; options: ClaudeSessionOptions; nativeRef?: string; proc?: Bun.Subprocess; generation: number;
   /** 分叉来源：拿到自己的 init session_id 之前每次 spawn 都带 --resume <forkFrom> --fork-session；init 回来即清 */
@@ -232,7 +232,23 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     finally { await session.mutex.run(() => { if (session.controlOperation === command.commandId) session.controlOperation = undefined; }); }
   }
   private async *addDir(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> { const dir = parseClaudeAddDir(input); yield* this.reconfigure(command, "add-dir", async (session) => { session.options.extraDirs = [...new Set([...session.options.extraDirs, dir])]; }); }
-  private async *setAccess(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> { const access = parseClaudeAccess(input); yield* this.reconfigure(command, "set-access", async (session) => { session.options = { ...session.options, access }; }); }
+  /** 切权限。空闲时同 add-dir：停掉 CLI，下一轮按新参数拉起。本轮在跑时（多半正挂着一张审批卡——人恰恰是这时候想
+   *  「别一条条问了」）不杀进程、不打断这一轮，只改下一次 spawn 的参数；正在跑的这个 CLI 保持原样：standard→bypass 后
+   *  它剩下的审批由 Kernel 按会话授权放行（审批策略留在 Kernel，adapter 不替人批），bypass→standard 时本轮本来就不会再问。
+   *  以前一律要求空闲：轮次里切只会 PROVIDER_SESSION_BUSY，没选 bypass 派出去的会话就再也放不开（2026-10-17）。 */
+  private async *setAccess(command: RunnerCommandRecord, input: string): AsyncIterable<EventInput> {
+    const access = parseClaudeAccess(input), session = this.sessions.get(command.sessionId); let live = false;
+    // Runner 重启后没有内存态：没有进程可停、没有本轮可管，下一轮 resume-run 显式携带 Kernel 持久化的 access（同 set-options，不是假成功）
+    if (!session) { yield this.event(command, "started"); yield this.event(command, "completed"); return; }
+    await this.awaitTerminalCleanup(session);
+    await session.mutex.run(() => {
+      live = !!session.turn && !session.turn.terminal; if (live) return;
+      if (session.turn || session.operation) throw providerError("PROVIDER_SESSION_BUSY", "Claude session 正在执行或变更配置"); session.operation = "set-access";
+    });
+    if (live) { yield this.event(command, "started"); await session.mutex.run(() => { session.options = { ...session.options, access }; }); yield this.event(command, "completed"); return; }
+    try { yield this.event(command, "started"); await this.stopProcess(session, false); session.options = { ...session.options, access }; yield this.event(command, "completed"); }
+    finally { await session.mutex.run(() => { if (session.operation === "set-access") session.operation = undefined; }); }
+  }
   /** 同 Provider 就地改模型/思考深度：停掉常驻 CLI，下一轮按 --resume + 新 --model/--effort 重新拉起（与 set-access 同一条路）。
    *  Runner 重启后没有这个 Session 的内存态时直接 completed——不是假成功：Runner 侧本来就没有旧进程/旧参数可改，
    *  下一轮 resume-run 会显式携带 Kernel 持久化的 options（Kernel 收到 completed 才落盘）。 */
@@ -268,7 +284,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     const key=`${this.claudeCommand.join("\0")}\0${this.env.FAKE_CLAUDE_EFFORT??""}\0${this.env.FAKE_CLAUDE_HELP_DELAY_MS??""}\0${this.env.FAKE_CLAUDE_HELP_FAIL??""}\0${this.env.FAKE_CLAUDE_PERMISSION_PROMPT_TOOL??""}`;
     let capability=cliCapabilities.get(key);
     if(!capability){capability={state:"pending",effort:false,permissionPromptTool:true};cliCapabilities.set(key,capability);capability.probe=(async()=>{
-      const probeRun=async(extra:string[])=>{let proc:Bun.Subprocess|undefined,timer:ReturnType<typeof setTimeout>|undefined;try{proc=Bun.spawn([...this.claudeCommand,...extra],{env:cleanEnv,stdout:"pipe",stderr:"pipe",stdin:"ignore"});timer=setTimeout(()=>{try{proc?.kill("SIGKILL");}catch{}},2_000);const [stdout,stderr,code]=await Promise.all([new Response(proc.stdout as ReadableStream<Uint8Array>).text(),new Response(proc.stderr as ReadableStream<Uint8Array>).text(),proc.exited]);return{code,text:`${stdout}\n${stderr}`};}finally{if(timer)clearTimeout(timer);}};
+      const probeRun=async(extra:string[])=>{let proc:Bun.Subprocess|undefined,timer:ReturnType<typeof setTimeout>|undefined;try{proc=Bun.spawn([...this.claudeCommand,...extra],{env:cleanEnv,stdout:"pipe",stderr:"pipe",stdin:"ignore"});timer=setTimeout(()=>{try{proc?.kill("SIGKILL");}catch{}},10_000);const [stdout,stderr,code]=await Promise.all([new Response(proc.stdout as ReadableStream<Uint8Array>).text(),new Response(proc.stderr as ReadableStream<Uint8Array>).text(),proc.exited]);return{code,text:`${stdout}\n${stderr}`};}finally{if(timer)clearTimeout(timer);}};
       try{
         // 只给旗标不给值：已知旗标报 argument missing、未知旗标报 unknown option，都即刻退出不开会话。
         // 不能用「旗标+--help 看退出码」——commander 的 --help 短路在未知旗标校验之前，恒退 0（线上实测）
@@ -278,7 +294,11 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
         if(bare.code!==0)throw new Error("Claude CLI capability probe failed");
         capability!.effort=bare.text.includes("--effort");
         capability!.state="ready";
-      }catch{capability!.state="failed";this.metrics.effortProbeFailures++;}
+      }catch{
+        // 失败不常驻缓存：CLI 刚自动升级时新二进制首跑要过 macOS 安全扫描，--help 可能超时；
+        // 等这次 probe 的并发等待者拿到 failed 后就摘掉，下一轮 spawn 重探，免得整个 Runner 生命周期都拒带 effort 的会话
+        capability!.state="failed";this.metrics.effortProbeFailures++;if(cliCapabilities.get(key)===capability)cliCapabilities.delete(key);
+      }
     })();}
     if(capability.state==="pending"){this.metrics.effortProbePending++;if(waitForProbe)await capability.probe;}
     return capability;
@@ -374,7 +394,7 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
     // 计数照记（规则 9：丢弃必须可观测），日志按里程碑采样。
     if (raw.type === "stream_event") return this.dropFrame(session, `stream_event:${plain(raw.event) && typeof raw.event.type === "string" ? raw.event.type.slice(0, 40) : "unknown"}`);
     if (raw.type === "assistant" && plain(raw.message)) {
-      if (raw.message.model === "<synthetic>") { const text = extractText(raw.message.content).trim(); if (text === "No response requested.") return; const category = /rate|limit|429/i.test(text) ? "rate_limited" : /auth|login|token|credential/i.test(text) ? "auth_expired" : "api_error"; return this.notice(turn, category, { message: text.slice(0, 2_000) }); }
+      if (raw.message.model === "<synthetic>") { const text = extractText(raw.message.content).trim(); if (text === "No response requested.") return; turn.noticedSynthetic = true; const category = /rate|limit|429/i.test(text) ? "rate_limited" : /auth|login|token|credential/i.test(text) ? "auth_expired" : "api_error"; return this.notice(turn, category, { message: text.slice(0, 2_000) }); }
       this.flushDelta(turn);
       const content = raw.message.content, message = { role: "assistant", text: extractText(content), thinking: Array.isArray(content) ? content.filter((item) => plain(item) && item.type === "thinking" && typeof item.thinking === "string").map((item) => item.thinking) : [], tools: Array.isArray(content) ? content.filter((item) => plain(item) && item.type === "tool_use").map((item) => ({ id: item.id, name: item.name, input: item.input })) : [], model: typeof raw.message.model === "string" ? raw.message.model : undefined };
       if (message.model) turn.model = message.model;   // sidechain 帧在上面已丢，这里只剩主线程模型
@@ -414,9 +434,9 @@ export class ClaudeCodeRunnerProvider implements RunnerProvider {
       this.flushDelta(turn); const contextWindow = contextWindowOf(raw.modelUsage, [turn.model, turn.initMeta?.model]); turn.queue.push(this.event(command, "usage", { payload: JSON.stringify({ scope: "turn", ...normalizeUsage(raw.usage), ...(contextWindow ? { contextWindow } : {}) }) }, "best-effort"));
       // 还有后台子代理没汇报：不收尾、不杀 CLI，把 turn 挂起等汇报伪 turn（2026-10-08：以前 result 一到就
       // SIGKILL，后台子代理跑几秒就跟着 CLI 一起死，agent 承诺的「跑完自动汇报」永远不会来）
-      if (session.awaitedAgents?.size && !turn.interruptRequested) { if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined }); return this.holdTurn(session, turn); }
-      if (turn.held) { if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined }); return this.finishTurn(turn, "completed"); }
-      const type = raw.is_error ? (turn.interruptRequested ? "interrupted" : "failed") : "completed"; if (raw.is_error) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined });
+      if (session.awaitedAgents?.size && !turn.interruptRequested) { if (raw.is_error && !turn.noticedSynthetic) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined }); return this.holdTurn(session, turn); }
+      if (turn.held) { if (raw.is_error && !turn.noticedSynthetic) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined }); return this.finishTurn(turn, "completed"); }
+      const type = raw.is_error ? (turn.interruptRequested ? "interrupted" : "failed") : "completed"; if (raw.is_error && !turn.noticedSynthetic) this.notice(turn, "api_error", { subtype: raw.subtype ?? null, result: typeof raw.result === "string" ? raw.result.slice(0, 2_000) : undefined });
       turn.terminal = true; turn.queue.push(this.event(command, type, type === "interrupted" ? { reason: "user_interrupt" } : type === "failed" ? { reason: "provider_result_error" } : {})); turn.queue.end(); return;
     }
     this.dropFrame(session, "unsupported-frame");

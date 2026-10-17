@@ -100,13 +100,49 @@ export async function harvestTranscript(transcriptPath: string, project: string,
  *  拿它总结出来的必然是「最后干了啥」而不是「这个任务干了啥」。飞行记录是每轮幂等刷新的
  *  完整过程（prompts / 审批 / 命令 / git diff / 结论），当主素材；日志尾部只补最近的细节。
  *  没有飞行记录（旧式单发任务）退回原来的日志尾部。 */
+/** 飞行记录分段（assembleFlightRecord 的固定顺序），按重要性分预算 */
+const FLIGHT_SECTIONS = ["## Prompts", "## 审批决策", "## 执行的命令", "## 改动", "## 结论", "## 未完成项"] as const;
+const FLIGHT_PRIORITY = ["## 结论", "## 改动", "## Prompts", "## 未完成项", "", "## 审批决策", "## 执行的命令"];
+
+/** 超长飞行记录按段裁，不再一刀切前 12k：长任务的前 12k 全是「执行的命令」，「改动」和「结论」根本进不了总结，
+ *  模型只看到半截排查过程就自己编结局（2026-10-17：已经修好的 config.toml 被写成「改配置不能根治」）。
+ *  结论 > 改动 > Prompts > 未完成项 > 标题 > 审批决策 > 执行的命令 依次分预算；命令段留头尾、省中间 */
+export function flightMaterial(flight: string, budget = 12_000): string {
+  if (flight.length <= budget) return flight;
+  const cuts: { name: string; at: number }[] = [{ name: "", at: 0 }];
+  let from = 0;
+  for (const name of FLIGHT_SECTIONS) {
+    const at = flight.indexOf(`\n${name}\n`, from);
+    if (at < 0) continue;
+    cuts.push({ name, at: at + 1 }); from = at + 1;
+  }
+  const parts = cuts.map((c, i) => ({ name: c.name, text: flight.slice(c.at, cuts[i + 1]?.at ?? flight.length) }));
+  let room = budget;
+  for (const name of FLIGHT_PRIORITY) {
+    const part = parts.find((p) => p.name === name); if (!part) continue;
+    if (part.text.length <= room) { room -= part.text.length; continue; }
+    part.text = name === "## 执行的命令" ? clipMiddle(part.text, Math.max(room, 0)) : part.text.slice(0, Math.max(room - 40, 0)) + "\n…(本段截断)…\n";
+    room = 0;
+  }
+  return parts.map((p) => p.text).join("");
+}
+function clipMiddle(text: string, room: number): string {
+  const lines = text.split("\n"), head: string[] = [], tail: string[] = [];
+  let used = 120, i = 0, j = lines.length - 1;
+  while (i <= j && used + lines[i].length + 1 <= room / 2) { used += lines[i].length + 1; head.push(lines[i++]); }
+  while (j >= i && used + lines[j].length + 1 <= room) { used += lines[j].length + 1; tail.unshift(lines[j--]); }
+  if (!head.length) head.push(lines[0] ?? "");
+  const omitted = j - i + 1;
+  return [...head, ...(omitted > 0 ? [`…（中间省略 ${omitted} 行命令，完整列表见飞行记录）…`] : []), ...tail].join("\n");
+}
+
 function taskMaterial(t: WorkTask): string {
   const raw = t.logFile && existsSync(t.logFile) ? readFileSync(t.logFile, "utf8") : "";
   const flight = t.flightPath && existsSync(t.flightPath) ? readFileSync(t.flightPath, "utf8") : "";
   if (!flight) return raw.length > 15_000 ? "…(前文截断)…\n" + raw.slice(-15_000) : raw;
   const parts = [
-    "--- 飞行记录（完整过程：prompts / 审批 / 命令 / git）---",
-    flight.length > 12_000 ? flight.slice(0, 12_000) + "\n…(飞行记录截断)…" : flight,
+    "--- 飞行记录（完整过程：prompts / 审批 / 命令 / git / 各轮结论）---",
+    flightMaterial(flight),
   ];
   if (raw) {
     parts.push("", "--- 原始日志尾部（最近细节）---",
@@ -133,6 +169,7 @@ export async function harvestTask(t: WorkTask): Promise<string | null> {
   const prompt = [
     "把下面这次编码任务的过程总结成一条工作日志。输出严格 JSON（不要代码块）：",
     "归属规则：files_changed 只采用下方 git 状态中归属于任务身份的提交；已排除提交不得算作本任务工作，当前未提交改动只能注明为未归属现场状态。",
+    "事实以飞行记录的「结论」（各轮最终答复）和「改动」（git）为准；「执行的命令」只是过程、长任务会省略中间，不许从半截命令推断做没做成。",
     `{"title": "<简短有辨识度的标题，<=20字，不含特殊字符>",`,
     ` "problem": "<要解决什么问题/做什么改动>",`,
     ` "failed_attempts": "<失败的尝试和原因，没有则空字符串>",`,

@@ -1,12 +1,13 @@
 #!/bin/bash
 # Transactionally install/restart only the daemon. Runner lifecycle remains separate.
 set -euo pipefail
-[ "$(id -u)" -ne 0 ] || { echo "❌ 禁止以 root 安装用户 daemon" >&2; exit 64; }
-[ -n "${OWNWARD_RELEASE_ROOT:-}" ] || { echo "❌ launchd/install.sh 是发布事务内部步骤；请从仓库根目录运行 bash install.sh" >&2; exit 64; }
+. "$(dirname "$0")/lib-msg.sh"
+[ "$(id -u)" -ne 0 ] || { msg "❌ Refusing to install the per-user daemon as root" "❌ 禁止以 root 安装用户 daemon" >&2; exit 64; }
+[ -n "${OWNWARD_RELEASE_ROOT:-}" ] || { msg "❌ launchd/install.sh is an internal step of the release transaction; run bash install.sh from the repository root" "❌ launchd/install.sh 是发布事务内部步骤；请从仓库根目录运行 bash install.sh" >&2; exit 64; }
 cd "$(dirname "$0")/.."
 SOURCE_ROOT="$(pwd)"; ROOT="${OWNWARD_RELEASE_ROOT:-$SOURCE_ROOT}"; DATA_ROOT="${OWNWARD_DATA_ROOT:-$SOURCE_ROOT/data}"; CONFIG_ROOT="${OWNWARD_CONFIG_ROOT:-$SOURCE_ROOT}"
 LABEL="ai.ownward.daemon"; DOMAIN="gui/$(id -u)"; BUN="${OWNWARD_BUN:-$(command -v bun || true)}"
-[ -n "$BUN" ] && [ -x "$BUN" ] || { echo "❌ 找不到可执行 bun"; exit 69; }
+[ -n "$BUN" ] && [ -x "$BUN" ] || { msg "❌ No executable bun found (install it: curl -fsSL https://bun.sh/install | bash)" "❌ 找不到可执行 bun"; exit 69; }
 BUILD_IDENTITY="${OWNWARD_BUILD_IDENTITY:-$(cd "$ROOT" && "$BUN" src/runner/build-identity.ts "$ROOT")}"
 OBSERVATION_SEC="${OWNWARD_OBSERVATION_SEC:-$(cd "$ROOT" && "$BUN" -e 'import{cfg}from"./src/util.ts";const n=Number(cfg.release?.observationSec??0);if(!Number.isFinite(n)||n<0||n>600)process.exit(64);console.log(Math.floor(n))')}"
 PORT="${OWNWARD_DASHBOARD_PORT:-$(cd "$ROOT" && "$BUN" -e 'import{cfg}from"./src/util.ts";console.log(cfg.dashboard?.port||4517)')}"
@@ -44,7 +45,7 @@ TRANSACTION=1;mv -f "$TMP_PLIST" "$PLIST";chmod 600 "$PLIST";launchctl bootout "
 # 偶发卡顿放过。身份漂移检查一个字不动，只在探到时比对。
 if [ "$OBSERVATION_SEC" -gt 0 ];then
   OBSERVE_TIMEOUT="${OWNWARD_OBSERVATION_TIMEOUT_SEC:-5}"; OBSERVE_MAX_MISS="${OWNWARD_OBSERVATION_MAX_MISS:-8}"
-  [ "$OBSERVE_MAX_MISS" -lt "$OBSERVATION_SEC" ]||echo "⚠ break-glass: OWNWARD_OBSERVATION_MAX_MISS($OBSERVE_MAX_MISS) >= 观察窗($OBSERVATION_SEC)，探测失败已无法判死" >&2
+  [ "$OBSERVE_MAX_MISS" -lt "$OBSERVATION_SEC" ]||msg "⚠ break-glass: OWNWARD_OBSERVATION_MAX_MISS($OBSERVE_MAX_MISS) >= observation window ($OBSERVATION_SEC); probe failures can no longer fail the release" "⚠ break-glass: OWNWARD_OBSERVATION_MAX_MISS(${OBSERVE_MAX_MISS}) >= 观察窗(${OBSERVATION_SEC})，探测失败已无法判死" >&2
   observe_daemon(){ curl -fsS --max-time "$OBSERVE_TIMEOUT" "http://127.0.0.1:$PORT/api/system/runtime-health"; }
   DAEMON_BASE="$(observe_daemon)"||exit 70
   RUNNER_BASE="$(runner_status)"||exit 70

@@ -95,7 +95,8 @@ describe("AgentState runtime compatibility", () => {
     const consumed = [...source.matchAll(/\bdev\??\.([A-Za-z_][A-Za-z0-9_]*)/g)]
       .map((m) => m[1]).filter((v, i, all) => all.indexOf(v) === i).sort();
     expect(consumed).toEqual([
-      "backend", "commands", "control", "ctxTokens", "ctxWindow", "cwd", "effort", "extraDirs", "fullAccess", "lineage", "messages", "model", "omitted", "partial",
+      // operability 只有 Runner 会话（KernelSessionState）带：web 拿它判断 claude 会话能不能在会话里切「全部放行」
+      "backend", "commands", "control", "ctxTokens", "ctxWindow", "cwd", "effort", "extraDirs", "fullAccess", "lineage", "messages", "model", "omitted", "operability", "partial",
       "pending", "plan", "providerId", "queued", "resume", "tokens", "turn",
     ]);
   });

@@ -17,6 +17,16 @@ if (fakePrompt === "BAD_LINES") { process.stdout.write("bad\nbad\nbad\n"); await
 if (fakePrompt === "GIANT_HALF") { process.stdout.write("x".repeat(4096)); await Bun.sleep(20); process.exit(2); }
 if (fakePrompt === "EOF") { send({ type: "thread.started", thread_id: native }); process.stderr.write("secret-stderr-" + "S".repeat(2000)); process.exit(7); }
 send({ type: "thread.started", thread_id: native }); send({ type: "turn.started" });
+// 真 codex 0.162 实录：stdin 不是终端时 stderr 先说一句 Reading additional input…；config.toml 里有不认识的键时
+// 连发两条 item.type=error 的警告（非致命，本轮照常继续）。_DIE = 本轮跑到一半被外部 SIGTERM（exit 143）
+if (fakePrompt === "CONFIG_WARNING" || fakePrompt === "CONFIG_WARNING_DIE") {
+  process.stderr.write("Reading additional input from stdin...\n"); await Bun.sleep(30);
+  const warning = "Codex is ignoring 1 unrecognized configuration settings. Check for typos or deprecated settings.\n  user (/fake/config.toml): `sandbox_workspace_write.model` is ignored.";
+  send({ type: "item.completed", item: { id: "item_0", type: "error", message: warning } }); send({ type: "item.completed", item: { id: "item_1", type: "error", message: warning } });
+  send({ type: "item.completed", item: { id: "item_2", type: "agent_message", text: "working" } });
+  if (fakePrompt === "CONFIG_WARNING_DIE") { await Bun.sleep(20); process.exit(143); }
+  send({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }); process.exit(0);
+}
 if (fakePrompt === "LONG") { await Bun.sleep(30_000); process.exit(0); }
 if (fakePrompt === "CHILD_HANG") { const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" }); send({ type: "item.completed", item: { id: "child", type: "agent_message", text: `child:${child.pid}` } }); await Bun.sleep(30_000); process.exit(0); }
 if (fakePrompt === "ONE_BAD") process.stdout.write("bad\n");

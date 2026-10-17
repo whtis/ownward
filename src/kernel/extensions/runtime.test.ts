@@ -753,6 +753,8 @@ describe("Extension runtime lifecycle and recovery", () => {
     // 关键：全程不发任何 route()，只靠退避定时器把它重新拉起来（否则纯 scheduler vertical 会静默停摆）
     for (let i = 0; i < 300 && boot() < 2; i++) await Bun.sleep(10);
     expect(boot()).toBeGreaterThanOrEqual(2); // 无 HTTP 流量也自动重启了
+    // boot.json 是 activate 里写的，写完到 activate 返回之间状态还是 starting；verify 并发跑时会正好读在这个缝里
+    for (let i = 0; i < 300 && rt.statuses()[0]!.state === "starting"; i++) await Bun.sleep(10);
     const status = rt.statuses()[0];
     // 恢复态是 degraded（外部 vertical 恢复后要靠一次成功路由才转 ready；纯 scheduler 没路由，维持 degraded），
     // 但绝不能停在 failed；关键是 scheduler job 已重新挂上，定时任务恢复运行。

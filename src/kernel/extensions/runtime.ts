@@ -105,6 +105,8 @@ export interface ExtensionRuntimeOptions {
   actionFactory?: Parameters<typeof buildVerticalContext>[0]["actionFactory"];
   llmFactory?: Parameters<typeof buildVerticalContext>[0]["llmFactory"];
   sourceFactory?: Parameters<typeof buildVerticalContext>[0]["sourceFactory"];
+  eventFactory?: Parameters<typeof buildVerticalContext>[0]["eventFactory"];
+  notifyFactory?: Parameters<typeof buildVerticalContext>[0]["notifyFactory"];
   log?: (message: string) => void;
 }
 interface Loaded {
@@ -656,6 +658,7 @@ export class ExtensionRuntime {
           grantedRouteTimeoutMs: _routeTimeout,
           grantedRouteBodyBytes: _routeBody,
           grantedRouteBinary: _routeBinary,
+          grantedNotifyUrgent: _notifyUrgent,
           ...domainConfig
         } = verticalConfig;
         item.host = host;
@@ -717,6 +720,17 @@ export class ExtensionRuntime {
           if (!this.options.sourceFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Source Service 不可用");
           host.setSources(this.options.sourceFactory(item.manifest.id));
         } else host.setSources(undefined);
+        // events/notify（ADR 0003）：前缀强制、校验、限流都在 Kernel 门面里；这里只加生命周期闸
+        if (grantedManifest.capabilities?.includes("events")) {
+          if (!this.options.eventFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Event Service 不可用");
+          const raw = this.options.eventFactory(item.manifest.id);
+          host.setEvents(Object.freeze({ publish: ((events: any) => { lifecycle.assertWrite(); return raw.publish(events); }) as typeof raw.publish }));
+        } else host.setEvents(undefined);
+        if (grantedManifest.capabilities?.includes("notify")) {
+          if (!this.options.notifyFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Notify Service 不可用");
+          const raw = this.options.notifyFactory(item.manifest.id, { urgent: verticalConfig.grantedNotifyUrgent === true });
+          host.setNotify(Object.freeze({ send: ((input: any) => { lifecycle.assertWrite(); return raw.send(input); }) as typeof raw.send }));
+        } else host.setNotify(undefined);
         const activated = await host.activate(
           domainConfig,
           this.options.activateTimeoutMs ?? 5_000,
@@ -816,6 +830,8 @@ export class ExtensionRuntime {
         actionFactory: this.options.actionFactory,
         llmFactory: this.options.llmFactory,
         sourceFactory: this.options.sourceFactory,
+        eventFactory: this.options.eventFactory,
+        notifyFactory: this.options.notifyFactory,
         scheduler,
         lifecycle,
         logger: (op, msg) => this.audit("vertical-module-log", item.manifest.id, op, msg),
@@ -884,12 +900,12 @@ export class ExtensionRuntime {
       );
     if (
       (item.manifest.capabilities ?? []).some(
-        (cap) => !["storage", "actions", "scheduler", "llm", "sources"].includes(cap),
+        (cap) => !["storage", "actions", "scheduler", "llm", "sources", "events", "notify"].includes(cap),
       )
     )
       throw new ExtensionPolicyError(
         "VERTICAL_CAPABILITY_UNAVAILABLE",
-        "外部 Host 目前开放 storage/actions/scheduler/llm/sources",
+        "外部 Host 目前开放 storage/actions/scheduler/llm/sources/events/notify",
       );
     const grantedRoots = uniqueStrings(config.grantedRoots, "grantedRoots").map(
         (root) => resolve(root),

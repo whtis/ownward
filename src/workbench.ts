@@ -699,6 +699,20 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     skipRoutine(body.id, date);
     return json({ ok: true, msg: "已跳过（今天不再提醒）" });
   }
+  if (req.method === "POST" && p === "/api/routines/written") {
+    const body = await req.json().catch(() => ({})) as { id?: string; date?: string };
+    if (!body.id) return json({ ok: false, msg: "缺少 id" }, 400);
+    const { markRoutineWritten } = await import("./routines.ts");
+    const { fmt } = await import("./util.ts");
+    const date = body.date || fmt(new Date(), "date");
+    markRoutineWritten(body.id, date);
+    return json({ ok: true, msg: "已标记为已填写" });
+  }
+  if (req.method === "POST" && p === "/api/routines/skip-overdue") {
+    const { skipAllOverdue } = await import("./routines.ts");
+    const count = skipAllOverdue();
+    return json({ ok: true, count, msg: `已跳过 ${count} 项逾期职责` });
+  }
 
   // ---- 日报（?date=YYYY-MM-DD 补生成指定日） ----
   if (req.method === "POST" && p === "/api/digest/run") {
@@ -951,8 +965,13 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
   if (req.method === "POST" && p === "/api/dev/set-access") {
     const body = await req.json() as { id: string; full: boolean };
     try {
-      const receipt = await (await sessionService(body.id)).service.setAccess(body.id, body.full ? "full-access" : "workspace");
-      return json({ ok: true, msg: body.full ? "已解除沙箱，下一轮对话生效" : "已恢复沙箱，下一轮对话生效", ...(receipt || {}) });
+      const receipt = (await (await sessionService(body.id)).service.setAccess(body.id, body.full ? "full-access" : "workspace")) || null;
+      // claude/codebuddy 的权限是审批（逐条问 ↔ 全部放行），不是沙箱；轮次里放开时本轮挂着的审批已当场放行，之后的由审批投影收掉
+      const approvals = receipt?.providerId === "claude" || receipt?.providerId === "codebuddy";
+      const msg = !receipt || !approvals ? (body.full ? "已解除沙箱，下一轮对话生效" : "已恢复沙箱，下一轮对话生效")
+        : body.full ? (receipt.approved ? `已切到全部放行：${receipt.approved} 个待批请求已放行，之后不再逐条询问` : "已切到全部放行，之后不再逐条询问")
+        : receipt.running ? "已恢复逐条审批，最迟下一轮起生效" : "已恢复逐条审批";
+      return json({ ok: true, msg, ...(receipt || {}) });
     } catch (e) { return sessionError(e); }
   }
   if (req.method === "POST" && p === "/api/dev/send") {
@@ -1170,6 +1189,32 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     catch (e) { return json({ ok: false, msg: String(e instanceof Error ? e.message : e) }, 500); }
   }
   if (p === "/api/actions") return json(listActions());
+  // ---- 预处理产物（Staged Actions）：正文另存 data/stages/，卡片上只挂 stage 摘要 ----
+  if (req.method === "GET" && p === "/api/actions/stage") {
+    const { getStageArtifact } = await import("./actions.ts");
+    const artifact = getStageArtifact(url.searchParams.get("id") || "");
+    return artifact ? json(artifact) : json({ ok: false, msg: "未找到该草稿产物" }, 404);
+  }
+  if (req.method === "POST" && p === "/api/actions/stage/run") {
+    // 手动「现在就备一份」：跳过 settleMin，日预算照守
+    const body = await req.json().catch(() => null) as { id?: string } | null;
+    if (!body?.id || typeof body.id !== "string") return json({ ok: false, msg: "缺 id" }, 400);
+    const { runStaging } = await import("./staging.ts");
+    const r = await runStaging({ actionId: body.id });
+    const action = listActions(true).find((a) => a.id === body.id);
+    if (!action) return json({ ok: false, msg: "行动项不存在" }, 404);
+    if (r.status !== "staged") return json({ ok: false, status: r.status, msg: r.error || "该行动项当前不能预处理", stage: action.stage }, r.status === "no_candidates" ? 409 : 200);
+    return json({ ok: true, stage: action.stage });
+  }
+  if (req.method === "POST" && p === "/api/actions/stage/feedback") {
+    const body = await req.json().catch(() => null) as { id?: string; outcome?: string } | null;
+    const outcomes = ["sent_as_is", "edited", "discarded"] as const;
+    if (!body?.id || !outcomes.includes(body.outcome as any)) return json({ ok: false, msg: "缺 id 或 outcome 不合法" }, 400);
+    const { setStageOutcome } = await import("./actions.ts");
+    // outcome 可能在 Action 收尾之后才上报——终态也照记
+    if (!setStageOutcome(body.id, body.outcome as (typeof outcomes)[number])) return json({ ok: false, msg: "未找到该行动项的预处理" }, 404);
+    return json({ ok: true });
+  }
   if (req.method === "POST" && p === "/api/actions/state") {
     // ids = 今天页多选批处理（一次写盘）；id = 单卡按钮。两者只认其一，ids 优先。
     const body = await req.json() as { id?: string; ids?: string[]; state: "snoozed" | "dismissed" | "resolved"; snoozeMin?: number };
@@ -1186,6 +1231,57 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
     }
     if (!body.id) return json({ ok: false, msg: "缺 id" }, 400);
     return json({ ok: setActionState(body.id, body.state, body.snoozeMin || 120), msg: label });
+  }
+  if (req.method === "POST" && p === "/api/actions/investigate") {
+    // 一键排查：派一个后台任务查根因，task id 回填到 ref——已经挂着任务的不重复派
+    const body = await req.json().catch(() => null) as { id?: string } | null;
+    if (!body?.id || typeof body.id !== "string") return json({ ok: false, msg: "缺 id" }, 400);
+    const action = listActions(false).find((a) => a.id === body.id);
+    if (!action) return json({ ok: false, msg: "行动项不存在或已收尾" }, 404);
+    if (action.ref?.task_id) return json({ ok: false, msg: "这件事已经挂着任务了", taskId: action.ref.task_id }, 409);
+    const { isInvestigable } = await import("./actions.ts");
+    if (!isInvestigable(action)) return json({ ok: false, msg: "这件事要你来审/决定，不是故障，没有根因可查——直接去处理它" }, 400);
+    const { dispatchTask } = await import("./dispatch.ts");
+    let task: { id: string };
+    let targetDir: string | undefined;
+    if (action.ref?.task_id) {
+      const { loadTasks } = await import("./dispatch.ts");
+      targetDir = loadTasks().find((t) => t.id === action.ref?.task_id)?.projectDir;
+    }
+    try { task = await dispatchTask({ dir: targetDir, prompt: `排查【${action.title}】的根本原因并提供修复建议：${action.reason}${action.ref?.url ? `\n相关链接：${action.ref.url}` : ""}` }); }
+    catch (e: any) { return json({ ok: false, msg: String(e?.message || e), ...(e?.code ? { errorCode: e.code } : {}) }, e?.code === "VERTICAL_CWD_NOT_GRANTED" || e?.code === "VERTICAL_ROOT_UNAVAILABLE" ? 403 : e?.code === "DISPATCH_DIR_MISSING" ? 400 : 500); }
+    const { patchActionRef } = await import("./actions.ts");
+    patchActionRef(action.id, { task_id: task.id, investigated_at: new Date().toISOString() });
+    log(`workbench: investigate ${action.id} → task ${task.id}`);
+    return json({ ok: true, taskId: task.id });
+  }
+
+  // ---- 助理货架（心跳的建议/风险/规律观察；采纳=人点了才派任务/开行动项） ----
+  if (req.method === "GET" && p === "/api/shelf") {
+    const { listShelfItems } = await import("./shelf.ts");
+    return json(listShelfItems());
+  }
+  if (req.method === "POST" && (p === "/api/shelf/dismiss" || p === "/api/shelf/adopt")) {
+    const body = await req.json().catch(() => null) as { id?: string } | null;
+    if (!body?.id || typeof body.id !== "string") return json({ ok: false, msg: "缺 id" }, 400);
+    const S = await import("./shelf.ts");
+    if (p === "/api/shelf/dismiss") { S.dismissShelfItem(body.id); return json({ ok: true }); }
+    const r = await S.adoptShelfItem(body.id);
+    return json(r, r.ok ? 200 : 409);
+  }
+
+  // ---- 本周长效目标（memory/goals.md 的待办；只翻勾选，不改正文） ----
+  if (req.method === "GET" && p === "/api/goals") {
+    const { getActiveGoals } = await import("./goals.ts");
+    return json(getActiveGoals() || { week: "", goals: [] });
+  }
+  if (req.method === "POST" && p === "/api/goals/toggle") {
+    const body = await req.json().catch(() => null) as { id?: unknown; done?: unknown } | null;
+    if (typeof body?.id !== "string" || typeof body.done !== "boolean") return json({ ok: false, msg: "缺 id 或 done" }, 400);
+    const { toggleGoal } = await import("./goals.ts");
+    const ok = toggleGoal(body.id, body.done);
+    // 找不到 = 文件在别处被改过：409 让前端重新拉，不许回 ok 假装勾上了
+    return json(ok ? { ok } : { ok, msg: "目标已变动，请刷新后再勾" }, ok ? 200 : 409);
   }
 
   // ---- Role（角色：vault <scope>/roles/ 里的持久化一等对象） ----
@@ -1224,6 +1320,11 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
       // 不做兜底回落：scope 传错就报错，否则工作角色会拿到私人项目列表
       if (!ALL_SCOPES.includes(scope as any)) return json({ ok: false, msg: `scope 不合法（可选：${ALL_SCOPES.join("/") || "留空"}）` }, 400);
       return json({ ok: true, scope, scopesOn: SCOPES_ON, projects: R.listProjectSlugs(scope as any) });
+    }
+    // 领域管家在岗状态（今天页头像条）：固定段，同样必须排在 /api/roles/:id 之前
+    if (req.method === "GET" && p === "/api/roles/stewards") {
+      const { listStewards } = await import("./stewards.ts");
+      return json({ ok: true, stewards: await listStewards() });
     }
 
     // ---- 自动角色（role-auto.ts）：同样是固定段，必须排在 /api/roles/:id 之前 ----
@@ -1384,6 +1485,14 @@ export async function handleWorkbench(req: Request, url: URL): Promise<Response 
           text: b.text, evidence: b.evidence, sourceChatId: b.sourceChatId, sourceRoleId: e.role.id,
         }));
       }
+    }
+    const projCandBatch = p.match(/^\/api\/roles\/([\w-]+)\/project-candidates\/dismiss-batch$/);
+    if (req.method === "POST" && projCandBatch) {
+      const e = expertOf(projCandBatch[1]);
+      if (!e.ok) return out(e);
+      const b = await body() as { ids?: unknown } | null;
+      if (!b) return json({ ok: false, msg: "请求体不是 JSON" }, 400);
+      return out(PM.dismissProjectCandidates(e.role.primaryProject, e.role.scope, b.ids));
     }
     const projCandAct = p.match(/^\/api\/roles\/([\w-]+)\/project-candidates\/([\w-]+)\/(promote|dismiss)$/);
     if (req.method === "POST" && projCandAct) {

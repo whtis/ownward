@@ -141,8 +141,11 @@ export async function startWork(projectDir: string, task: string, opts: WorkOpti
   // 角色在建 worktree 之前定：点名的角色不可用要直接失败，不能先白建一个 worktree 再报错
   const bound = await bindDispatchRole(opts.role, dir, (opts.extraDirs ?? []).map((d) => expandHome(d)), opts.roleText ?? task);
 
-  // worktree：bg 默认开（保护主 checkout），terminal 默认原地
-  const useWorktree = opts.worktree ?? !!opts.bg;
+  // worktree：bg 默认开（保护主 checkout），terminal 默认原地。
+  // 必须是 git 仓库且有 HEAD 才能建 worktree；非 git 目录（如 ~/workspace 领域根、普通文件夹）退回原地运行，避免报错
+  const isGit = (await run(["git", "-C", dir, "rev-parse", "--is-inside-work-tree"], { timeoutMs: 10_000 })).code === 0;
+  if (opts.worktree === true && !isGit) throw new Error(`目录并非 git 仓库，无法创建 worktree: ${dir}`);
+  const useWorktree = opts.worktree !== undefined ? (opts.worktree && isGit) : (!!opts.bg && isGit);
   let cwd = dir;
   let branch: string | undefined;
   if (useWorktree) {
@@ -391,6 +394,18 @@ export async function forkTask(originTaskId: string): Promise<WorkTask> {
   catch (error) { removeTask(id); throw error; }
   log(`session forked: [${originTaskId}] → [${id}] ${origin.project}`);
   return t;
+}
+
+/** 内部入口（助理观察「采纳」/ 行动卡「一键排查」）派后台任务：走与 /api/work 同一道 allowedRoots 闸，
+ *  同样缺省由角色接。dir 留空 = dispatch.defaults.dir，再退到第一个授权根；provider/model 跟随派发默认值。 */
+export async function dispatchTask(input: { dir?: string; prompt: string }): Promise<WorkTask> {
+  const roots: string[] = Array.isArray(cfg.architecture?.allowedRoots) ? cfg.architecture.allowedRoots.filter((x: unknown): x is string => typeof x === "string" && !!x.trim()) : [];
+  const d = cfg.dispatch?.defaults || {}, pick = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  const dir = pick(input.dir) || pick(d.dir) || roots[0];
+  if (!dir) throw Object.assign(new Error("没有可派发的目录：设置页填「派发默认值」目录，或在 config.json 配 architecture.allowedRoots"), { code: "DISPATCH_DIR_MISSING" });
+  const provider = ["claude", "codex", "codebuddy"].includes(d.provider) ? d.provider : undefined;
+  const { scopedTasks } = await import("./verticals.ts");
+  return await scopedTasks(roots).startWork({ dir, task: input.prompt, bg: true, provider, model: pick(d.model), effort: pick(d.effort) }) as WorkTask;
 }
 
 /** 自演进任务：agent 在 worktree 里改 ownward 自己 */

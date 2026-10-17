@@ -19,6 +19,7 @@
 const Roles = {
   list: [], sel: null, role: null, candidates: [],
   org: null, projectCandidates: [], projectCandidatesMsg: "",
+  pcFilter: "all", pcSel: new Set(),                  // 项目候选：来源日期筛选 + 批量丢弃的勾选
   icons: [], targets: ["principles", "decisions", "backlog"],
   projectTargets: ["README", "decisions", "operations"],
   showArchived: false, loaded: false, listError: "",
@@ -295,6 +296,7 @@ async function openRole(id) {
   Roles.org = r.org || null;
   Roles.projectCandidates = r.projectCandidates || [];
   Roles.projectCandidatesMsg = r.projectCandidatesMsg || "";
+  Roles.pcSel = new Set();
   renderRoleDetail();
   loadRoleDocs(r.role, seq);
 }
@@ -526,18 +528,41 @@ function leadOrgHtml(role, org) {
 }
 
 /* 项目候选：落在 projects/<主项目>/_candidates/，晋升目标是项目的三份正式文件 */
+const PC_RECENT_DAYS = 7;
+/** 按来源日期筛：回填会一次塞进几十条几个月前的日报决策，得能把这批旧账单独拎出来批量处理 */
+function pcFiltered(list, filter, now = Date.now()) {
+  if (filter === "all") return list;
+  const cut = now - PC_RECENT_DAYS * 86_400_000;
+  return list.filter((c) => {
+    const t = Date.parse(`${c.sourceDate || ""}T00:00:00`);
+    const old = Number.isFinite(t) && t < cut;
+    return filter === "old" ? old : !old;
+  });
+}
 function projectCandidatesHtml(role) {
-  const list = Roles.projectCandidates || [];
+  const all = Roles.projectCandidates || [];
+  const list = pcFiltered(all, Roles.pcFilter);
   const slug = role.primaryProject || "";
+  const sel = list.filter((c) => Roles.pcSel.has(c.id)).length;
+  const rid = jsq(role.id);
   return `
-    <div class="rl-block">
+    <div class="rl-block" id="rl-pcands">
       <div class="rl-block-head">
-        <h3>项目候选记忆 ${list.length ? `<span class="count">${list.length}</span>` : ""}</h3>
+        <h3>项目候选记忆 ${all.length ? `<span class="count">${all.length}</span>` : ""}</h3>
         <span class="rl-quiet">晋升进 ${esc(slug)}/README·decisions·operations</span>
       </div>
       ${Roles.projectCandidatesMsg ? `<div class="rl-note" data-tone="warn">${esc(Roles.projectCandidatesMsg)}</div>` : ""}
+      ${all.length > 1 ? `<div class="rl-pc-bar">
+        <select onchange="pcSetFilter('${rid}', this.value)">
+          ${[["all", "全部来源"], ["recent", `近 ${PC_RECENT_DAYS} 天来源`], ["old", "更早来源（回填/积压）"]].map(([v, l]) =>
+            `<option value="${v}"${Roles.pcFilter === v ? " selected" : ""}>${l}</option>`).join("")}
+        </select>
+        <label class="rl-quiet"><input type="checkbox" ${list.length && sel === list.length ? "checked" : ""} onchange="pcSelectAll('${rid}', this.checked)"> 全选当前 ${list.length} 条</label>
+        <button class="button danger sm" ${sel ? "" : "disabled"} onclick="dismissProjCandBatch('${rid}')">丢弃所选${sel ? `（${sel}）` : ""}</button>
+      </div>` : ""}
       ${list.length
         ? `<div class="glist">${list.map((c) => projCandidateHtml(role, c)).join("")}</div>`
+        : all.length ? `<div class="rl-quiet">这个筛选下没有候选。</div>`
         : (Roles.projectCandidatesMsg ? "" : `<div class="rl-quiet">还没有项目候选。在这个专家的对话里对 AI 的回复点「存为候选」并选「项目」，只对本项目成立的结论会落在这里。</div>`)}
     </div>`;
 }
@@ -545,12 +570,15 @@ function projectCandidatesHtml(role) {
 function projCandidateHtml(role, c) {
   const rid = jsq(role.id), cid = jsq(c.id);
   const chat = String(c.sourceChat || "-");
+  const digest = chat.match(/^digest:(\d{4}-\d{2}-\d{2})$/)?.[1];
   return `<div class="card">
-    <div class="body">${esc(c.text)}</div>
+    <div class="body"><label class="rl-pc-pick"><input type="checkbox" ${Roles.pcSel.has(c.id) ? "checked" : ""} onchange="pcToggle('${rid}','${cid}',this.checked)"></label>${esc(c.text)}</div>
     ${c.evidence ? `<details class="rl-evidence"><summary>原文证据</summary><div>${esc(c.evidence)}</div></details>` : ""}
     <div class="top" style="margin-top:6px">
       <span class="rl-quiet">${c.createdAt ? esc(ageText(c.createdAt)) : "时间未知"}</span>
-      ${/^[\w.:-]+$/.test(chat) && chat !== "-"
+      ${digest
+        ? `<span class="rl-quiet">· 来自 ${esc(digest)} 的日报</span>`
+        : /^[\w.:-]+$/.test(chat) && chat !== "-"
         ? `<span class="rl-quiet">· 来自对话 <a href="#" onclick="jumpChat('${jsq(chat)}');return false">${esc(chat)}</a></span>`
         : `<span class="rl-quiet">· 来源未知</span>`}
     </div>
@@ -678,6 +706,26 @@ async function dismissProjCand(id, cid) {
   const res = await post(`/api/roles/${encodeURIComponent(id)}/project-candidates/${encodeURIComponent(cid)}/dismiss`, {});
   toast(res.msg || (res.ok ? "已丢弃" : "丢弃失败"));
   if (res.ok && Roles.sel === id) openRole(id);
+}
+function pcRerender(id) {
+  const el = $("#rl-pcands");
+  if (!el || !Roles.role || Roles.role.id !== id) return;
+  el.outerHTML = projectCandidatesHtml(Roles.role);
+}
+function pcSetFilter(id, v) { Roles.pcFilter = v; Roles.pcSel = new Set(); pcRerender(id); }
+function pcToggle(id, cid, on) { on ? Roles.pcSel.add(cid) : Roles.pcSel.delete(cid); pcRerender(id); }
+function pcSelectAll(id, on) {
+  Roles.pcSel = new Set(on ? pcFiltered(Roles.projectCandidates || [], Roles.pcFilter).map((c) => c.id) : []);
+  pcRerender(id);
+}
+/** 批量丢弃只丢「当前筛选下勾着的」——换了筛选看不见的勾选不算，免得丢掉屏幕上没看到的 */
+async function dismissProjCandBatch(id) {
+  const ids = pcFiltered(Roles.projectCandidates || [], Roles.pcFilter).filter((c) => Roles.pcSel.has(c.id)).map((c) => c.id);
+  if (!ids.length) return;
+  if (!confirm(`丢弃选中的 ${ids.length} 条项目候选？\n\n候选文件会被删除，无法恢复（项目正式记忆不受影响）。`)) return;
+  const res = await post(`/api/roles/${encodeURIComponent(id)}/project-candidates/dismiss-batch`, { ids });
+  toast(res.msg || (res.ok ? "已丢弃" : "丢弃失败"));
+  if (Roles.sel === id) openRole(id);
 }
 /** 派任务给角色：打开派发弹窗、点名这个角色，它登记过的工作目录直接填好 */
 function dispatchWithRole(id) {

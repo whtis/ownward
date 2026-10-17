@@ -41,7 +41,7 @@ export interface NotifyOptions {
 /** 去重记账：key → 上次真正推送的时刻。进程内即可（daemon 常驻）。 */
 const lastSentAt = new Map<string, number>();
 
-function cooldownMs(): number {
+export function cooldownMs(): number {
   const min = Number(cfg.notify?.cooldownMin);
   return Number.isFinite(min) && min > 0 ? min * 60_000 : DEFAULT_COOLDOWN_MS;
 }

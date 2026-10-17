@@ -38,10 +38,28 @@ export interface ProjectCandidate {
   sourceChat: string;
   sourceRole: string;
   createdAt: string;
+  /** 候选说的事发生在哪天（YYYY-MM-DD）：日报分来的取日报日期，其余取入库日期。
+   *  回填会把几个月前的日报决策一次塞进来，入库时间全是今天——按它筛才分得出旧账 */
+  sourceDate: string;
   status: string;
 }
 
 const fail = (code: Fail["code"], msg: string): Fail => ({ ok: false, code, msg });
+
+/** 来源日期：digest:YYYY-MM-DD 取日报那天，否则取入库那天（本地时区） */
+export function candidateSourceDate(sourceChat: string, createdAt: string): string {
+  const d = sourceChat.match(/^digest:(\d{4}-\d{2}-\d{2})$/)?.[1];
+  if (d) return d;
+  const t = Date.parse(createdAt);
+  return Number.isFinite(t) ? fmt(new Date(t), "date") : "";
+}
+
+/** 回填进来的旧账：来源日期比入库早 7 天以上（日报当晚就分，正常流程差不出这么多） */
+export const BACKFILL_LAG_DAYS = 7;
+export function isBackfilledCandidate(c: Pick<ProjectCandidate, "sourceDate" | "createdAt">): boolean {
+  const src = Date.parse(`${c.sourceDate}T00:00:00`), at = Date.parse(c.createdAt);   // 本地零点：sourceDate 按本地时区出，和角色页筛选同一口径
+  return Number.isFinite(src) && Number.isFinite(at) && at - src > BACKFILL_LAG_DAYS * 86_400_000;
+}
 /** tsconfig 关了 strict，判别式联合不会自动收窄——同 roles.ts，用显式守卫 */
 const isFail = (v: unknown): v is Fail => !!v && (v as any).ok === false;
 const len = (s: string) => [...s].length;   // 中文按字计数，同 roles.ts
@@ -157,7 +175,7 @@ export function createProjectCandidate(
   log(`project-memory: candidate ${scope ? scope + "/" : ""}${project}/${cid}（待人工晋升）`);
   return {
     ok: true,
-    candidate: { id: cid, project, scope, text, evidence, sourceChat, sourceRole, createdAt, status: "pending" },
+    candidate: { id: cid, project, scope, text, evidence, sourceChat, sourceRole, createdAt, sourceDate: candidateSourceDate(sourceChat, createdAt), status: "pending" },
   };
 }
 
@@ -170,15 +188,17 @@ function parseCandidate(cid: string, project: string, scope: Scope, raw: string)
   }
   const body = raw.slice(m?.[0].length || 0).trim();
   const ev = body.match(/^>\s*证据：([\s\S]*)$/m);
+  const sourceChat = fm.get("source_chat") || "-", createdAt = fm.get("created_at") || "";
   return {
     id: cid,
     project: fm.get("project") || project,
     scope,
     text: (ev ? body.slice(0, ev.index).trim() : body).slice(0, MAX_TEXT * 2),
     evidence: (ev?.[1] || "").trim().slice(0, MAX_EVIDENCE),
-    sourceChat: fm.get("source_chat") || "-",
+    sourceChat,
     sourceRole: fm.get("source_role") || "-",
-    createdAt: fm.get("created_at") || "",
+    createdAt,
+    sourceDate: candidateSourceDate(sourceChat, createdAt),
     status: fm.get("status") || "pending",
   };
 }
@@ -272,4 +292,32 @@ export function dismissProjectCandidate(slug: string, scope: Scope, candidateId:
   rmSync(f);
   log(`project-memory: dismissed ${scope ? scope + "/" : ""}${String(slug).toLowerCase()}/${candidateId}`);
   return { ok: true, msg: "已丢弃" };
+}
+
+/** 批量丢弃：角色页按来源日期筛出一批旧账、人勾选后一次丢掉（仍是人点的，晋升门不受影响——批量只开丢弃）。
+ *  逐条走同一套 id 白名单与越界复核；已经不在的如实报回来，不算成功也不整批失败 */
+export const MAX_BATCH_DISMISS = 200;
+export function dismissProjectCandidates(slug: string, scope: Scope, ids: unknown): Result<{ dismissed: number; missing: string[]; msg: string }> {
+  if (!Array.isArray(ids) || !ids.length) return fail("invalid", "没有选中任何候选");
+  if (ids.length > MAX_BATCH_DISMISS) return fail("invalid", `一次最多丢弃 ${MAX_BATCH_DISMISS} 条`);
+  const home = projectHome(slug, scope);
+  if (isFail(home)) return home;
+  const files: Array<{ cid: string; f: string }> = [];
+  for (const id of ids) {
+    const cid = String(id ?? "");
+    const f = candidateFile(home.dir, scope, cid);
+    if (!f) return fail("invalid", `候选 id 不合法：${cid.slice(0, 40)}`);   // 先全部校验，再动手：坏一条不留半截
+    files.push({ cid, f });
+  }
+  let dismissed = 0;
+  const missing: string[] = [];
+  for (const { cid, f } of files) {
+    if (!existsSync(f)) { missing.push(cid); continue; }
+    rmSync(f);
+    dismissed++;
+  }
+  const project = String(slug).toLowerCase();
+  log(`project-memory: dismissed ${scope ? scope + "/" : ""}${project} ×${dismissed}（批量${missing.length ? `，${missing.length} 条已不在` : ""}）`);
+  if (!dismissed) return fail("not_found", "选中的候选都已不在（可能已被晋升或丢弃）");
+  return { ok: true, dismissed, missing, msg: missing.length ? `已丢弃 ${dismissed} 条（另 ${missing.length} 条已不在）` : `已丢弃 ${dismissed} 条` };
 }

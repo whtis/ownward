@@ -28,7 +28,10 @@ export async function runTriage(): Promise<void> {
       return;
     }
     // 飞书消息我已回过表情的 = 已处理，喂 LLM 前出队（回表情多发生在消息进队后的 triage 窗口内）
-    const events = await dropReactedLark(excludeDomainOnlyEvents(pending));
+    // 给排查助手的私聊（support 用同一条确定性规则接管）也不再分流，免得重复通知
+    const support = cfg.support?.enabled === true ? await import("./support.ts") : null;
+    const domainFree = excludeDomainOnlyEvents(pending).filter((e) => !(support && e.source === "lark" && support.isSupportMessage(e.payload)));
+    const events = await dropReactedLark(domainFree);
     if (!events.length) {
       markClaimCompleted(claim);
       ackBatch(claim); // 已回表情是确定性过滤，明确消费

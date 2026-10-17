@@ -31,8 +31,10 @@ const TIERS: Record<string, SettingTier> = {
   owner: "public", timezone: "public", quietHours: "public", notify: "public",
   vault: "public", heartbeat: "public", digest: "public", chat: "public",
   connectors: "public", strategy: "advanced", dashboard: "advanced",
-  triage: "advanced", llm: "advanced", dispatch: "advanced", engine: "advanced",
+ triage: "advanced", llm: "advanced", dispatch: "advanced", engine: "advanced", staging: "advanced", support: "advanced",
   architecture: "internal", providers: "internal", release: "internal", verticals: "internal",
+  // 预发布开关只由 scripts/stage-config.ts 生成的 dev 配置设置；设置页开了它，生产 daemon 会停掉全部后台任务
+  prerelease: "internal",
 };
 
 function valueType(value: unknown): SettingValueType {
@@ -45,8 +47,8 @@ function valueType(value: unknown): SettingValueType {
 }
 
 const INTERNAL_PATH = /^(?:\/architecture\/(?:sessionRunnerMode|sessionRunnerTaskIds)|\/release\/|\/verticals\/(?![^/]+\/enabled$)|\/connectors\/externalPaths$|\/connectors\/lark\/eventKeys$|\/providers\/[^/]+\/version$)/;
-const ADVANCED_PATH = /^(?:\/dashboard\/|\/triage\/|\/llm\/|\/dispatch\/|\/engine\/|\/strategy\/|\/providers\/|\/architecture\/|\/verticals\/)/;
-const HIGH_RISK_PATH = /(?:\/verticals\/[^/]+\/enabled$|\/dashboard\/(?:port|listen)$|Bin$|\/command$|\/positionsCmd$|\/allowedRoots$|\/allowFullAccess$|\/worktreeRoot$|\/vault\/root$)/;
+const ADVANCED_PATH = /^(?:\/dashboard\/|\/triage\/|\/llm\/|\/dispatch\/|\/engine\/|\/strategy\/|\/staging\/|\/support\/|\/providers\/|\/architecture\/|\/verticals\/)/;
+const HIGH_RISK_PATH = /(?:\/verticals\/[^/]+\/enabled$|\/support\/(?:enabled|roles|allowedCommands|denyRead)$|\/dashboard\/(?:port|listen)$|Bin$|\/command$|\/positionsCmd$|\/allowedRoots$|\/allowFullAccess$|\/worktreeRoot$|\/vault\/root$)/;
 const SENSITIVE_PATH = /(?:password|secret|token|api[-_]?key|credential)/i;
 
 function leafTier(path: string, inherited: SettingTier): SettingTier {

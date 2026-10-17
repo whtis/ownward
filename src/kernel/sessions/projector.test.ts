@@ -5,13 +5,13 @@ import { describe, expect, test } from "bun:test";
 import { RunnerAgentStateProjector, toolBrief } from "./runner-consumer.ts";
 
 const session: any = { id: "s1", providerId: "claude", control: "ownward" };
-function project(events: { type: string; body?: unknown; commandKind?: string; reason?: string }[], providerId = "claude") {
+function project(events: { type: string; body?: unknown; commandKind?: string; reason?: string; commandId?: string; exitCode?: number }[], providerId = "claude") {
   const payloads = new Map<string, unknown>();
   const p = new RunnerAgentStateProjector({ ...session, providerId } as any, (e: any) => payloads.get(e.eventId), (id) => ({ kind: "start-run" }) as any);
   events.forEach((e, i) => {
     const eventId = `e${i}`;
     if (e.body !== undefined) payloads.set(eventId, e.body);
-    p.apply({ eventId, sequence: i + 1, type: e.type, at: `2026-08-20T00:00:0${i}.000Z`, commandId: "c1", runId: "r1", sessionId: "s1", providerId, ...(e.body !== undefined ? { payloadRef: `payloads/${"0".repeat(64)}.blob` } : {}), ...(e.reason ? { reason: e.reason } : {}) } as any);
+    p.apply({ eventId, sequence: i + 1, type: e.type, at: new Date(Date.parse("2026-08-20T00:00:00.000Z") + i * 1_000).toISOString(), commandId: e.commandId ?? "c1", runId: "r1", sessionId: "s1", providerId, ...(e.body !== undefined ? { payloadRef: `payloads/${"0".repeat(64)}.blob` } : {}), ...(e.reason ? { reason: e.reason } : {}), ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}) } as any);
   });
   return p.state();
 }
@@ -58,6 +58,15 @@ describe("RunnerAgentStateProjector 消息展开", () => {
     expect(s.messages[0]).toMatchObject({ role: "system", name: "error" });
   });
 
+  test("provider-notice 相同或包含关系的连续系统消息自动去重", () => {
+    const s = project([
+      { type: "provider-notice", body: { category: "rate_limited", message: "You've hit your session limit" } },
+      { type: "provider-notice", body: { category: "api_error", result: "You've hit your session limit" } },
+    ]);
+    expect(s.messages).toHaveLength(1);
+    expect(s.messages[0].text).toBe("⚠️ 撞到限流：You've hit your session limit");
+  });
+
   test("session-updated 带出 commands/model；request 级 usage 带出 ctxTokens（turn 级不覆盖）", () => {
     const s = project([
       { type: "session-updated", body: { nativeRef: "n1", model: "claude-fable-5", commands: ["compact", "clear"] } },
@@ -94,6 +103,9 @@ describe("RunnerAgentStateProjector 消息展开", () => {
     expect(q.brief).toContain("走哪边？");
     expect(q.input.questions[0].options).toEqual([{ label: "左" }, { label: "右" }]);
     expect(t).toMatchObject({ toolName: "Bash", brief: "Bash: git push" });
+    // 卡片要能说清「总是」记住的是哪一类：提问不记
+    expect(t.remember).toEqual({ kind: "bash", pattern: "git push" });
+    expect(q.remember).toBeUndefined();
   });
 
   test("codex 命令执行/文件改动/搜索/思考/计划全部投影", () => {
@@ -211,6 +223,27 @@ describe("失败的 turn 不许在界面上无声无息", () => {
   test("其它失败原因也照样透出", () => {
     const s = project([{ type: "failed", reason: "provider_exit" }]);
     expect(s.messages[0].text).toContain("provider_exit");
+  });
+  test("退出码一并透出；已经出过消息的轮次说「中途退出」而不是「没跑起来」", () => {
+    expect(project([{ type: "started" }, { type: "failed", reason: "provider_exit", exitCode: 7 }]).messages[0].text).toBe("⚠️ 这一轮没跑起来：provider_exit（exit 7）");
+    const midway = project([{ type: "started" }, { type: "message-completed", body: { role: "tool", type: "command_execution", item: { command: "ls", aggregated_output: "a" } } }, { type: "failed", reason: "provider_exit", exitCode: 143 }], "codex");
+    expect(midway.messages.at(-1)).toMatchObject({ role: "system", name: "error", text: "⚠️ 这一轮中途退出：provider_exit（exit 143）" });
+  });
+  // 2026-10-17 实撞：codex 每轮都报一条 config.toml 不认识的键（连报两遍），本轮被外部 SIGTERM 时
+  // 这条警告把「这一轮没跑起来」顶掉了——用户只看见它，以为是它把任务弄坏了
+  test("provider 非致命警告：不算失败解释、标 warning、同一会话同一条只显示一次", () => {
+    const warning = { category: "provider_warning", message: "Codex is ignoring 3 unrecognized configuration settings." };
+    const s = project([
+      { type: "started" }, { type: "provider-notice", body: warning }, { type: "provider-notice", body: warning },
+      { type: "message-completed", body: { role: "tool", type: "command_execution", item: { command: "ls", aggregated_output: "a" } } },
+      { type: "failed", reason: "provider_exit", exitCode: 143 },
+      { type: "started", commandId: "c2" }, { type: "provider-notice", body: warning, commandId: "c2" }, { type: "completed", commandId: "c2" },
+    ], "codex");
+    const warnings = s.messages.filter((m: any) => m.name === "warning");
+    expect(warnings).toEqual([expect.objectContaining({ role: "system", text: "⚠️ Codex 警告（本轮照常继续）：Codex is ignoring 3 unrecognized configuration settings." })]);
+    expect(s.messages.at(-1)).toMatchObject({ role: "system", name: "error", text: "⚠️ 这一轮中途退出：provider_exit（exit 143）" });
+    // 不同的警告照常各显示一次
+    expect(project([{ type: "provider-notice", body: warning }, { type: "provider-notice", body: { category: "provider_warning", message: "Falling back from WebSockets to HTTPS transport." } }], "codex").messages).toHaveLength(2);
   });
   test("已经有 notice 讲过原因的失败不重复报", () => {
     const s = project([{ type: "provider-notice", body: { category: "rate_limited", message: "429" } }, { type: "failed", reason: "provider_result_error" }]);

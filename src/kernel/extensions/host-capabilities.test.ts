@@ -4,6 +4,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { ExtensionRuntime } from "./runtime.ts";
 import { createScopedActions, type ActionScopePort } from "./action-scope.ts";
+import { createScopedEvents } from "./event-scope.ts";
+import { createScopedNotify } from "./notify-scope.ts";
 
 const roots: string[] = [];
 const runtimes = new Set<ExtensionRuntime>();
@@ -128,6 +130,91 @@ test("外部 Host 的 sources capability 只拿到 Kernel 标准化的文档快�
   expect(await call("fetch")).toMatchObject({ canonicalId: "dox1", revision: "12", content: "# 复盘" });
   expect(calls).toEqual(["status", "inspect", "fetch"]);
   await rt.stop();
+});
+
+describe("外部 Host 的 events/notify capability（ADR 0003）", () => {
+  const entry = `let context; export default {
+    activate(ctx) { context = ctx; },
+    async route({ url }) {
+      const op = url.searchParams.get("op");
+      const run = async (fn) => { try { return { value: await fn() }; } catch (e) { return { error: e.code }; } };
+      if (op === "shape") return new Response(JSON.stringify({ events: typeof context.events?.publish, notify: typeof context.notify?.send, configKeys: Object.keys(context.config) }));
+      if (op === "publish") return new Response(JSON.stringify(await run(() => context.events.publish([{ id: "sig-1", type: "signal.breakout", payload: { symbol: "NVDA.US" } }, { id: "sig-1", type: "signal.breakout", payload: { symbol: "NVDA.US" } }]))));
+      if (op === "publish-bad") return new Response(JSON.stringify(await run(() => context.events.publish([{ id: "x", type: "t", payload: {}, source: "lark" }]))));
+      if (op === "notify") return new Response(JSON.stringify(await run(() => context.notify.send({ key: "fill:1", text: "委托成交", level: "act", link: "/verticals/deskcap/index.html#orders", urgent: true }))));
+      if (op === "notify-again") return new Response(JSON.stringify(await run(() => context.notify.send({ key: "fill:1", text: "委托成交", level: "act" }))));
+      if (op === "notify-bad") return new Response(JSON.stringify(await run(() => context.notify.send({ key: "k", text: "t", force: true }))));
+      if (op === "rpc-bad") return new Response(JSON.stringify({ events: await run(() => context.events.publish("not-a-list")), notify: await run(() => context.notify.send("not-an-object")) }));
+      if (op === "probe") return new Response(JSON.stringify({ events: await run(() => context.events.publish([{ id: "late", type: "t", payload: {} }])), notify: await run(() => context.notify.send({ key: "late", text: "t" })) }));
+      return new Response("{}");
+    }
+  };`;
+  const call = async (rt: ExtensionRuntime, op: string) => { const url = new URL(`http://x/api/verticals/deskcap/probe?op=${op}`); return (await (await rt.route(new Request(url.toString()), url))!.json()) as any; };
+
+  test("全链路：经 lease RPC 入队/通知，前缀强制、去重、urgent 授权透传且不泄漏进 domain config", async () => {
+    const dataRoot = root(), queued: any[] = [], sent: any[] = [], grants: any[] = [];
+    const rt = new ExtensionRuntime({
+      dataRoot, externalPaths: [pkg(["events", "notify"], entry)],
+      config: { verticals: { deskcap: { enabled: true, trusted: true, grantedCapabilities: ["events", "notify"], grantedNotifyUrgent: true, symbol: "NVDA.US" } } },
+      eventFactory: (id) => createScopedEvents(id, { append: (events) => { queued.push(...events); } }, { dataRoot }),
+      notifyFactory: (id, g) => { grants.push(g); return createScopedNotify(id, { send: async (text, opts) => { sent.push({ text, opts }); }, linkFor: (p) => `https://bench.example${p}`, cooldownMs: () => 60_000 }, { urgentGranted: g.urgent }); },
+    });
+    runtimes.add(rt); await rt.start();
+    expect(rt.statuses().find((s) => s.id === "deskcap")).toMatchObject({ state: "ready" });
+    expect(await call(rt, "shape")).toEqual({ events: "function", notify: "function", configKeys: ["symbol"] });
+    expect(grants).toEqual([{ urgent: true }]);
+    expect(await call(rt, "publish")).toEqual({ value: { accepted: 1, duplicates: 1 } });
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ id: "vertical:deskcap:sig-1", source: "vertical:deskcap", key: "signal.breakout", payload: { symbol: "NVDA.US" } });
+    expect(await call(rt, "publish-bad")).toEqual({ error: "VERTICAL_EVENTS_INVALID" });
+    expect(await call(rt, "notify")).toEqual({ value: { status: "queued" } });
+    expect(await call(rt, "notify-again")).toEqual({ value: { status: "duplicate" } });
+    expect(await call(rt, "notify-bad")).toEqual({ error: "VERTICAL_NOTIFY_INVALID" });
+    expect(sent).toEqual([{ text: "委托成交", opts: { source: "vertical:deskcap", key: "vertical:deskcap:fill:1", level: "act", link: "https://bench.example/verticals/deskcap/index.html#orders", quietExempt: true } }]);
+    // RPC 信封级校验：没过 Kernel 门面之前就被 host-client 拒掉
+    expect(await call(rt, "rpc-bad")).toEqual({ events: { error: "EXTENSION_KERNEL_REQUEST_INVALID" }, notify: { error: "EXTENSION_KERNEL_REQUEST_INVALID" } });
+    // lease 轮换：Kernel 换了门面（重启/reload 时就是这样），Host 手里的旧 lease 立即失效
+    const host = (rt as any).loaded.get("deskcap").host;
+    host.setEvents(createScopedEvents("deskcap", { append: (events) => { queued.push(...events); } }, { dataRoot }));
+    host.setNotify(createScopedNotify("deskcap", { send: async () => {}, linkFor: (p) => p, cooldownMs: () => 1 }));
+    expect(await call(rt, "probe")).toEqual({ events: { error: "EXTENSION_CAPABILITY_REVOKED" }, notify: { error: "EXTENSION_CAPABILITY_REVOKED" } });
+    // 撤销：门面摘掉后同样拒绝
+    host.setEvents(undefined); host.setNotify(undefined);
+    expect(await call(rt, "probe")).toEqual({ events: { error: "EXTENSION_CAPABILITY_REVOKED" }, notify: { error: "EXTENSION_CAPABILITY_REVOKED" } });
+    expect(queued).toHaveLength(1);
+    await rt.stop();
+  });
+
+  test("没授权就不注入：manifest 声明但本机未授权 → VERTICAL_CAPABILITY_NOT_GRANTED；没声明 → ctx 上没有", async () => {
+    const denied = new ExtensionRuntime({
+      dataRoot: root(), externalPaths: [pkg(["notify"], entry)],
+      config: { verticals: { deskcap: { enabled: true, trusted: true, grantedCapabilities: [] } } },
+      notifyFactory: () => { throw new Error("must not be built"); },
+    });
+    runtimes.add(denied); await denied.start();
+    expect(denied.statuses().find((s) => s.id === "deskcap")).toMatchObject({ errorCode: "VERTICAL_CAPABILITY_NOT_GRANTED" });
+    await denied.stop();
+    const plain = new ExtensionRuntime({
+      dataRoot: root(), externalPaths: [pkg([], entry)],
+      config: { verticals: { deskcap: { enabled: true, trusted: true, grantedCapabilities: [] } } },
+      eventFactory: () => { throw new Error("must not be built"); }, notifyFactory: () => { throw new Error("must not be built"); },
+    });
+    runtimes.add(plain); await plain.start();
+    expect(await call(plain, "shape")).toEqual({ events: "undefined", notify: "undefined", configKeys: [] });
+    await plain.stop();
+  });
+
+  test("Kernel 没装配 factory 时 fail closed，不注入半个能力", async () => {
+    const rt = new ExtensionRuntime({
+      dataRoot: root(), externalPaths: [pkg(["events"], entry)],
+      config: { verticals: { deskcap: { enabled: true, trusted: true, grantedCapabilities: ["events"] } } },
+    });
+    runtimes.add(rt); await rt.start();
+    const status = rt.statuses().find((s) => s.id === "deskcap")!;
+    expect(["failed", "degraded"]).toContain(status.state);
+    expect(status.errorCode).toBe("VERTICAL_SERVICE_UNAVAILABLE");
+    await rt.stop();
+  });
 });
 
 describe("受信路由授权（B-lite ADR 批次 B）：deadline/body 上限/二进制透传 + frame 协商", () => {
@@ -263,7 +350,7 @@ test("activate 与 migrate 的 grants 必须带齐所有能力位（漏一处能
   const grantBlocks = [...src.matchAll(/grants:\s*\{[^}]*\}/g)].map((m) => m[0]);
   expect(grantBlocks.length).toBeGreaterThanOrEqual(2);   // activate + migrate
   for (const block of grantBlocks) {
-    for (const key of ["storage", "leaseId", "actions", "actionsLeaseId", "llm", "llmLeaseId", "sources", "sourcesLeaseId"]) {
+    for (const key of ["storage", "leaseId", "actions", "actionsLeaseId", "llm", "llmLeaseId", "sources", "sourcesLeaseId", "events", "eventsLeaseId", "notify", "notifyLeaseId"]) {
       expect(block).toContain(key);
     }
   }

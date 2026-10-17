@@ -1,11 +1,11 @@
-import { appendFileSync } from "fs";
+import { appendFileSync, existsSync, writeFileSync } from "fs";
 export {};
 if (process.env.NODE_ENV !== "test" || process.env.OWNWARD_CLAUDE_FAKE !== "1") throw new Error("fake Claude CLI 需要显式 test 双门");
 const args = process.argv.slice(2);
 // 模拟 commander：不认识的旗标即刻报错退出；认识但缺值的旗标报 argument missing——与真 CLI 行为一致（probe 靠 stderr 文本区分）
 if(process.env.FAKE_CLAUDE_PERMISSION_PROMPT_TOOL==="0"&&args.includes("--permission-prompt-tool")){console.error("error: unknown option '--permission-prompt-tool'");process.exit(1);}
 {const ppIdx=args.indexOf("--permission-prompt-tool");if(ppIdx>=0&&(ppIdx===args.length-1||args[ppIdx+1].startsWith("-"))){console.error("error: option '--permission-prompt-tool <tool>' argument missing");process.exit(1);}}
-if(args.includes("--help")){const delay=Number(process.env.FAKE_CLAUDE_HELP_DELAY_MS||0);if(delay>0)await Bun.sleep(delay);if(process.env.FAKE_CLAUDE_HELP_FAIL==="1"){console.error("fake help failed");process.exit(9);}console.log(process.env.FAKE_CLAUDE_EFFORT==="0"?"fake help":"fake help --effort <level>");process.exit(0);}
+if(args.includes("--help")){const delay=Number(process.env.FAKE_CLAUDE_HELP_DELAY_MS||0);if(delay>0)await Bun.sleep(delay);const failOnce=process.env.FAKE_CLAUDE_HELP_FAIL_ONCE;if(failOnce&&!existsSync(failOnce)){writeFileSync(failOnce,"1");console.error("fake help failed once");process.exit(9);}if(process.env.FAKE_CLAUDE_HELP_FAIL==="1"){console.error("fake help failed");process.exit(9);}console.log(process.env.FAKE_CLAUDE_EFFORT==="0"?"fake help":"fake help --effort <level>");process.exit(0);}
 if(process.env.FAKE_CLAUDE_SPAWN_RECORD)appendFileSync(process.env.FAKE_CLAUDE_SPAWN_RECORD,JSON.stringify(args)+"\n");
 // 真 CLI 的 --fork-session：从 --resume 的会话读上下文、换一个新 session id。FAKE_CLAUDE_FORK_IGNORED=1 模拟旗标没生效
 const forked = args.includes("--fork-session") && process.env.FAKE_CLAUDE_FORK_IGNORED !== "1";

@@ -23,7 +23,7 @@ export function githubShouldRevive(state:string|undefined):boolean{return state=
 export function githubActionShouldRevive(actions: readonly { id: string; state: string }[], id: string): boolean { return githubShouldRevive(actions.find((action) => action.id === id)?.state); }
 import { previewText, touchChat } from "../lark-state.ts";
 import type { OwnwardEvent } from "../spool.ts";
-import { DATA, log } from "../util.ts";
+import { cfg, DATA, log } from "../util.ts";
 type ConsumerState = "processing" | "done" | "failed" | "terminal";
 type Row = {
   id: string;
@@ -329,6 +329,11 @@ async function projectOne(event: OwnwardEvent, deps: ProjectDeps) {
   if (event.key === "lark.inbox.daily" || event.key === "daily") {
     await (await import("./lark-policy.ts")).projectDailyLarkFacts(p);
     return;
+  }
+  // 排查助手：你本人私聊「排查 …」由 support 接管（确定性准入；没开 support 时连模块都不加载）
+  if (cfg.support?.enabled === true && p?.chat_type === "p2p") {
+    const { handleSupportIntake } = await import("../support.ts");
+    if (await handleSupportIntake(p)) return;
   }
   if (p?.chat_id)
     (deps.touchLark ?? touchChat)(p.chat_id, {

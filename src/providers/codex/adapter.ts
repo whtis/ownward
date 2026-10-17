@@ -20,6 +20,9 @@ const plain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 const token = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0 ? v as number : 0;
 const nativeRefPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const now = () => new Date().toISOString();
+/** codex exec 见 stdin 不是终端就先在 stderr 说这一句（我们给的是 /dev/null，读到 EOF 立刻往下跑）：每轮都有，什么也不说明。
+ *  留着它，本轮一失败它就成了唯一的「解释」，真正的退出原因被顶掉（2026-10-17 实撞：exit 143 只剩这一句） */
+const BENIGN_STDERR = /^Reading additional input from stdin\.\.\.[ \t]*\r?(?:\n|$)/gm;
 
 export type CodexProviderOptions = { dataRoot?: string; maxInvalidLines?: number; maxStdoutBufferBytes?: number; stderrRingBytes?: number; processExitGraceMs?: number; idleTimeoutMs?: number; interruptGraceMs?: number };
 export class CodexRunnerProvider implements RunnerProvider {
@@ -127,10 +130,10 @@ export class CodexRunnerProvider implements RunnerProvider {
     }
     this.metrics.droppedFrames++; this.logDrop(t, `unknown-item:${kind}`);
   }
-  private flushStderr(t: Turn): void { if (!t.stderrTail || t.stderrEmitted || t.terminal) return; t.stderrEmitted = true; this.metrics.notices++;
+  private flushStderr(t: Turn): void { const tail = t.stderrTail.replace(BENIGN_STDERR, ""); if (!tail.trim() || t.stderrEmitted || t.terminal) return; t.stderrEmitted = true; this.metrics.notices++;
     // 锁冲突要排在最前：它的 stderr 里带 "thread/resume failed"，被裸 `resume` 一匹配就成了
     // resume_not_found，而两者的处置完全相反（找不到→新开会话；被占用→先释放持有者）。
-    const category = /already has an active writer|thread-store conflict/i.test(t.stderrTail) ? "lock_conflict" : /auth|login|credential|token expired/i.test(t.stderrTail) ? "auth_expired" : /rate.?limit|429/i.test(t.stderrTail) ? "rate_limited" : /thread.*not found|rollout.*not found|resume.*not found/i.test(t.stderrTail) ? "resume_not_found" : "stderr"; t.queue.push(this.event(t.command, "provider-notice", { payload: JSON.stringify({ category, tail: t.stderrTail }) }, "best-effort")); }
+    const category = /already has an active writer|thread-store conflict/i.test(tail) ? "lock_conflict" : /auth|login|credential|token expired/i.test(tail) ? "auth_expired" : /rate.?limit|429/i.test(tail) ? "rate_limited" : /thread.*not found|rollout.*not found|resume.*not found/i.test(tail) ? "resume_not_found" : "stderr"; t.queue.push(this.event(t.command, "provider-notice", { payload: JSON.stringify({ category, tail }) }, "best-effort")); }
   private terminal(t: Turn, type: "completed" | "failed" | "interrupted", reason?: RunnerReasonCode, detail?: Record<string, unknown>) { if (t.terminal) return; if (detail?.message) { this.metrics.notices++; t.queue.push(this.event(t.command, "provider-notice", { payload: JSON.stringify({ category: "api_error", message: detail.message }) }, "best-effort")); } t.terminal = true; t.queue.push(this.event(t.command, type, { ...(reason ? { reason } : {}), ...(typeof detail?.exitCode === "number" ? { exitCode: detail.exitCode } : {}) })); t.queue.end(); }
   private exited(s: Session, t: Turn, code: number) { if (s.turn !== t || t.terminal) return; this.flushStderr(t); if (t.failure) return this.terminal(t, t.interrupted ? "interrupted" : "failed", t.interrupted ? "user_interrupt" : t.failure.reason, { exitCode: code, message: t.failure.message }); this.terminal(t, t.interrupted ? "interrupted" : "failed", t.interrupted ? "user_interrupt" : t.timedOut ? "provider_no_progress" : "provider_exit", { exitCode: code }); }
   private sameOptions(a: CodexOptions, b: CodexOptions): boolean { return JSON.stringify(a) === JSON.stringify(b); }

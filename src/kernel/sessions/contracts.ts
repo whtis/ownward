@@ -50,7 +50,8 @@ export interface SessionService {
   respondApproval(id: string, requestId: string, response: { allow: boolean; message?: string; remember?: "session" | "global" | null }): Promise<SessionMutationResult | void>;
   addDirectory(id: string, dir: string): Promise<SessionMutationResult | void>;
   acquireControl(id: string, owner: "ownward" | "observing"): Promise<{ sessionId: string; control: AgentControl }>;
-  setAccess(id: string, access: KernelGrantedAccess): Promise<SessionMutationResult | void>;
+  /** running = 切换时本轮还在跑；approved = 切到全部放行时当场放行的待批工具请求数（claude/codebuddy） */
+  setAccess(id: string, access: KernelGrantedAccess): Promise<(SessionMutationResult & { providerId: SessionProviderId; running: boolean; approved?: number }) | void>;
   newSession(id: string): Promise<string>;
   /** 跨 Provider 接力；同 Provider 只换模型/深度时改道 reconfigure（inPlace=true，sessionId 不变） */
   handoff(id:string,input:{providerId:SessionProviderId;model?:string;effort?:string;reason?:string;confirmUnknownOutcome?:boolean}):Promise<SessionMutationResult & {sessionId:string;providerId:SessionProviderId;inPlace?:true}>;

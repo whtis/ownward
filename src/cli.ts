@@ -168,7 +168,12 @@ switch (cmd) {
     } catch (e) { console.error(`❌ ${e instanceof Error ? e.message : e}`); process.exit(1); }
     break;
   }
+  case "stage": {
+    // 预发布：scripts/stage.sh 自己按 git worktree 找生产检出和 ../dev，从哪个检出调都一样
+    const r = Bun.spawnSync(["bash", join(ROOT, "scripts", "stage.sh"), ...process.argv.slice(3)], { stdio: ["inherit", "inherit", "inherit"] });
+    process.exit(r.exitCode ?? 1);
+  }
   default:
-    console.log("Ownward\nusage: own <status|test-notify [text]|triage-now|heartbeat-now|logs|work|tasks|done <id>|evolve \"<需求>\"|apply <id>|rollback|worktrees [clean [--force] [--include-unmerged] [--keep-branch] [名字…]]|sessions-migrate [--apply]>");
+    console.log("Ownward\nusage: own <status|test-notify [text]|triage-now|heartbeat-now|logs|work|tasks|done <id>|evolve \"<需求>\"|apply <id>|rollback|worktrees [clean [--force] [--include-unmerged] [--keep-branch] [名字…]]|sessions-migrate [--apply]|stage [status|stop|promote|--ref <分支>|--with <vertical>]>");
     process.exit(1);
 }

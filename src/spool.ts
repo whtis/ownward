@@ -8,7 +8,7 @@ import { DATA, ensureDir, fmt, log } from "./util.ts";
 
 export interface OwnwardEvent {
   id?: string;            // 新事件写入时生成；旧 JSONL 没有 id 仍可读取，不强制迁移
-  source: "lark" | "github" | "gmail" | "stock";
+  source: "lark" | "github" | "gmail" | "stock" | `vertical:${string}`;   // vertical:<id> 来自 ctx.events（ADR 0003）
   ts: string;             // ISO
   key?: string;           // 事件类型标识（如 lark EventKey）
   payload: unknown;
@@ -65,17 +65,23 @@ function quarantine(dataRoot: string, claimId: string, line: string, reason: str
 }
 
 export function appendEvent(ev: OwnwardEvent, dataRoot = DATA): OwnwardEvent {
+  return appendEvents([ev], dataRoot)[0]!;
+}
+
+/** 整批入队：一次写、一次 fsync。逐条 appendEvent 时每条一次 fsync，满批 50 条会拖垮调用方的 RPC 超时。 */
+export function appendEvents(evs: readonly OwnwardEvent[], dataRoot = DATA): OwnwardEvent[] {
+  if (!evs.length) return [];
   ensureDir(dataRoot);
-  const stored: OwnwardEvent = ev.id ? ev : { ...ev, id: crypto.randomUUID() };
-  const line = JSON.stringify(stored) + "\n";
+  const stored = evs.map((ev): OwnwardEvent => ev.id ? ev : { ...ev, id: crypto.randomUUID() });
+  const lines = stored.map((ev) => JSON.stringify(ev) + "\n").join("");
   // 关键通道先入队；原始日归档失败会留痕，但不能把已经确定性排队的事件伪装成失败再诱发重投。
-  durableAppend(queueFile(dataRoot), line);
+  durableAppend(queueFile(dataRoot), lines);
   try {
     const dir = join(dataRoot, "events");
     ensureDir(dir);
-    appendFileSync(join(dir, `${fmt(new Date(), "date")}.jsonl`), line);
-  } catch (e) { log(`event archive failed (already queued id=${stored.id}): ${e}`); }
-  log(`event queued: ${stored.source}${stored.key ? "/" + stored.key : ""} id=${stored.id}`);
+    appendFileSync(join(dir, `${fmt(new Date(), "date")}.jsonl`), lines);
+  } catch (e) { log(`event archive failed (already queued ids=${stored.map((ev) => ev.id).join(",")}): ${e}`); }
+  for (const ev of stored) log(`event queued: ${ev.source}${ev.key ? "/" + ev.key : ""} id=${ev.id}`);
   return stored;
 }
 

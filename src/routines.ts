@@ -132,20 +132,20 @@ function routineMaterialRuleSig(r: Routine) {
 /** 职责总览：今天该做的可操作，非今天的显示下次触发时间——功能不因今天为空而隐身。
  *  逾期补做：最近几天里 draft/writing 还没收尾（没写入也没跳过）的 occurrence 继续端出来带完整控件，
  *  这样错过的晨会/周报可以晚点补写或正经跳过，不再掉进「需要我」只剩一个 x（见 routine 逾期问题）。 */
-export function todayRoutines() {
-  const today = fmt(new Date(), "date");
+export function todayRoutines(now = new Date()) {
+  const today = fmt(now, "date");
   const wd = ["日", "一", "二", "三", "四", "五", "六"];
   const routines = listRoutines().filter((r) => r.enabled);
 
   const cards = routines
     .map((r) => {
-      const isToday = routineDueToday(r, new Date());
+      const isToday = routineDueToday(r, now);
       // 下一个触发日（不含今天时往后找）。月度的按真实触发日算——否则 days:[0] 每周都显示「周日」、还排进本周
       let next = "";
       let daysUntil = 0;
       if (!isToday) {
         for (let i = 1; i <= 42; i++) {
-          const d = new Date(Date.now() + i * 86_400_000);
+          const d = new Date(now.getTime() + i * 86_400_000);
           if (!routineDueToday(r, d)) continue;
           const civil = new Date(`${fmt(d, "date")}T00:00:00Z`);
           next = i === 1 ? "明天" : i <= 6 ? `周${wd[civil.getUTCDay()]}` : `${civil.getUTCMonth() + 1}/${civil.getUTCDate()}`;
@@ -153,7 +153,7 @@ export function todayRoutines() {
           break;
         }
       }
-      const occDate = occurrenceKey(r);
+      const occDate = occurrenceKey(r, now);
       // 月度 occurrence 的 key 是 YYYY-MM，下面的逾期扫描（按 YYYY-MM-DD 匹配文件名）永远捞不到它。
       // 所以非触发日也要读一次状态：否则某期生成失败，第二天卡片就退回「下次 …」，失败彻底看不见了。
       const s = isToday || r.cadence === "monthly" ? occState(r.id, occDate) : null;
@@ -172,7 +172,7 @@ export function todayRoutines() {
 
   // 逾期补做卡：扫最近 7 天 STATE_DIR 里 draft/writing 没收尾、且不是今天的 occurrence
   const overdue: typeof cards = [];
-  const cutoff = fmt(new Date(Date.now() - 7 * 86_400_000), "date");
+  const cutoff = fmt(new Date(now.getTime() - 7 * 86_400_000), "date");
   if (existsSync(STATE_DIR)) {
     for (const f of readdirSync(STATE_DIR)) {
       const m = f.match(/^(.+)-(\d{4}-\d{2}-\d{2})\.json$/);
@@ -528,7 +528,28 @@ export function skipRoutine(id: string, date: string) {
   const key = resolveOccurrenceDate(r, date);
   const s = occState(id, key) || { status: "draft" as const, draft: "", updatedAt: "" };
   saveOcc(id, key, { ...s, status: "skipped", updatedAt: new Date().toISOString() });
-  resolveAction(`routine:${id}:${key}`, "skipped");
+  resolveAction(`routine:${id}:${key}`, "skipped");   // 前缀匹配：生成失败升级出的 `:failed` 行动项一并了结
+}
+
+/** 标为已填写：人已在 Ownward 之外手动填好文档，这期就此收尾（不派写入任务） */
+export function markRoutineWritten(id: string, date: string) {
+  const r = listRoutines().find((x) => x.id === id);
+  const key = resolveOccurrenceDate(r, date);
+  const s = occState(id, key) || { status: "draft" as const, draft: "", updatedAt: "" };
+  saveOcc(id, key, { ...s, status: "written", updatedAt: new Date().toISOString() });
+  resolveAction(`routine:${id}:${key}`, "written");
+}
+
+/** 逾期/失败未收尾的卡可批量退出。写入中的不动：任务还在跑，跳过会吞掉它收尾时的 written */
+export function isRoutineExitable(c: { overdue: boolean; status: string }) {
+  return (c.overdue || c.status === "failed") && c.status !== "writing";
+}
+
+/** 一键跳过全部逾期/失败：逾期卡越攒越多，又只能逐张进草稿弹窗找跳过（失败的连草稿都打不开） */
+export function skipAllOverdue(now = new Date()): number {
+  const targets = todayRoutines(now).filter(isRoutineExitable);
+  for (const c of targets) skipRoutine(c.id, c.date);
+  return targets.length;
 }
 
 /** 写入：派引擎任务，agent 用 lark-cli 做 block 级精准编辑并自检 */

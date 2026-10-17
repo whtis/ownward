@@ -2,6 +2,34 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.7.0] - 2026-10-17
+
+### Added
+
+- Verticals can notify you and publish events (ADR 0003). `ctx.notify.send()` goes through the same notification policy as Ownward's own notifications, including quiet hours, focus suppression and cooldowns. The source and key are always prefixed with the Vertical's id, links must be http(s) or point to the Vertical's own pages, urgent delivery needs a local grant, and each Vertical is rate limited. `ctx.events.publish()` feeds the event queue, where triage decides how each event is graded; a batch is validated as a whole, deduplicated across restarts and rate limited. Both capabilities are also available to external Vertical hosts. `KERNEL_API_VERSION` is unchanged.
+- Staged Actions (off by default, `staging.enabled`). Once an action has been open for a while (10 minutes by default), Ownward prepares a reply draft for Lark and Gmail threads, or a review brief for GitHub pull requests, and shows it in the action's draft panel. The draft is dropped if the action is handled or its input changes in the meantime, a daily budget caps the model calls, and nothing is ever sent until you click.
+- The Today page has an assistant shelf for heartbeat observations that don't need a notification: suggestions, risks and recurring patterns, each with the evidence behind it. You can dismiss an observation or adopt it, which dispatches a task or opens an action. Observations expire after 72 hours, and adopting one that refers to an action already in the queue points to that action instead of opening a duplicate. Action cards that look like a failure get a one-click Investigate button that dispatches a root-cause task.
+- The Today page shows your active roles in an avatar strip with their current state (on duty, working, needs attention), worked out from running tasks, open actions, uncommitted changes and how recent the project log is. A weekly Active Goals panel lists the open items for the current week in `memory/goals.md` and lets you tick them off.
+- Routines can be closed without a draft: skip a routine from its card, mark it as already filled in by hand, or skip every overdue routine at once.
+- Support investigations (off by default, `support.enabled`). Send the bot a direct message that starts with the trigger word (`排查` by default), and Ownward routes the report to one of the roles you listed in `support.roles`, runs a one-off read-only investigation as that role in a sandbox (only the commands in `support.allowedCommands` may run, and the credential files in `support.denyRead` can't be read), and sends the conclusion card to you alone. Your verdict is written back to the role's project log, and a correction becomes a project memory candidate.
+- Session share images. Select messages in a session, or highlight just a passage, and Ownward draws them on your machine as a note-style image with an Ownward footer. You can edit the title, choose one of four styles and hide local paths and secrets (on by default), then copy, download or share the image.
+- English is a first-class language. The README is now in English, with the Chinese version in `README.zh-CN.md`; the install scripts print English or Chinese according to the system language (`OWNWARD_LANG` overrides it); and the web dictionary covers the strings that were still missing.
+- `own stage [--ref <branch>]` runs a pre-release next to production. It fast-forwards a separate dev checkout to the branch, runs the verification gate, and starts a dev instance on port 4519 from a copy of your configuration with event sources, notifications, background jobs and vault sync turned off. It then smoke-tests every workbench page in headless Chrome. `own stage promote` only accepts a commit that passed.
+
+### Changed
+
+- A Claude session dispatched with per-approval permissions can be switched to "allow all" while it runs. The session header has an approval-mode toggle and approval cards have an "Allow all" button; tool approvals already pending in the current turn are granted and audited, while questions still wait for your answer. The "Always" option now says which kind of command it will remember.
+- Actions can carry an expiry time, and project memory candidates record the date of the source they came from. The Roles page can filter candidates by source date and dismiss them in bulk; promotion is still one at a time.
+- Work logs for long tasks are written from the task's conclusions and changes instead of the first part of its command log, and the flight record lists the final answer of every round instead of only the last one.
+
+### Fixed
+
+- Dispatching to a directory that is not a git repository runs the task in place instead of failing to create a worktree, and a repeated system notice in a session is shown once.
+- A failed check for the Claude CLI's `--effort` support is no longer cached until the Runner restarts, and the check now waits up to 10 seconds instead of 2. Right after a CLI upgrade, sessions that set a reasoning effort used to be refused.
+- Codex warnings about unrecognised `config.toml` settings are shown once as non-fatal warnings and no longer hide the real reason a round failed. Failure lines include the exit code.
+- The sender of a Lark message is no longer lost when the event is normalised more than once.
+- The scope hint on the "Always" approval button is fully translated in the English interface.
+
 ## [1.6.0] - 2026-10-15
 
 ### Added

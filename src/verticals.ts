@@ -1,15 +1,19 @@
 // Vertical Runtime compatibility facade. Core server/daemon only depend on this stable seam.
 import { isWithin } from "./path-within.ts";
-import { cfg, DATA, expandHome, fmt, log } from "./util.ts";
+import { cfg, DATA, expandHome, fmt, log, workbenchUrl } from "./util.ts";
 import { DecisionEngine, decisionEngineStatuses, runDecision } from "./kernel/decisions/service.ts";
 import { ExtensionRuntime, type BuiltinVertical } from "./kernel/extensions/runtime.ts";
 import { KernelSessionService } from "./kernel/sessions/service.ts";
 import { parseSessionMigrationMode } from "./kernel/sessions/contracts.ts";
-import type { ScopedActions, ScopedLlm, ScopedSessions, ScopedSources, VerticalManifest, VerticalStatus } from "./kernel/extensions/contracts.ts";
+import type { ScopedActions, ScopedEvents, ScopedLlm, ScopedNotify, ScopedSessions, ScopedSources, VerticalManifest, VerticalStatus } from "./kernel/extensions/contracts.ts";
 import type { ScopedTasks } from "./kernel/extensions/contracts.ts";
 import { addTask, applyEvolve, loadTasks, removeTask, startEvolve, startWork, updateTask } from "./dispatch.ts";
 import { listActions, openAction, resolveActionExact, setActionState } from "./actions.ts";
 import { createScopedActions } from "./kernel/extensions/action-scope.ts";
+import { createScopedEvents } from "./kernel/extensions/event-scope.ts";
+import { createScopedNotify } from "./kernel/extensions/notify-scope.ts";
+import { appendEvents } from "./spool.ts";
+import { cooldownMs, notify } from "./notify.ts";
 import { resolve } from "path";
 import { realpathSync, statSync } from "fs";
 import { homedir } from "os";
@@ -160,6 +164,19 @@ export function scopedLlm(verticalId: string): ScopedLlm {
 export function scopedSources(_verticalId: string): ScopedSources {
   return Object.freeze(new LarkDocumentSources());
 }
+/** ctx.events：进关键事件队列，triage 定级（ADR 0003）。 */
+export function scopedEvents(verticalId: string): ScopedEvents {
+  return createScopedEvents(verticalId, { append: (events) => { appendEvents(events, DATA); } }, { dataRoot: DATA });
+}
+/** ctx.notify：过同一套通知策略（前台/静默/冷却/只有 act 进飞书），冷却窗口与 Kernel 一致（ADR 0003）。 */
+export function scopedNotify(verticalId: string, grants: { urgent: boolean }): ScopedNotify {
+  return createScopedNotify(verticalId, {
+    send: (text, opts) => notify(text, opts),
+    linkFor: (path) => workbenchUrl(path),
+    cooldownMs,
+    log,
+  }, { urgentGranted: grants.urgent });
+}
 
 export function scopedTasks(roots: string[], capabilities: readonly string[]=[]): ScopedTasks {
   const allowed = [...new Set(roots.flatMap((r) => { try { const actual=realpathSync(resolve(expandHome(r)));if(!statSync(actual).isDirectory())throw new Error();return[actual]; } catch { log("dev task root skipped: invalid configured directory");return[]; } }))];
@@ -213,7 +230,7 @@ export function canonicalTaskExtraDirs(input: string[] | undefined, primary: str
 export const verticalRuntime = new ExtensionRuntime({
   dataRoot: DATA, config: { ...cfg, verticals: { ...cfg.verticals, strategy: strategyVerticalConfig(cfg.strategy, cfg.verticals?.strategy, cfg.timezone) } }, builtins,
   externalPaths: Array.isArray(cfg.verticals?.externalPaths) ? cfg.verticals.externalPaths : [],
-  sessionFactory: scopedSessions, taskFactory: scopedTasks, actionFactory: scopedActions, llmFactory: scopedLlm, sourceFactory: scopedSources, log,
+  sessionFactory: scopedSessions, taskFactory: scopedTasks, actionFactory: scopedActions, llmFactory: scopedLlm, sourceFactory: scopedSources, eventFactory: scopedEvents, notifyFactory: scopedNotify, log,
 });
 let startPromise: Promise<void> | null = null;
 export function startVerticals(): Promise<void> { if (!startPromise) { const attempt = verticalRuntime.start(); const guarded = attempt.catch((error) => { log(`verticals start unavailable: ${error instanceof Error ? error.name : "unknown"}`); if (startPromise === guarded) startPromise = null; }); startPromise = guarded; } return startPromise; }

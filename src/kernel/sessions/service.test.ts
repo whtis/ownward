@@ -515,6 +515,39 @@ describe("Kernel SessionService migration modes", () => {
     try { await new KernelSessionService(root, { mode: "runner" }, runner).resumePending(); } finally { onRunnerApprovalRequested(null); }
     expect(seen).toEqual([root]);
   });
+
+  // 2026-10-17：没选 bypass 派出去的 claude 会话，人对着审批卡想放开——会话里没有任何办法（「总是」只记一类命令，下一条照问）。
+  // 轮次里切到全部放行：本轮挂着的工具审批当场放行并记审计，提问照旧等人答；授权落盘，再叫醒审批投影收之后冒出来的
+  test("set-access mid-turn approve-all answers pending tool approvals, leaves questions to the user and wakes the approval sweep", async () => {
+    const root = fresh(), { session: s } = seed(root), at = new Date().toISOString(), commands = new RunnerCommandJournal(root), events = new RunnerEventJournal(root), runs = new RunRepository(root);
+    const turn = { at, commandId: "turn", runId: "run", sessionId: s.id, providerId: "claude" };
+    commands.accept({ commandId: "turn", kind: "send-input", runId: "run", sessionId: s.id, providerId: "claude", input: JSON.stringify({ text: "go" }) });
+    runs.append({ schemaVersion: 1, ...turn, taskId: "task", eventId: "accepted", type: "command-accepted" }); runs.append({ schemaVersion: 1, ...turn, taskId: "task", eventId: "run-started", type: "run-started" });
+    events.append({ ...turn, eventId: "turn-started", type: "started" });
+    events.append({ ...turn, eventId: "ask-tool", type: "approval-requested", approvalRequestId: "tool-req", payload: JSON.stringify({ kind: "tool", toolName: "Bash", input: { command: "grep -n fail /tmp/verify.log" } }) });
+    events.append({ ...turn, eventId: "ask-question", type: "approval-requested", approvalRequestId: "question-req", payload: JSON.stringify({ kind: "question", question: "走哪边？", options: ["左", "右"] }) });
+    const answered: string[] = [], done = (body: any) => { for (const type of ["started", "completed"] as const) events.append({ eventId: `${body.commandId}-${type}`, type, at, commandId: body.commandId, runId: body.runId, sessionId: body.sessionId, providerId: "claude" }); };
+    const client: any = {
+      request: async (kind: string, body: any) => {
+        if (kind === "submit") { commands.accept({ commandId: body.commandId, kind: body.kind, runId: body.runId, sessionId: body.sessionId, providerId: body.providerId, input: body.input }); done(body); }
+        if (kind === "approval-response") { answered.push(body.approvalRequestId); commands.accept({ commandId: body.commandId, kind: "approval-response", runId: body.runId, sessionId: body.sessionId, providerId: body.providerId, approvalRequestId: body.approvalRequestId, input: body.input }); done(body); }
+        return { kind: "accepted" };
+      },
+      queryCommand: async (commandId: string) => ({ body: { events: events.readStrict().filter((e) => e.commandId === commandId), truncated: false } }),
+      close() {},
+    };
+    const previous = cfg.architecture.allowFullAccess, seen: string[] = []; cfg.architecture.allowFullAccess = true; onRunnerApprovalRequested((dataRoot) => seen.push(dataRoot));
+    try {
+      const result = await new KernelSessionService(root, { mode: "runner" }, new RunnerSessionConsumer(root, () => client)).setAccess("task", "full-access");
+      expect(result).toMatchObject({ providerId: "claude", running: true, approved: 1 });
+      expect(answered).toEqual(["tool-req"]);
+      expect(JSON.parse(commands.readInput(commands.readStrict().find((c) => c.kind === "set-access")!)!)).toEqual({ access: "bypass" });
+      expect(new SessionRepository(root).getByTaskId("task")?.access).toBe("full-access");
+      expect(seen).toEqual([root]);
+      const audit = readFileSync(join(root, "approval-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      expect(audit).toEqual([expect.objectContaining({ taskId: "task", requestId: "tool-req", decision: "auto-allow", by: "system", kind: "bash", pattern: "grep" })]);
+    } finally { onRunnerApprovalRequested(null); cfg.architecture.allowFullAccess = previous; }
+  });
 });
 
 describe("normalized Runner event projection", () => {

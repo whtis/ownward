@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { fsyncSync } from "../../fs-durable.ts";
 import { ownedByCurrentUser } from "../../posix-owner.ts";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
-import type { ScopedLlm, ScopedActions, ScopedScheduler, ScopedSessions, ScopedSources, ScopedStorage, ScopedTasks, VerticalContext, VerticalManifest } from "./contracts.ts";
+import type { ScopedLlm, ScopedActions, ScopedEvents, ScopedNotify, ScopedScheduler, ScopedSessions, ScopedSources, ScopedStorage, ScopedTasks, VerticalContext, VerticalManifest } from "./contracts.ts";
 import { LifecycleCapability } from "./lifecycle.ts";
 
 export class ExtensionPolicyError extends Error { constructor(readonly code: string, message: string) { super(message); } }
@@ -44,7 +44,7 @@ export class SchedulerScope implements ScopedScheduler {
   stop(): void { this.closed = true; for (const { timer, abort } of this.controllers.values()) { abort.abort(); if (timer) clearTimeout(timer); } this.controllers.clear(); }
 }
 export function schedulerRetryDelay(intervalMs: number, consecutiveFailures: number, maxBackoffMs = 300_000): number { return Math.min(maxBackoffMs, intervalMs * 2 ** Math.min(10, Math.max(0, consecutiveFailures))); }
-export function buildVerticalContext(input: { manifest: VerticalManifest; dataRoot: string; config: Record<string, unknown>; sessionFactory?: (roots: string[]) => ScopedSessions; taskFactory?: (roots: string[], capabilities: readonly string[]) => ScopedTasks; actionFactory?: (verticalId: string) => ScopedActions; llmFactory?: (verticalId: string) => ScopedLlm; sourceFactory?: (verticalId: string) => ScopedSources; logger: (operation: string, message: string) => void; scheduler: SchedulerScope;lifecycle?:LifecycleCapability }): VerticalContext {
+export function buildVerticalContext(input: { manifest: VerticalManifest; dataRoot: string; config: Record<string, unknown>; sessionFactory?: (roots: string[]) => ScopedSessions; taskFactory?: (roots: string[], capabilities: readonly string[]) => ScopedTasks; actionFactory?: (verticalId: string) => ScopedActions; llmFactory?: (verticalId: string) => ScopedLlm; sourceFactory?: (verticalId: string) => ScopedSources; eventFactory?: (verticalId: string) => ScopedEvents; notifyFactory?: (verticalId: string, grants: { urgent: boolean }) => ScopedNotify; logger: (operation: string, message: string) => void; scheduler: SchedulerScope;lifecycle?:LifecycleCapability }): VerticalContext {
   const { manifest } = input, caps = new Set(manifest.capabilities ?? []), roots = Object.freeze([...(manifest.roots ?? [])]);
   const lifecycle=input.lifecycle??new LifecycleCapability("vertical",manifest.id),guard=<T extends(...args:any[])=>any>(fn:T):T=>((...args:any[])=>{lifecycle.assertWrite();return fn(...args)}) as T;
   const ctx: VerticalContext = { id: manifest.id, config: deepFreeze(structuredClone(input.config)), log: input.logger };
@@ -56,7 +56,9 @@ export function buildVerticalContext(input: { manifest: VerticalManifest; dataRo
   if (caps.has("actions")) { if (!input.actionFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Action Service 不可用");const raw=input.actionFactory(manifest.id);(ctx as any).actions=Object.freeze({list:raw.list.bind(raw),open:guard(raw.open.bind(raw)),resolve:guard(raw.resolve.bind(raw)),dismiss:guard(raw.dismiss.bind(raw))}); }
   if (caps.has("llm")) { if (!input.llmFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Decision Model Service 不可用");const raw=input.llmFactory(manifest.id);(ctx as any).llm=Object.freeze({complete:guard(raw.complete.bind(raw)),engines:raw.engines.bind(raw)}); }
   if (caps.has("sources")) { if (!input.sourceFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Source Service 不可用");const raw=input.sourceFactory(manifest.id);(ctx as any).sources=Object.freeze({status:raw.status.bind(raw),inspect:raw.inspect.bind(raw),fetch:raw.fetch.bind(raw)}); }
-  for (const cap of ["events", "notify"] as const) if (caps.has(cap)) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", `${cap} Service 尚未开放`);
+  // events/notify（ADR 0003）：门面在 Kernel 侧强制 source/key 前缀、校验与限流，这里只做注入与生命周期闸
+  if (caps.has("events")) { if (!input.eventFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Event Service 不可用");const raw=input.eventFactory(manifest.id);(ctx as any).events=Object.freeze({publish:guard(raw.publish.bind(raw))}); }
+  if (caps.has("notify")) { if (!input.notifyFactory) throw new ExtensionPolicyError("VERTICAL_SERVICE_UNAVAILABLE", "Notify Service 不可用");const raw=input.notifyFactory(manifest.id,{urgent:input.config.grantedNotifyUrgent===true});(ctx as any).notify=Object.freeze({send:guard(raw.send.bind(raw))}); }
   if (caps.has("vault")) { if (!manifest.vault) throw new ExtensionPolicyError("VERTICAL_VAULT_UNDECLARED", "Vault capability 未声明 scope"); (ctx as any).vault = Object.freeze({ scopes: Object.freeze([...manifest.vault.scopes]), sensitivity: manifest.vault.sensitivity }); }
   return Object.freeze(ctx);
 }

@@ -238,14 +238,15 @@ export async function sweepMemoryChores() {
   //     分出去的候选没人看见，就等于又攒成了一个没人合的堆
   try {
     const { listRoles } = await import("./roles.ts");
-    const { listProjectCandidates } = await import("./project-memory.ts");
-    let n = 0, newest = "";
+    const { listProjectCandidates, isBackfilledCandidate } = await import("./project-memory.ts");
+    let n = 0, newest = "", backfilled = 0;
     const names: string[] = [];
     for (const r of listRoles()) {
       if (r.type !== "project" || !r.primaryProject || r.conflict) continue;
       const c = listProjectCandidates(r.primaryProject, r.scope);
       if (!c.ok || !c.candidates.length) continue;
       n += c.candidates.length; names.push(r.name);
+      backfilled += c.candidates.filter(isBackfilledCandidate).length;
       // 批次标记用最新一条的创建时刻（ISO，按字符串比就是按时间比）——候选 id 是「日期-随机串」，同一天的谁大谁小是随机的
       for (const x of c.candidates) if (x.createdAt > newest) newest = x.createdAt;
     }
@@ -265,7 +266,9 @@ export async function sweepMemoryChores() {
       openAction({
         id, kind: "decide", source: "dispatch",
         title: `项目记忆候选待审（${n} 条）`,
-        reason: `在「角色」页对应角色下逐条晋升或丢弃：${names.slice(0, 5).join("、")}${names.length > 5 ? ` 等 ${names.length} 个角色` : ""}`,
+        // 回填的旧账单独点出来：混在日常计数里，看着像每天新攒了几十条，其实是一次性的历史，按来源日期筛出来批量丢就行
+        reason: `在「角色」页对应角色下逐条晋升或丢弃：${names.slice(0, 5).join("、")}${names.length > 5 ? ` 等 ${names.length} 个角色` : ""}` +
+          (backfilled ? `；其中 ${backfilled} 条是回填的旧日报决策，可在角色页筛「更早来源」批量丢弃` : ""),
         ref: {},
       });
     }

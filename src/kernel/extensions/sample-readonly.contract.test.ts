@@ -85,18 +85,25 @@ describe("external read-only Vertical sample", () => {
     expect(rt.statuses()[0]).toMatchObject({ state: "degraded", errorCode: "VERTICAL_ROOT_NOT_GRANTED" });
   });
 
-  test("Vault is denied by default, sensitive scope needs policy, and notify is unavailable to the Host", async () => {
+  test("Vault is denied by default, sensitive scope needs policy, sessions stay unavailable to the Host, and notify fails closed without the Kernel service", async () => {
     const vaultExt = copyPackage();
     mutateManifest(vaultExt, (manifest) => { manifest.capabilities = ["storage", "vault"]; manifest.vault = { scopes: ["sample"], sensitivity: "sensitive" }; });
     const vault = runtime(fresh(), vaultExt, { verticals: { "sample-readonly": { enabled: true, trusted: true, grantedCapabilities: ["storage", "vault"], vaultScopes: ["sample"], allowSensitiveVault: false } } });
     await vault.start();
     expect(vault.statuses()[0]).toMatchObject({ state: "degraded", errorCode: "VERTICAL_CAPABILITY_UNAVAILABLE" });
 
+    const sessionsExt = copyPackage();
+    mutateManifest(sessionsExt, (manifest) => { manifest.capabilities = ["storage", "sessions"]; });
+    const sessions = runtime(fresh(), sessionsExt, { verticals: { "sample-readonly": { enabled: true, trusted: true, grantedCapabilities: ["storage", "sessions"] } } });
+    await sessions.start();
+    expect(sessions.statuses()[0]).toMatchObject({ state: "degraded", errorCode: "VERTICAL_CAPABILITY_UNAVAILABLE" });
+
+    // notify 自 ADR 0003 起对外部 Host 开放，但仍要求本机授权 + Kernel 装配了通知服务，缺一不注入
     const notifyExt = copyPackage();
     mutateManifest(notifyExt, (manifest) => { manifest.capabilities = ["storage", "notify"]; });
     const notify = runtime(fresh(), notifyExt, { verticals: { "sample-readonly": { enabled: true, trusted: true, grantedCapabilities: ["storage", "notify"] } } });
     await notify.start();
-    expect(notify.statuses()[0]).toMatchObject({ state: "degraded", errorCode: "VERTICAL_CAPABILITY_UNAVAILABLE" });
+    expect(notify.statuses()[0]).toMatchObject({ state: "degraded", errorCode: "VERTICAL_SERVICE_UNAVAILABLE" });
   });
 
   test("core route override and future kernel API stay diagnosable without loading code", async () => {

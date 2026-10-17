@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { RUNNER_PERM_TIMEOUT_MS, approvalRuleToRemember, classifyApprovals, type ApprovalCommandLike, type ApprovalEventLike } from "./approval-sweep.ts";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { RUNNER_PERM_TIMEOUT_MS, approvalRuleToRemember, approveAllGranted, classifyApprovals, sweepRunnerApprovals, type ApprovalCommandLike, type ApprovalEventLike } from "./approval-sweep.ts";
+import { KernelSessionService } from "./service.ts";
+import { SessionRepository } from "../../sessions/repository.ts";
+import { RunnerEventJournal } from "../../runner/journals.ts";
+import { RunnerServer, type RunnerProvider } from "../../runner/server.ts";
+import { readRunJournalStrict, reduceRuns } from "../../runs/repository.ts";
 
 const NOW = Date.parse("2026-08-20T10:00:00Z");
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
@@ -70,5 +78,37 @@ describe("approvalRuleToRemember", () => {
     expect(approvalRuleToRemember({ kind: "question", question: "选哪个？", options: ["A", "B"] })).toBeNull();
     expect(approvalRuleToRemember({ input: { command: "ls" } })).toBeNull();
     expect(approvalRuleToRemember(null)).toBeNull();
+  });
+});
+
+// 2026-10-17：没选 bypass 派出去的会话在轮次里切到「全部放行」，只改了下一轮的启动参数——本轮的 CLI 仍按逐条审批在跑，
+// 之后冒出来的审批要由投影替人放行：不开 Action、不弹横幅/飞书卡，只记审计
+describe("sweepRunnerApprovals：会话已切到全部放行", () => {
+  test("只有 bypass/full-access 算全部放行", () => {
+    expect([undefined, "workspace", "full-access", "bypass"].map(approveAllGranted)).toEqual([false, false, true, true]);
+  });
+  test("本轮再冒出来的工具审批直接放行、只记审计", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ownward-approval-sweep-")), cwd = join(root, "repo"); mkdirSync(cwd);
+    new SessionRepository(root).reserve({ taskId: "task", providerId: "claude", cwd, access: "full-access" });
+    let release!: () => void; const answered = new Promise<void>((resolve) => { release = resolve; }), responses: string[] = [];
+    const ev = (command: any, type: string, extra: Record<string, unknown> = {}) => ({ eventId: `${command.commandId}:${type}`, type, at: new Date().toISOString(), commandId: command.commandId, runId: command.runId, sessionId: command.sessionId, providerId: command.providerId, ...extra }) as any;
+    const provider: RunnerProvider = { async *execute(command, input) {
+      if (command.kind === "approval-response") { responses.push(JSON.parse(input).response); yield ev(command, "started"); yield ev(command, "completed"); release(); return; }
+      yield ev(command, "started");
+      yield ev(command, "approval-requested", { approvalRequestId: "req-1", payload: JSON.stringify({ kind: "tool", toolName: "Bash", input: { command: "grep -n fail /tmp/verify.log" } }) });
+      await answered; yield ev(command, "completed");
+    } };
+    const server = new RunnerServer(root, () => provider); server.start();
+    try {
+      await new KernelSessionService(root, { mode: "runner", roots: [root] }).send("task", { text: "go" });
+      // 审批答复要绑当前 active run：等审批落盘、run 投影成 running 再扫
+      for (let i = 0; i < 300; i++) { if (new RunnerEventJournal(root).readStrict().some((e) => e.type === "approval-requested") && reduceRuns(readRunJournalStrict(root)).some((r) => r.status === "running")) break; await Bun.sleep(10); }
+      await sweepRunnerApprovals(root);
+      expect(responses).toEqual(["allow"]);
+      const audit = readFileSync(join(root, "approval-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      expect(audit).toEqual([expect.objectContaining({ taskId: "task", requestId: "req-1", decision: "auto-allow", by: "system", kind: "bash", pattern: "grep" })]);
+      const sweepState = join(root, "kernel", "approval-sweep.json");
+      expect(existsSync(sweepState) ? Object.keys(JSON.parse(readFileSync(sweepState, "utf8")).notified) : []).toEqual([]);   // 没弹过卡
+    } finally { server.stop(); rmSync(root, { recursive: true, force: true }); }
   });
 });
