@@ -408,6 +408,16 @@ final class OwnwardClient: Sendable {
 
     func appRelease() async throws -> AppRelease { try await get("/api/app/ios") }
 
+    // MARK: - 扩展（外部 Vertical）入口
+
+    private struct VerticalsPayload: Decodable { @Defaulted var navigation: [JSONValue] }
+
+    /// 侧边栏「扩展」：只取 navigation，客户端再校验一遍（Verticals.swift）
+    func verticalNavigation() async throws -> [VerticalNavItem] {
+        let p: VerticalsPayload = try await get("/api/system/verticals")
+        return normalizeVerticalNavigation(p.navigation)
+    }
+
     // MARK: - 带鉴权的图片
 
     nonisolated(unsafe) private static let imageCache = NSCache<NSURL, NSData>()

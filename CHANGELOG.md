@@ -2,6 +2,12 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.8.0] - 2026-10-17
+
+### Added
+
+- The iOS and Android apps have an Extensions section in the sidebar. It lists the pages that installed Verticals declare in their manifest `navigation`, marks a Vertical that is running degraded, and opens the page inside the app. The page signs in with the token the app already uses: the app sets the same session cookie a browser gets after entering the token, so the token never appears in a URL and the server's authentication is unchanged. Pages can only navigate within your Ownward server; other links open in the system browser. A page that cannot load, is not signed in or is rate limited shows a native message with a Retry button. `docs/remote-access.md` describes how this works.
+
 ## [1.7.0] - 2026-10-17
 
 ### Added

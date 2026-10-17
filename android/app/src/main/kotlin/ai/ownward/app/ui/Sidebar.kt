@@ -23,11 +23,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerState
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -49,10 +51,12 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ai.ownward.app.data.AiChat
 import ai.ownward.app.data.OwnwardClient
 import ai.ownward.app.data.RecentSession
+import ai.ownward.app.data.VerticalNavItem
 import ai.ownward.app.data.WorkTask
 import ai.ownward.app.ui.theme.ownwardColors
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +73,8 @@ import kotlinx.coroutines.launch
 class DrawerController(private val state: DrawerState, private val scope: CoroutineScope) {
     fun open() { scope.launch { state.open() } }
     fun close() { scope.launch { state.close() } }
+    /** 页面自己的返回处理（如扩展页的网页后退）要给抽屉让路：抽屉开着时返回键先关抽屉 */
+    val isOpen: Boolean get() = state.targetValue == DrawerValue.Open
 }
 
 val LocalDrawer = compositionLocalOf<DrawerController?> { null }
@@ -103,6 +109,7 @@ sealed class DrawerDest {
     data class Task(val id: String) : DrawerDest()
     data class Chat(val id: String) : DrawerDest()
     data class Terminal(val taskId: String, val ccId: String?) : DrawerDest()
+    data class Vertical(val item: VerticalNavItem) : DrawerDest()
 
     /** 与 MainShell 从返回栈算出的「当前页键」同一套字符串，用来高亮当前项 / 点到当前项时不重载 */
     fun key(): String = when (this) {
@@ -113,23 +120,28 @@ sealed class DrawerDest {
         is Task -> "task:$id"
         is Chat -> "chat:$id"
         is Terminal -> "terminal:$taskId"
+        is Vertical -> "vertical:${item.id}"
     }
 }
 
-/** 抽屉三张表，各自 runCatching——一张失败不拖累其他；抽屉常驻组合树，数据关了再开先显旧的再刷新 */
+/** 抽屉四张表，各自 runCatching——一张失败不拖累其他；抽屉常驻组合树，数据关了再开先显旧的再刷新 */
 private class DrawerData {
     var sessions by mutableStateOf<List<RecentSession>>(emptyList())
     var tasks by mutableStateOf<List<WorkTask>>(emptyList())
     var chats by mutableStateOf<List<AiChat>>(emptyList())
+    /** 扩展入口：从没拿到过（老 daemon / 未登录）就是空，「扩展」整段不画；和另三张表一样，拉失败保留上次的 */
+    var verticals by mutableStateOf<List<VerticalNavItem>>(emptyList())
     var loaded by mutableStateOf(false)
 
     suspend fun refresh(client: OwnwardClient) = coroutineScope {
         val s = async { runCatching { client.recentSessions() } }
         val t = async { runCatching { client.tasks() } }
         val ch = async { runCatching { client.chatList() } }
+        val vs = async { runCatching { client.verticalNavigation() } }
         s.await().onSuccess { sessions = it }
         t.await().onSuccess { tasks = it }
         ch.await().onSuccess { chats = it }
+        vs.await().onSuccess { verticals = it }
         loaded = true
     }
 }
@@ -213,6 +225,15 @@ fun AppDrawer(
                 if (q.isEmpty()) {
                     item { DrawerNavItem(Icons.Outlined.Inbox, "收件箱", selectedKey == "inbox") { go(DrawerDest.Inbox) } }
                     item { DrawerNavItem(Icons.Outlined.SmartToy, "派新任务", selectedKey == "dispatch") { go(DrawerDest.NewTask) } }
+                    // 扩展（外部 Vertical）：没有就整段不画；搜索时也不画（搜的是任务和对话）
+                    if (data.verticals.isNotEmpty()) {
+                        item { DrawerSection(tr("扩展", "Extensions")) }
+                        items(data.verticals.size, key = { "vertical-" + data.verticals[it].id }) { i ->
+                            val v = data.verticals[i]
+                            val dest = DrawerDest.Vertical(v)
+                            DrawerNavItem(Icons.Outlined.Extension, v.label, selectedKey == dest.key(), degraded = v.degraded) { go(dest) }
+                        }
+                    }
                 }
                 if (running.isNotEmpty() || terminal.isNotEmpty()) {
                     item { DrawerSection("运行中") }
@@ -301,9 +322,9 @@ fun AppDrawer(
     }
 }
 
-/** 顶部快捷项（ChatGPT 的 图片/资料库 那排）：图标 + 文字 */
+/** 顶部快捷项（ChatGPT 的 图片/资料库 那排）：图标 + 文字；扩展入口降级运行时挂「降级」小标签 */
 @Composable
-private fun DrawerNavItem(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
+private fun DrawerNavItem(icon: ImageVector, label: String, selected: Boolean, degraded: Boolean = false, onClick: () -> Unit) {
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent,
@@ -312,7 +333,12 @@ private fun DrawerNavItem(icon: ImageVector, label: String, selected: Boolean, o
         Row(Modifier.padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, modifier = Modifier.size(22.dp))
             Spacer(Modifier.width(16.dp))
-            Text(label, style = MaterialTheme.typography.bodyLarge)
+            Text(label, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false))
+            if (degraded) {
+                Spacer(Modifier.width(8.dp))
+                DegradedTag()
+            }
         }
     }
 }

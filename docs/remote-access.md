@@ -24,6 +24,8 @@ bash install.sh
 
 首次从手机访问时，页面会要求输入 `data/secrets/api-token.txt` 中的 token；成功后换成 HttpOnly cookie。不要把带 token 的查询地址写入日志、截图或分享给别人。怀疑泄漏时，删除该文件并重新运行 `bash install.sh`，让所有客户端重新登录。
 
+iOS / Android 客户端的 API 请求走 `Authorization: Bearer`。侧边栏「扩展」用内嵌 WebView 打开扩展页面时，页面里的请求带不上 Bearer，客户端会在加载前把同一个 token 作为 HttpOnly 会话 cookie（`SameSite=Strict`，https 时加 `Secure`，不设过期）写进 WebView 的 cookie 库，令牌不会出现在 URL 里；WebView 只在本服务器同源内导航，外链交给系统浏览器。
+
 ## Nginx 反向代理
 
 先为域名配置有效 TLS 证书，再把请求代理到本机 daemon：

@@ -213,6 +213,11 @@ class OwnwardClient(private val baseUrl: String, private val token: String) {
         if (remember != null) put("remember", remember)
     })
 
+    // ---- 扩展（外部 Vertical）入口 ----
+    /** 侧边栏「扩展」：只取 navigation，客户端再校验一遍（Verticals.kt） */
+    suspend fun verticalNavigation(): List<VerticalNavItem> =
+        normalizeVerticalNavigation(get<JsonObject>("/api/system/verticals")["navigation"])
+
     // ---- 对话 ----
     suspend fun chatList(): List<AiChat> = get("/api/chat/list")
     suspend fun chatMessages(id: String): AiChat =

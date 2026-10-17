@@ -12,6 +12,7 @@ enum DrawerDest: Hashable, Sendable {
     case task(String)
     case chat(String)
     case terminal(taskId: String, ccId: String?)
+    case vertical(VerticalNavItem)
 
     /// 与 MainShell 算出的「当前页键」同一套字符串，用来高亮当前项 / 点到当前项时不重载
     var key: String {
@@ -23,6 +24,7 @@ enum DrawerDest: Hashable, Sendable {
         case .task(let id): "task:\(id)"
         case .chat(let id): "chat:\(id)"
         case .terminal(let taskId, _): "terminal:\(taskId)"
+        case .vertical(let item): "vertical:\(item.id)"
         }
     }
 }
@@ -43,21 +45,25 @@ struct DrawerMenuButton: View {
     }
 }
 
-/// 抽屉三张表，各自 try? ——一张失败不拖累其他；抽屉常驻视图树，关了再开先显旧的再刷新
+/// 抽屉四张表，各自 try? ——一张失败不拖累其他；抽屉常驻视图树，关了再开先显旧的再刷新
 @MainActor @Observable
 final class DrawerData {
     var sessions: [RecentSession] = []
     var tasks: [WorkTask] = []
     var chats: [AiChat] = []
+    /// 扩展入口：从没拿到过（老 daemon / 未登录）就是空，「扩展」整段不画；和另三张表一样，拉失败保留上次的
+    var verticals: [VerticalNavItem] = []
     var loaded = false
 
     func refresh(_ client: OwnwardClient) async {
         async let s = try? client.recentSessions()
         async let t = try? client.tasks()
         async let ch = try? client.chatList()
+        async let vs = try? client.verticalNavigation()
         if let v = await s { sessions = v }
         if let v = await t { tasks = v }
         if let v = await ch { chats = v }
+        if let v = await vs { verticals = v }
         loaded = true
     }
 }
@@ -96,6 +102,13 @@ struct AppDrawer: View {
                     if q.isEmpty {
                         navItem("tray", "收件箱", selectedKey == "inbox") { onGo(.inbox) }
                         navItem("plus.square.on.square", "派新任务", selectedKey == "dispatch") { onGo(.newTask) }
+                        // 扩展（外部 Vertical）：没有就整段不画；搜索时也不画（搜的是任务和对话）
+                        if !data.verticals.isEmpty {
+                            section(tr("扩展", "Extensions"))
+                            ForEach(data.verticals) { v in
+                                verticalItem(v, selectedKey == DrawerDest.vertical(v).key) { onGo(.vertical(v)) }
+                            }
+                        }
                     }
                     if !running.isEmpty || !terminal.isEmpty {
                         section("运行中")
@@ -218,6 +231,25 @@ struct AppDrawer: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// 扩展入口行：与快捷项同款，降级运行的挂「降级」小标签（页面多半能开，部分功能可能不可用）
+    private func verticalItem(_ v: VerticalNavItem, _ selected: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(systemName: "puzzlepiece.extension").font(.system(size: 18)).frame(width: 22)
+                Text(v.label).font(.owBody).lineLimit(1)
+                if v.degraded { DegradedTag() }
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(OW.text)
+            .padding(.horizontal, 12).padding(.vertical, 12)
+            .background(selected ? OW.surface2 : Color.clear, in: RoundedRectangle(cornerRadius: OWRadius.m))
+            .padding(.horizontal, 8).padding(.vertical, 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(v.degraded ? "\(v.label)，\(tr("降级运行", "running degraded"))" : v.label)
     }
 
     /// 被截断的尾巴：明说还有多少条、去哪找，不装作「就这些」

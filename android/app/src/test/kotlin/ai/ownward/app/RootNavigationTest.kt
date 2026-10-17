@@ -26,6 +26,7 @@ class RootNavigationTest {
         assertEquals("agent", topLevelRootForRoute("observe?id={id}&task={task}"))
         assertEquals("chat", topLevelRootForRoute("chat"))
         assertEquals("chat", topLevelRootForRoute("chatDetail?id={id}"))
+        assertEquals("inbox", topLevelRootForRoute(VERTICAL_ROUTE))   // 扩展页与设置同处收件箱一侧
     }
 
     @Test fun transientOrUnknownDestinationsDoNotOverwritePersistedRoot() {

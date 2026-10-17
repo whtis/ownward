@@ -31,7 +31,8 @@ Ownward/Core       Models（@Defaulted 缺省解码）/ OwnwardClient（Bearer�
                    轮询 / 触感 / 图片编码
 Ownward/UI         色板排版 / Markdown 解析+渲染 / 打字机流式文本 / 玻璃 composer / 权限卡 /
                    Feed（工具调用折叠规则）/ Slash（斜杠补全规则）/ Sidebar（抽屉）
-Ownward/Features   Setup / Inbox / Agent(列表+会话详情+派任务+旁观接管) / Chat(列表+对话) / Settings
+Ownward/Features   Setup / Inbox / Agent(列表+会话详情+派任务+旁观接管) / Chat(列表+对话) / Settings /
+                   Verticals（侧边栏「扩展」→ 内嵌 WKWebView 打开扩展页面，规则在 Core/Verticals.swift）
 OwnwardTests       Swift Testing 单测
 ```
 
@@ -46,7 +47,7 @@ OwnwardTests       Swift Testing 单测
 xcrun simctl launch <dev> ai.ownward.app \
   -ownward.baseURL http://127.0.0.1:4519 \   # 免去手填设置页
   -ownward.debugTab agent \                  # inbox | agent | chat
-  -ownward.debugRoute "task:<id>" \          # settings | newchat | dispatch | roles | role:<roleId> | chat:<id> | task:<id> | observe:<ccId>
+  -ownward.debugRoute "task:<id>" \          # settings | newchat | dispatch | roles | role:<roleId> | chat:<id> | task:<id> | observe:<ccId> | vertical:<href>
   -ownward.debugDrawer 1 \                   # 开着侧边栏启动（抽屉没有 URL 入口）
   -ownward.debugInput "/c" \                 # 预填会话输入框（模拟器没法脚本化打字）
   -ownward.debugRoutineDraft weekly          # 收件箱启动即打开该例行的审稿页并聚焦编辑区（看键盘避让）

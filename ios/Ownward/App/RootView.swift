@@ -9,6 +9,7 @@ enum Route: Hashable, Sendable {
     case dispatchRole(String)                       // 角色页「派任务给它」：点名角色的派发表单
     case roles                                      // 角色列表（项目 Owner / 跨项目角色 / 建议）
     case observe(ccId: String?, taskId: String?)    // 旁观外部会话 / terminal 任务
+    case vertical(VerticalNavItem)                  // 扩展页面（内嵌 WebView）
 }
 
 enum AppTab: String, Hashable { case inbox, agent, chat }
@@ -78,6 +79,8 @@ struct MainShell: View {
             case "dispatch": .dispatch
             case "roles": .roles
             case "none": nil
+            // vertical:/verticals/<id>/index.html —— 直接开扩展页（标签就用扩展 id）
+            case _ where r.hasPrefix("vertical:"): Self.debugVerticalItem(String(r.dropFirst(9))).map { .vertical($0) }
             default: r.hasPrefix("role:") ? .dispatchRole(String(r.dropFirst(5)))
                 : r.hasPrefix("chat:") ? .chat(String(r.dropFirst(5)))
                 : (r.hasPrefix("task:") ? .task(String(r.dropFirst(5)))
@@ -158,6 +161,7 @@ struct MainShell: View {
         case .settings: return "settings"
         case .dispatch, .dispatchRole: return "dispatch"
         case .roles: return "roles"
+        case .vertical(let item): return DrawerDest.vertical(item).key
         case .observe(let ccId, let taskId):
             if let taskId { return "terminal:\(taskId)" }
             return ccId.map { "observe:\($0)" }
@@ -178,6 +182,8 @@ struct MainShell: View {
         case .task(let id): tab = .agent; agentPath = [.task(id)]
         case .chat(let id): tab = .chat; chatPath = [.chat(id)]
         case .terminal(let taskId, let ccId): tab = .agent; agentPath = [.observe(ccId: ccId, taskId: taskId)]
+        // 扩展页挂在收件箱栈（与设置同处）：页面里藏 tab 栏，返回一步回收件箱
+        case .vertical(let item): tab = .inbox; inboxPath = [.vertical(item)]
         }
     }
 
@@ -194,6 +200,8 @@ struct MainShell: View {
             DispatchView(client: client, initialRole: roleId) { id in path.wrappedValue = replacingLast(path.wrappedValue, with: .task(id)) }
         case .roles:
             RolesView(client: client) { roleId in path.wrappedValue.append(.dispatchRole(roleId)) }
+        case .vertical(let item):
+            VerticalPageView(client: client, item: item)
         case .observe(let ccId, let taskId):
             // 接管成功直接进新会话续聊（旁观页出栈，back 回 Agent 列表）
             ObserveView(client: client, ccId: ccId, taskId: taskId) { id in
@@ -201,6 +209,16 @@ struct MainShell: View {
             }
         }
     }
+
+    #if DEBUG
+    private static func debugVerticalItem(_ href: String) -> VerticalNavItem? {
+        let parts = href.split(separator: "/")
+        guard parts.count >= 3, parts[0] == "verticals" else { return nil }
+        let id = String(parts[1])
+        guard safeVerticalHref(verticalId: id, href) != nil else { return nil }
+        return VerticalNavItem(verticalId: id, entryId: id, label: id, href: href, degraded: false)
+    }
+    #endif
 
     /// 用新页替换栈顶（而不是 push）：表单页/旁观页办完事就该走人，别留在返回栈里
     private func replacingLast(_ stack: [Route], with route: Route) -> [Route] {

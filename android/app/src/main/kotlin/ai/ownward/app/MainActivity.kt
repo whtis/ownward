@@ -44,6 +44,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import ai.ownward.app.data.DEFAULT_TOP_LEVEL_ROOT
 import ai.ownward.app.data.ServerConfig
+import ai.ownward.app.data.VerticalNavItem
+import ai.ownward.app.data.safeVerticalHref
 import ai.ownward.app.data.normalizeTopLevelRoot
 import ai.ownward.app.ui.AgentScreen
 import ai.ownward.app.ui.AppDrawer
@@ -61,6 +63,7 @@ import ai.ownward.app.ui.RolesScreen
 import ai.ownward.app.ui.SettingsScreen
 import ai.ownward.app.ui.SetupScreen
 import ai.ownward.app.ui.TaskDetailScreen
+import ai.ownward.app.ui.VerticalScreen
 import ai.ownward.app.ui.glassBar
 import ai.ownward.app.ui.theme.OwnwardTheme
 import kotlinx.coroutines.flow.first
@@ -102,7 +105,27 @@ internal fun topLevelRootForRoute(route: String?): String? = when (route) {
     "inbox", "settings" -> "inbox"
     "agent", "dispatch", "dispatchRole/{role}", "roles", "task/{id}", "observe?id={id}&task={task}" -> "agent"
     "chat", "chatDetail?id={id}" -> "chat"
+    VERTICAL_ROUTE -> "inbox"   // 扩展页挂在收件箱一侧（与设置同处）
     else -> null
+}
+
+/** 扩展页路由：入口的五个字段全进参数（进程重建后照样能开），读出来再按 safeVerticalHref 校验一遍 */
+internal const val VERTICAL_ROUTE = "vertical?v={v}&e={e}&label={label}&href={href}&degraded={degraded}"
+
+private fun verticalRoute(item: VerticalNavItem): String =
+    "vertical?v=${Uri.encode(item.verticalId)}&e=${Uri.encode(item.entryId)}&label=${Uri.encode(item.label)}" +
+        "&href=${Uri.encode(item.href)}&degraded=${item.degraded}"
+
+private fun verticalItemFromArgs(args: Bundle?): VerticalNavItem? {
+    val v = args?.getString("v") ?: return null
+    val href = args.getString("href")?.let { safeVerticalHref(v, it) } ?: return null
+    return VerticalNavItem(
+        verticalId = v,
+        entryId = args.getString("e") ?: v,
+        label = args.getString("label")?.takeIf { it.isNotBlank() } ?: v,
+        href = href,
+        degraded = args.getString("degraded") == "true",
+    )
 }
 
 internal fun shouldOpenNewChatOnLaunch(
@@ -158,6 +181,7 @@ private fun MainShell(
         "settings" -> "settings"
         "task/{id}" -> backStack?.arguments?.getString("id")?.let { "task:$it" }
         "chatDetail?id={id}" -> backStack?.arguments?.getString("id")?.let { "chat:$it" } ?: "chat:new"
+        VERTICAL_ROUTE -> verticalItemFromArgs(backStack?.arguments)?.let { DrawerDest.Vertical(it).key() }
         "observe?id={id}&task={task}" ->
             backStack?.arguments?.getString("task")?.let { "terminal:$it" }
                 ?: backStack?.arguments?.getString("id")?.let { "observe:$it" }
@@ -178,6 +202,7 @@ private fun MainShell(
             // 会话 id 含 "/" 和 ":"（"<hashDir>/<uuid>"、"cdx:home:id"），进路由必须编码
             is DrawerDest.Terminal ->
                 "observe?task=${dest.taskId}" + (dest.ccId?.let { "&id=${Uri.encode(it)}" } ?: "")
+            is DrawerDest.Vertical -> verticalRoute(dest.item)
         }
         // 抽屉切页不叠栈：先弹回本次启动的主区域再进新页，返回键永远一步回到该根页，
         // 否则在侧边栏里连点十个会话就攒出十层返回栈
@@ -191,6 +216,8 @@ private fun MainShell(
     CompositionLocalProvider(LocalHazeState provides hazeState, LocalDrawer provides drawer) {
         ModalNavigationDrawer(
             drawerState = drawerState,
+            // 扩展页是网页：横向拖动（如图表平移）不能被抽屉的边缘手势抢走，那里只留 ☰ / 返回
+            gesturesEnabled = drawerOpen || currentRoute != VERTICAL_ROUTE,
             drawerContent = {
                 AppDrawer(
                     client = client,
@@ -319,6 +346,11 @@ private fun MainShell(
                         }
                         composable("settings") {
                             SettingsScreen(app = app, config = config, onBack = { nav.popBackStack() })
+                        }
+                        composable(VERTICAL_ROUTE) { entry ->
+                            val item = verticalItemFromArgs(entry.arguments)
+                            if (item == null) LaunchedEffect(Unit) { nav.popBackStack() }
+                            else VerticalScreen(config = config, item = item, onBack = { nav.popBackStack() })
                         }
                     }
                     // 抽屉开着时返回键先关抽屉。必须写在 NavHost 之后：返回回调按注册顺序倒着取，
