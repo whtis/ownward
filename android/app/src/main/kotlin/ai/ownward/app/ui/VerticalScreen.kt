@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
@@ -138,6 +139,9 @@ fun VerticalScreen(config: ServerConfig, item: VerticalNavItem, onBack: () -> Un
 
     val webView = remember(generation) {
         WebView(context).apply {
+            // AndroidView 默认按 WRAP_CONTENT 挂载；WebView 遇到 wrap_content 高度会把布局视口高度当 0，
+            // 页面里的 100vh / 100dvh 全变成 0（用视口高度撑满屏幕的页面会塌成一条）。显式铺满父容器。
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true            // 扩展页自己的 localStorage 偏好
             settings.allowFileAccess = false

@@ -2,6 +2,12 @@
 
 All notable public changes to Ownward are documented here.
 
+## [1.8.1] - 2026-10-17
+
+### Fixed
+
+- Extension pages opened from the Android app's sidebar now fill the screen. The page view was attached with a content-sized height, which made the Android WebView report a viewport height of zero, so pages sized with viewport units (`100vh`, `100dvh`) collapsed: a bottom tab bar ended up under the top bar and the content area was empty.
+
 ## [1.8.0] - 2026-10-17
 
 ### Added
